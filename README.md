@@ -44,6 +44,22 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+### `humanizer` — 学术论文去 AI 痕迹工具
+
+**用途**：检测并移除学术论文中的 AI 生成写作模式，使文本读起来像经验丰富的人类研究者所写。
+
+**触发词**：`humanizer`、`去AI痕迹`、`论文润色去AI`
+
+**核心功能**：
+- **三级词汇分类**：RED（必须替换）/ YELLOW（控制频率）/ GREEN（学术白名单）
+- **IMRAD 分段感知**：针对 Abstract、Introduction、Methods、Results、Discussion 各有专项检查规则
+- **结构模式检测**：句长均匀度（burstiness）、公式化连接词、三连词组、同义词循环等 10 类 AI 特征
+- **反 AI 审计**：重写后自问"审稿人还会怀疑什么？"并修复残余问题
+
+**依赖**：无（纯 Skill prompt，无外部脚本）
+
+---
+
 ## 目录结构
 
 ```
@@ -53,11 +69,17 @@ skills/
 │   └── scripts/
 │       ├── sync.py
 │       └── update_directory.py
-└── group_meeting_recorder/
+├── group_meeting_recorder/
+│   ├── SKILL.md
+│   ├── requirements.txt
+│   └── scripts/
+│       ├── run.py
+│       ├── capture.py
+│       └── setup_environment.py
+└── humanizer/
     ├── SKILL.md
-    ├── requirements.txt
-    └── scripts/
-        ├── run.py
-        ├── capture.py
-        └── setup_environment.py
+    ├── README.md
+    ├── LICENSE
+    ├── WARP.md
+    └── consultation-notes.md
 ```
