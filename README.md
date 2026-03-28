@@ -58,6 +58,8 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 **依赖**：无（纯 Skill prompt，无外部脚本）
 
+**配套参考**：[`docs/AI写作痕迹速查表.md`](docs/AI写作痕迹速查表.md) — 从 Skill 规则中提炼的速查表，可打印自查用（不在 skill 目录内，不会随安装带入）
+
 ---
 
 ## 目录结构
@@ -82,4 +84,6 @@ skills/
     ├── LICENSE
     ├── WARP.md
     └── consultation-notes.md
+docs/
+└── AI写作痕迹速查表.md          ← humanizer 配套参考（不随 skill 安装）
 ```
