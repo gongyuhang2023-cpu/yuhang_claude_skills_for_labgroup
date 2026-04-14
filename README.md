@@ -62,6 +62,27 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+### `meeting-ppt-vba` — VBA 宏方案组会 PPT 生成器
+
+**用途**：生成完整 VBA 宏代码，在 PowerPoint 中一键执行即可生成专业科研组会 PPT。所有元素为原生 PowerPoint 对象，100% 可编辑。
+
+**触发词**：`/ppt-vba`、`生成VBA PPT`、`可编辑PPT`
+
+**核心特性**：
+- **莫兰迪配色**：低饱和高级感，7 色体系 + 双色分层原则，色盲友好
+- **ABT 叙事结构**：And（背景）→ But（问题）→ Therefore（方案），逻辑清晰
+- **AE 断言式标题**：标题即结论，非标签式（如"噬菌体 R1 裂解活性最强"而非"实验结果"）
+- **8 种幻灯片布局**：封面 / 章节 / 内容 / 双栏 / 图片 / 表格 / 结论 / 致谢
+- **自动图片插入**：从源文档提取 `![](path)` 引用，自动映射到幻灯片并插入
+- **GBK 编码自适应**：自动检测系统代码页，条件转换编码，中文不乱码
+
+**工作流**（五阶段）：
+1. 框架规划（含图片映射）→ 2. 规范审查 → 3. 图片验证 → 4. Gemini 审核 → 5. VBA 代码生成
+
+**依赖**：无（纯 VBA，只需 PowerPoint）。可选 `win32com` 实现 COM 自动化一键出 .pptx。
+
+---
+
 ## 目录结构
 
 ```
@@ -78,12 +99,26 @@ skills/
 │       ├── run.py
 │       ├── capture.py
 │       └── setup_environment.py
-└── humanizer/
+├── humanizer/
+│   ├── SKILL.md
+│   ├── README.md
+│   ├── LICENSE
+│   ├── WARP.md
+│   └── consultation-notes.md
+└── meeting-ppt-vba/
     ├── SKILL.md
-    ├── README.md
-    ├── LICENSE
-    ├── WARP.md
-    └── consultation-notes.md
+    ├── requirements.txt
+    ├── assets/
+    │   └── logo.png
+    ├── references/
+    │   ├── design_guide.md        ← 莫兰迪配色 + 排版规范
+    │   ├── vba_templates.md       ← 8 种幻灯片 VBA 模板
+    │   ├── scientific_norms.md    ← 科研格式规范（斜体/单位/P值）
+    │   └── outline_spec.md        ← JSON 大纲格式说明
+    ├── scripts/
+    │   ├── run.py
+    │   └── setup_environment.py
+    └── snapshots/                 ← 历史版本快照
 docs/
 └── AI写作痕迹速查表.md          ← humanizer 配套参考（不随 skill 安装）
 ```
