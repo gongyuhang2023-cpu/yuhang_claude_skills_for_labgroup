@@ -24,7 +24,7 @@ description: |
 这会：<一句话说明效果>
 ```
 
-**关键约束**：Claude Code 无法操作 R Console。所有 qproj 函数（`proj_create`、`use_qmd` 等）必须由用户在 RStudio/Positron 的 Console 中手动执行。
+**关键约束**：Claude Code 无法操作 R Console。所有 qproj 函数（`proj_create`、`use_qmd` 等）必须由用户在 Positron（推荐）或 RStudio 的 Console 中手动执行。
 
 ## 决策树
 
@@ -38,7 +38,7 @@ description: |
 # 步骤 1：创建项目脚手架
 qproj::proj_create("项目路径")
 
-# 步骤 2：在 RStudio/Positron 中打开该文件夹，然后执行：
+# 步骤 2：在 Positron（推荐）或 RStudio 中打开该文件夹，然后执行：
 qproj::proj_use_workflow("analyses")
 
 # 步骤 3：创建第一个分析步骤
@@ -50,6 +50,8 @@ qproj::use_qmd("01-步骤名", path_proj = "analyses", open = FALSE)
 - 如果目录已有文件，改用 `usethis::create_package(".", open = FALSE)`
 - Windows 路径用正斜杠：`"C:/Users/xxx/Desktop/project"`
 - 步骤 2 和 3 必须在打开项目后的 Console 中执行
+- `proj_use_workflow()` 会同时生成 `_quarto.yml`（含 freeze/cache/format 渲染配置）
+- **推荐 Positron**：支持多 session 隔离，避免切换 QMD 时 path 绑定污染全局环境
 
 ### 场景 1.5：初始化完成后 — 生成项目 CLAUDE.md
 
@@ -179,22 +181,30 @@ qproj::proj_check_deps()
 
 ## 快速参考
 
-### 四个路径绑定
+### 五个路径绑定
 
 | 绑定 | 类型 | 指向 | 作用 |
 |------|------|------|------|
 | `path_target` | 函数 | `data/<step>/` | 本步骤唯一写入位置 |
 | `path_source` | 函数 | `data/<prev>/` | 读上游产出（有顺序校验） |
+| `path_raw` | 字符串 | `data/00-raw/` | 原始数据总入口（一般不直接使用） |
 | `path_resource` | 字符串 | `data/00-raw/d00-resource/` | 项目共享资源 |
 | `path_data` | 字符串 | `data/00-raw/d<step>/` | 本步骤私有原始输入 |
+
+> 注：`path_target` 和 `path_source` 在 QMD 内由 setup chunk 创建，底层调用包级 API `qproj::proj_path_target()` / `qproj::proj_path_source()`。
 
 ### 核心函数
 
 | 函数 | 用途 | 何时用 |
 |------|------|--------|
 | `proj_create(path)` | 创建项目脚手架 | 从零开始时 |
-| `proj_use_workflow("analyses")` | 创建工作流目录 | 项目初始化后 |
+| `proj_use_workflow("analyses")` | 创建工作流目录 + `_quarto.yml` | 项目初始化后 |
 | `use_qmd("XX-name")` | 创建分析步骤 | 添加新步骤时 |
+| `proj_create_dir_target(name, clean)` | 创建步骤产出目录 | setup chunk 自动调用 |
+| `proj_path_target(name)` | 返回 `path_target` 函数 | setup chunk 内绑定用 |
+| `proj_path_source(name)` | 返回 `path_source` 函数 | setup chunk 内绑定用 |
+| `proj_dir_info(path)` | 列出目录文件元信息 | output chunk 展示产出 |
+| `proj_workflow_config(path_proj)` | 读取 `_qproj.yml` 渲染配置 | 自定义渲染顺序时 |
 | `proj_install_deps()` | 安装依赖 | 克隆项目后 |
 | `proj_update_deps()` | 更新 DESCRIPTION | 加了新包后 |
 | `proj_check_deps()` | 检查依赖一致性 | 提交前 |
@@ -211,6 +221,10 @@ qproj::proj_check_deps()
 - 单向链式：只能读编号比自己小的步骤产出
 - `path_data` 严格私有：下游无法通过 qproj API 访问
 - `clean = TRUE` 只清空产出目录，不动 `00-raw/` 下的原始数据
+
+### 交互模式注意事项
+
+> **RStudio 陷阱**：在 RStudio 中切换 QMD 文件时，上一个文件的 path 绑定（`path_target` 等）会残留在全局环境中，可能导致数据写入错误目录且**无任何报错**。推荐使用 **Positron**（多 session 隔离，从结构上消除此问题）或每次切文件前重启 R（`Ctrl+Shift+F10`）。
 
 ## 回答原则
 

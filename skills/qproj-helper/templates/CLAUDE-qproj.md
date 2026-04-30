@@ -40,12 +40,13 @@ IMPORTANT: All `.qmd` in `analyses/` follow qproj conventions. YOU MUST use the 
 
 **Naming**: `00-` is reserved for `data/00-raw/`. User steps start from `01-`.
 
-**Four path bindings** (created by each `.qmd`'s `setup` chunk):
+**Five path bindings** (created by each `.qmd`'s `setup` chunk via `proj_path_target()` / `proj_path_source()`):
 
 | Binding | Type | Points to | Use for |
 |---------|------|-----------|---------|
 | `path_target` | function | `data/<step>/` | Writing outputs: `saveRDS(obj, path_target("result.rds"))` |
 | `path_source` | function | `data/<prev>/` | Reading upstream: `readRDS(path_source("01-import", "x.rds"))` |
+| `path_raw` | string | `data/00-raw/` | Raw data root (rarely used directly) |
 | `path_resource` | string | `data/00-raw/d00-resource/` | Shared input: `file.path(path_resource, "ref.csv")` |
 | `path_data` | string | `data/00-raw/d<step>/` | This step's private raw input: `file.path(path_data, "raw.csv")` |
 
