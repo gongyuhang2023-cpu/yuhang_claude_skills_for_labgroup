@@ -29,10 +29,12 @@ Each step `XX-name.qmd` maps to three directories under `analyses/data/`:
 ```
 analyses/data/
 ├── XX-name/              # OUTPUT — path_target writes here (auto-cleaned when clean=TRUE)
-└── 00-raw/               # INPUT zone (never auto-cleaned)
+└── 00-raw/               # INPUT zone (never auto-cleaned) — 通过网盘同步
     ├── d00-resource/     # Shared resources — all steps can read (path_resource)
     └── dXX-name/         # Private raw input — only this step reads (path_data)
 ```
+
+**Sync strategy**: `data/00-raw/` syncs via cloud storage (OneDrive/Google Drive etc.) for team sharing; `data/[01-99]*/` stays local — each member re-renders to verify reproducibility. Large files (>1GB) or sensitive data use institutional storage instead.
 
 ## qproj Workflow Rules
 

@@ -130,6 +130,11 @@ qproj::use_qmd("XX-步骤名", path_proj = "analyses", open = FALSE)
 dir.create("analyses/data/00-raw/dXX-步骤名", recursive = TRUE)
 ```
 
+**团队共享**：`proj_use_workflow()` 已自动将 `analyses/data/*` 加入 `.gitignore`，数据不走 git。团队协作时：
+- `data/00-raw/` → 通过网盘（OneDrive/Google Drive 等）同步，确保所有人用相同原始输入
+- `data/[01-99]*/` → **不同步**，各自本地 render 重新生成，用于验证可重复性
+- 大文件（>1GB 测序数据等）或敏感数据 → 走机构存储或 rsync，不用消费级网盘
+
 ### 场景 4：怎么读取上游步骤的数据
 
 **信号**：用户问"怎么读上一步的结果"、"path_source 怎么用"。
