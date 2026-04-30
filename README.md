@@ -83,6 +83,25 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+### `qproj-helper` — qproj 工作流指导助手
+
+**用途**：指导用户使用 [qproj](https://github.com/rujinlong/qproj)（轻量级 Quarto 分析工作流脚手架）。Claude Code 无法直接操作 R Console，因此本 Skill 的核心是**分析用户所处阶段，给出可粘贴到 Console 的 R 命令**。
+
+**触发词**：`qproj`、`创建qmd`、`新建分析步骤`、`初始化分析项目`、`path_target`、`path_source`
+
+**核心功能**：
+- **7 场景决策树**：从零建项目、添加分析步骤、数据放哪、读上游数据、已有文件夹初始化、依赖管理、概念解释
+- **CLAUDE.md 模板生成**：初始化完成后，引导用户生成项目级 CLAUDE.md（含 qproj path binding 规则），通过逐板块问答完善内容
+- **qproj 速查表**：四个路径绑定、核心函数、命名约定、数据流规则
+
+**配套文件**：
+- `templates/CLAUDE-qproj.md` — 项目级 CLAUDE.md 模板（98 行），初始化时复制到项目根目录
+- `references/qproj-guide.md` — 完整使用指南（553 行），复杂问题时按需读取
+
+**依赖**：需先安装 qproj R 包（`pak::pak("rujinlong/qproj")`）
+
+---
+
 ## 目录结构
 
 ```
@@ -105,20 +124,26 @@ skills/
 │   ├── LICENSE
 │   ├── WARP.md
 │   └── consultation-notes.md
-└── meeting-ppt-vba/
-    ├── SKILL.md
-    ├── requirements.txt
-    ├── assets/
-    │   └── logo.png
-    ├── references/
-    │   ├── design_guide.md        ← 莫兰迪配色 + 排版规范
-    │   ├── vba_templates.md       ← 8 种幻灯片 VBA 模板
-    │   ├── scientific_norms.md    ← 科研格式规范（斜体/单位/P值）
-    │   └── outline_spec.md        ← JSON 大纲格式说明
-    ├── scripts/
-    │   ├── run.py
-    │   └── setup_environment.py
-    └── snapshots/                 ← 历史版本快照
+├── meeting-ppt-vba/
+│   ├── SKILL.md
+│   ├── requirements.txt
+│   ├── assets/
+│   │   └── logo.png
+│   ├── references/
+│   │   ├── design_guide.md        ← 莫兰迪配色 + 排版规范
+│   │   ├── vba_templates.md       ← 8 种幻灯片 VBA 模板
+│   │   ├── scientific_norms.md    ← 科研格式规范（斜体/单位/P值）
+│   │   └── outline_spec.md        ← JSON 大纲格式说明
+│   ├── scripts/
+│   │   ├── run.py
+│   │   └── setup_environment.py
+│   └── snapshots/                 ← 历史版本快照
+└── qproj-helper/
+    ├── SKILL.md                   ← 决策树 + 引导问题（220 行）
+    ├── templates/
+    │   └── CLAUDE-qproj.md        ← 项目级 CLAUDE.md 模板（98 行）
+    └── references/
+        └── qproj-guide.md         ← 完整使用指南（553 行，按需读取）
 docs/
 └── AI写作痕迹速查表.md          ← humanizer 配套参考（不随 skill 安装）
 ```
