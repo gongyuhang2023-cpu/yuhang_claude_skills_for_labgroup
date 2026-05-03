@@ -13,9 +13,9 @@
 
 ## 安装方式
 
-### 方式一：安装包（推荐）
+### 方式一：单文件 exe（推荐）
 
-从 [Releases](https://github.com/gongyuhang2023-cpu/yuhang_claude_skills_for_labgroup/releases) 下载 `WeeklySummary_Setup.exe`，双击安装。
+从 [Releases](https://github.com/gongyuhang2023-cpu/yuhang_claude_skills_for_labgroup/releases) 下载 `WeeklySummary.exe`，放到任意位置双击运行即可。
 
 ### 方式二：从源码运行
 
