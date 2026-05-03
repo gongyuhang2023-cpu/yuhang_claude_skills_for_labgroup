@@ -102,6 +102,27 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+## Tools 列表
+
+> `tools/` 下为独立分发的桌面工具，非 Claude Skill，直接安装使用。
+
+### `weekly-summary` — 每周工作总结生成器
+
+**用途**：从 Windows Sticky Notes 便笺中自动读取本周工作记录，调用 DeepSeek V4 Pro 生成中英文双语结构化周报。
+
+**核心特性**：
+- 自动识别活跃便笺（14 天内有更新），按项目分组
+- 忠实于便笺原文——用户写了小结就转述，没写就不加，AI 不添油加醋
+- 每周追加（不覆盖历史），Markdown 格式
+- "启动下一周"一键在便笺中写入下周日期头
+- Deep Navy 深色主题 GUI，高 DPI 支持
+
+**安装**：从 [Releases](https://github.com/gongyuhang2023-cpu/yuhang_claude_skills_for_labgroup/releases) 下载 `WeeklySummary_Setup.exe` 双击安装，或从源码运行（见 [`tools/weekly-summary/README.md`](tools/weekly-summary/README.md)）。
+
+**依赖**：DeepSeek API Key（[申请](https://platform.deepseek.com/api_keys)）
+
+---
+
 ## 目录结构
 
 ```
@@ -144,6 +165,18 @@ skills/
     │   └── CLAUDE-qproj.md        ← 项目级 CLAUDE.md 模板（98 行）
     └── references/
         └── qproj-guide.md         ← 完整使用指南（553 行，按需读取）
+tools/
+└── weekly-summary/
+    ├── README.md
+    ├── requirements.txt
+    ├── weekly_summary_gui.py      ← 主程序（customtkinter GUI）
+    ├── ai_summarizer.py           ← DeepSeek V4 Pro 双语总结
+    ├── config_manager.py          ← 配置管理（%APPDATA%）
+    ├── sticky_notes_reader.py     ← Windows 便笺读取/写入
+    ├── build.bat                  ← PyInstaller + NSIS 打包脚本
+    ├── installer.nsi              ← NSIS 安装包脚本
+    ├── icon.ico / icon.png        ← 应用图标
+    └── logo.png                   ← Deng Lab logo
 docs/
 └── AI写作痕迹速查表.md          ← humanizer 配套参考（不随 skill 安装）
 ```
