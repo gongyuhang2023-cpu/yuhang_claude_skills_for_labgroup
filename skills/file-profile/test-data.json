@@ -1,0 +1,204 @@
+{
+  "projectName": "肠道菌群递送系统研究",
+  "projectDescription": "基于纳米颗粒的肠道菌群靶向递送系统开发与评价",
+  "lastScan": "2026-04-30T15:23:00+08:00",
+  "version": "1.0",
+  "files": {
+    "README.md": {
+      "description": "项目概述与实验设计说明",
+      "tags": ["文档"],
+      "size": 4096,
+      "modified": "2026-04-01T09:00:00"
+    },
+    "CLAUDE.md": {
+      "description": "Claude Code 项目级配置与上下文",
+      "tags": ["文档", "配置"],
+      "size": 2048,
+      "modified": "2026-04-15T14:30:00"
+    },
+    "scripts/01_clean_16S.R": {
+      "description": "清洗 16S 原始测序数据，过滤低质量序列和嵌合体",
+      "tags": ["脚本", "质控"],
+      "size": 8320,
+      "modified": "2026-04-10T11:20:00",
+      "produces": ["data/processed/cleaned_phyloseq.rds"],
+      "depends_on": ["data/raw/16S_sequences.fastq.gz", "data/raw/sample_metadata.csv"]
+    },
+    "scripts/02_diversity.R": {
+      "description": "计算 alpha/beta 多样性指数并生成可视化",
+      "tags": ["脚本", "分析"],
+      "size": 6144,
+      "modified": "2026-04-12T16:45:00",
+      "produces": ["figures/fig_01_alpha.png", "figures/fig_02_beta_pcoa.png", "data/processed/diversity_results.rds"],
+      "depends_on": ["data/processed/cleaned_phyloseq.rds"]
+    },
+    "scripts/03_diff_abundance.R": {
+      "description": "使用 ANCOM-BC2 进行差异丰度分析",
+      "tags": ["脚本", "分析", "统计"],
+      "size": 12288,
+      "modified": "2026-04-18T09:15:00",
+      "produces": ["data/processed/ancombc_results.rds", "figures/fig_03_volcano.png"],
+      "depends_on": ["data/processed/cleaned_phyloseq.rds"]
+    },
+    "scripts/04_network.R": {
+      "description": "构建微生物共现网络并计算网络拓扑指标",
+      "tags": ["脚本", "网络分析"],
+      "size": 9500,
+      "modified": "2026-04-22T13:00:00",
+      "produces": ["figures/fig_04_network.png", "data/processed/network_metrics.csv"],
+      "depends_on": ["data/processed/cleaned_phyloseq.rds"]
+    },
+    "scripts/utils/theme_pub.R": {
+      "description": "Nature 风格 ggplot2 主题函数和配色方案",
+      "tags": ["脚本", "工具函数"],
+      "size": 3200,
+      "modified": "2026-03-28T10:00:00"
+    },
+    "scripts/utils/helper_functions.R": {
+      "description": "通用辅助函数：数据转换、格式化、统计检验包装器",
+      "tags": ["脚本", "工具函数"],
+      "size": 5600,
+      "modified": "2026-04-05T15:30:00"
+    },
+    "data/raw/16S_sequences.fastq.gz": {
+      "description": "Illumina MiSeq 16S rRNA V3-V4 区原始测序数据",
+      "tags": ["原始数据", "测序"],
+      "size": 524288000,
+      "modified": "2026-03-15T08:00:00"
+    },
+    "data/raw/sample_metadata.csv": {
+      "description": "样本元数据：分组、时间点、动物ID、处理条件",
+      "tags": ["原始数据", "元数据"],
+      "size": 15360,
+      "modified": "2026-03-15T08:30:00"
+    },
+    "data/raw/nanoparticle_characterization.xlsx": {
+      "description": "纳米颗粒表征数据：粒径、Zeta电位、包封率",
+      "tags": ["原始数据", "表征"],
+      "size": 45056,
+      "modified": "2026-03-20T14:00:00"
+    },
+    "data/processed/cleaned_phyloseq.rds": {
+      "description": "质控后的 phyloseq 对象，含 OTU 表、分类信息和样本数据",
+      "tags": ["中间数据"],
+      "size": 8388608,
+      "modified": "2026-04-10T12:00:00"
+    },
+    "data/processed/diversity_results.rds": {
+      "description": "alpha/beta 多样性分析结果汇总",
+      "tags": ["中间数据", "分析结果"],
+      "size": 1048576,
+      "modified": "2026-04-12T17:00:00"
+    },
+    "data/processed/ancombc_results.rds": {
+      "description": "ANCOM-BC2 差异丰度分析结果",
+      "tags": ["中间数据", "分析结果"],
+      "size": 2097152,
+      "modified": "2026-04-18T10:00:00"
+    },
+    "data/processed/network_metrics.csv": {
+      "description": "网络拓扑指标：度中心性、介数中心性、模块归属",
+      "tags": ["分析结果"],
+      "size": 32768,
+      "modified": "2026-04-22T14:00:00"
+    },
+    "figures/fig_01_alpha.png": {
+      "description": "Alpha 多样性箱线图：Shannon、Simpson、Observed 指数",
+      "tags": ["图表"],
+      "size": 245760,
+      "modified": "2026-04-12T17:10:00"
+    },
+    "figures/fig_02_beta_pcoa.png": {
+      "description": "PCoA 排序图：基于 Bray-Curtis 距离的样本聚类",
+      "tags": ["图表"],
+      "size": 327680,
+      "modified": "2026-04-12T17:15:00"
+    },
+    "figures/fig_03_volcano.png": {
+      "description": "火山图：差异丰度 OTU 的效应量与显著性",
+      "tags": ["图表"],
+      "size": 204800,
+      "modified": "2026-04-18T10:30:00"
+    },
+    "figures/fig_04_network.png": {
+      "description": "微生物共现网络图：节点为 OTU，边为显著相关",
+      "tags": ["图表", "网络分析"],
+      "size": 512000,
+      "modified": "2026-04-22T14:30:00"
+    },
+    "docs/experiment_protocol.md": {
+      "description": "动物实验方案：分组设计、给药方案、采样时间表",
+      "tags": ["文档", "实验方案"],
+      "size": 12800,
+      "modified": "2026-03-10T16:00:00"
+    },
+    "docs/analysis_plan.md": {
+      "description": "数据分析计划：预注册的统计方法和分析流程",
+      "tags": ["文档", "分析"],
+      "size": 8960,
+      "modified": "2026-03-12T11:00:00"
+    },
+    "docs/nanoparticle_synthesis.md": {
+      "description": "纳米颗粒合成与表征实验操作规程",
+      "tags": ["文档", "实验方案"],
+      "size": 6400,
+      "modified": "2026-03-08T09:00:00"
+    },
+    "config/qiime2_params.yaml": {
+      "description": "QIIME2 分析流程参数配置",
+      "tags": ["配置"],
+      "size": 1024,
+      "modified": "2026-03-25T10:00:00"
+    },
+    "config/r_environment.yaml": {
+      "description": "R 包版本锁定和环境配置",
+      "tags": ["配置"],
+      "size": 2048,
+      "modified": "2026-04-01T08:00:00"
+    },
+    "references/key_papers.bib": {
+      "description": "核心参考文献 BibTeX 数据库",
+      "tags": ["参考文献"],
+      "size": 25600,
+      "modified": "2026-04-25T16:00:00"
+    }
+  },
+  "folders": {
+    "scripts": {
+      "description": "R 分析脚本，按执行顺序编号",
+      "tags": ["脚本"]
+    },
+    "scripts/utils": {
+      "description": "可复用的辅助函数和主题定义",
+      "tags": ["脚本", "工具函数"]
+    },
+    "data": {
+      "description": "所有数据文件的顶层目录",
+      "tags": ["数据"]
+    },
+    "data/raw": {
+      "description": "不可修改的原始实验数据",
+      "tags": ["原始数据"]
+    },
+    "data/processed": {
+      "description": "脚本处理后的中间和结果数据",
+      "tags": ["中间数据"]
+    },
+    "figures": {
+      "description": "分析脚本生成的可视化图表",
+      "tags": ["图表"]
+    },
+    "docs": {
+      "description": "实验方案、分析计划等项目文档",
+      "tags": ["文档"]
+    },
+    "config": {
+      "description": "工具和环境配置文件",
+      "tags": ["配置"]
+    },
+    "references": {
+      "description": "参考文献和外部资料",
+      "tags": ["参考资料"]
+    }
+  }
+}

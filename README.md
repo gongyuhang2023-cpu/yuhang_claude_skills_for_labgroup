@@ -83,6 +83,30 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+### `file-profile` — 项目文件画像工具
+
+**用途**：扫描当前项目文件夹，为每个文件和文件夹自动生成一句话描述（说明其在项目中的用途），存入结构化 JSON，并生成可双击打开的可视化查看器。
+
+**触发词**：`扫描项目`、`文件简介`、`file profile`、`更新文件描述`
+
+**核心功能**：
+- **增量快照对比**：基于文件大小和修改时间检测新增/修改/删除，避免重复扫描
+- **AI 智能描述**：Claude 读取文件内容和项目上下文，生成"做什么"而非"是什么"的描述
+- **自动分类打标**：根据扩展名、文件夹名、文件名模式自动分配标签
+- **依赖关系追踪**：记录文件间的 `produces` / `depends_on` 关系
+- **可视化查看器**：macOS Finder 风格的列式浏览器（自包含 HTML），支持编辑描述、管理标签、键盘导航
+- **Windows 快捷方式**：项目根目录生成 `文件画像.url`，双击即可打开查看器
+- **批量归类**：对整个文件夹批量应用标签和描述模板
+
+**工作流**：
+1. 初始化 `.project-meta/` 目录和排除规则
+2. 快照扫描 → 对比变更 → Claude 生成描述 → 写入 `descriptions.json`
+3. 自动生成 `launch_viewer.html` + `文件画像.url` 快捷方式
+
+**依赖**：Python 3.10+（标准库即可，无第三方依赖）
+
+---
+
 ### `qproj-helper` — qproj 工作流指导助手
 
 **用途**：指导用户使用 [qproj](https://github.com/rujinlong/qproj)（轻量级 Quarto 分析工作流脚手架）。Claude Code 无法直接操作 R Console，因此本 Skill 的核心是**分析用户所处阶段，给出可粘贴到 Console 的 R 命令**。
@@ -127,6 +151,17 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ```
 skills/
+├── file-profile/
+│   ├── SKILL.md                   ← 完整执行流程（6 步）
+│   ├── viewer.html                ← 可视化查看器（列式浏览器）
+│   ├── test-data.json             ← 示例 descriptions.json
+│   ├── scripts/
+│   │   ├── snapshot_tool.py       ← 文件快照扫描与变更检测
+│   │   ├── meta_updater.py        ← descriptions.json 增量更新
+│   │   └── generate_launcher.py   ← 生成自包含 HTML + .url 快捷方式
+│   └── references/
+│       ├── exclude_patterns.md    ← 默认排除规则模板
+│       └── category_rules.md      ← 自动分类标签规则
 ├── git-auto-sync/
 │   ├── SKILL.md
 │   └── scripts/

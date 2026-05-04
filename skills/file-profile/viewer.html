@@ -1,0 +1,1789 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>项目文件画像</title>
+<style>
+:root {
+  --bg: #f5f4f0;
+  --surface: #ffffff;
+  --surface-alt: #fafaf7;
+  --border: #e4e2dc;
+  --border-light: #edece8;
+  --text: #1a1917;
+  --text-secondary: #6d6b65;
+  --text-tertiary: #9c9a94;
+  --primary: #007aff;
+  --primary-dark: #0062cc;
+  --primary-glow: rgba(0,122,255,0.18);
+  --danger: #e5484d;
+  --column-width: 240px;
+  --detail-width: 340px;
+  --header-height: 72px;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.07);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.12);
+  --font-sans: "Segoe UI Variable","Microsoft YaHei UI","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+  --font-mono: "Cascadia Code","Fira Code","Consolas","Microsoft YaHei UI",monospace;
+  --transition: 180ms cubic-bezier(0.25,0.1,0.25,1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c8c6c0; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #a8a6a0; }
+
+.hidden { display: none !important; }
+
+/* ═══ FILE PICKER OVERLAY ═══ */
+#overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(26,25,23,0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: overlayIn 400ms ease-out;
+}
+@keyframes overlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.picker-card {
+  background: var(--surface);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(0,0,0,0.06);
+  padding: 48px 56px;
+  text-align: center;
+  max-width: 440px;
+  width: 90%;
+  animation: cardIn 500ms cubic-bezier(0.16,1,0.3,1);
+}
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(24px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.picker-icon {
+  font-size: 52px;
+  margin-bottom: 20px;
+  display: block;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+}
+
+.picker-card h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.picker-card p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 28px;
+  line-height: 1.5;
+}
+
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 32px 24px;
+  cursor: pointer;
+  transition: var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+.drop-zone::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: var(--primary-glow);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.drop-zone:hover, .drop-zone.drag-over {
+  border-color: var(--primary);
+}
+.drop-zone:hover::before, .drop-zone.drag-over::before {
+  opacity: 1;
+}
+
+.drop-zone-text {
+  position: relative; z-index: 1;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.drop-zone-text strong {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.file-input { display: none; }
+
+.picker-hint {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ═══ APP LAYOUT ═══ */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ═══ HEADER ═══ */
+#header {
+  height: var(--header-height);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 16px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.header-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.header-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-stats {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border-light);
+  border-radius: 20px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.stat-pill .stat-num {
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.btn-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.btn-change:hover {
+  background: var(--border-light);
+  color: var(--text);
+}
+
+/* ═══ BREADCRUMB ═══ */
+#breadcrumb {
+  height: 32px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.crumb {
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: color var(--transition);
+  flex-shrink: 0;
+}
+.crumb:hover { color: var(--primary); }
+.crumb.current {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+}
+.crumb-sep {
+  color: var(--border);
+  font-size: 10px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* ═══ MAIN CONTENT ═══ */
+#main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ═══ COLUMNS CONTAINER ═══ */
+#columns {
+  flex: 1;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+}
+
+.column {
+  min-width: var(--column-width);
+  max-width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-light);
+  transition: box-shadow 200ms ease;
+}
+.column.entering {
+  animation: colSlideIn 200ms cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes colSlideIn {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.column.active {
+  box-shadow: inset 0 3px 0 0 var(--primary);
+}
+
+.col-header {
+  padding: 8px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background 200ms ease, color 200ms ease;
+}
+.column.active .col-header {
+  color: var(--primary-dark);
+  background: rgba(0,122,255,0.04);
+}
+.col-count {
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.col-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+/* ═══ COLUMN ITEMS ═══ */
+.item {
+  display: flex;
+  align-items: center;
+  padding: 7px 14px;
+  gap: 8px;
+  cursor: pointer;
+  transition: background var(--transition);
+  border-radius: 6px;
+  margin: 1px 6px;
+}
+.item:hover {
+  background: #f0efeb;
+}
+.item.selected {
+  background: var(--primary);
+  color: #fff;
+}
+.item.selected .item-chevron { color: rgba(255,255,255,0.7); }
+.item.selected .item-meta { color: rgba(255,255,255,0.65); }
+
+.item-icon {
+  font-size: 16px;
+  width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.item-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.item-chevron {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  flex-shrink: 0;
+  transition: color var(--transition);
+}
+
+.col-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* ═══ DETAIL PANEL ═══ */
+#detail {
+  width: var(--detail-width);
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface-alt);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  text-align: center;
+  padding: 32px;
+  line-height: 1.6;
+}
+
+.detail-head {
+  padding: 24px 24px 20px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.detail-icon-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.detail-icon-name .d-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+.detail-icon-name .d-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  word-break: break-word;
+}
+
+.detail-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.detail-section {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.detail-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+
+.detail-desc {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 8px;
+  margin: -6px -8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.detail-desc:hover {
+  background: rgba(0,122,255,0.04);
+  border-color: var(--border-light);
+}
+.detail-desc-edit {
+  width: 100%;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+  font-family: inherit;
+  padding: 6px 8px;
+  margin: -6px -8px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--primary);
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+  background: #fff;
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.detail-desc-hint {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+.btn-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  background: var(--primary);
+  border: 1px solid var(--primary-dark);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: #fff;
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.btn-save:hover { background: var(--primary-dark); }
+.btn-save.hidden { display: none; }
+.edit-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: rgba(229,72,77,0.1);
+  color: var(--danger);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.edit-count.hidden { display: none; }
+
+/* ═══ TAG MANAGER ═══ */
+.fab-tags {
+  position: fixed;
+  bottom: 24px;
+  left: 24px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--text);
+  color: #fff;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform 150ms ease, background 150ms ease;
+  z-index: 100;
+  display: none;
+}
+.fab-tags:hover { transform: scale(1.08); background: #333; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 200;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 120ms ease;
+}
+.modal-backdrop.open { display: flex; }
+@keyframes fadeIn { from { opacity: 0; } }
+
+.tag-modal {
+  background: var(--surface);
+  border-radius: 14px;
+  width: 440px;
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  animation: modalSlide 200ms cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes modalSlide { from { opacity: 0; transform: translateY(12px) scale(0.97); } }
+
+.tag-modal-header {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tag-modal-header h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+.tag-modal-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface-alt);
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+}
+.tag-modal-close:hover { background: var(--border-light); color: var(--text); }
+
+.tag-modal-add {
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  gap: 8px;
+}
+.tag-modal-add input {
+  flex: 1;
+  padding: 7px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 150ms ease;
+}
+.tag-modal-add input:focus { border-color: var(--primary); }
+.tag-modal-add button {
+  padding: 7px 16px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms ease;
+}
+.tag-modal-add button:hover { background: var(--primary-dark); }
+
+.tag-modal-body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 8px 0;
+}
+
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 22px;
+  transition: background 100ms ease;
+}
+.tag-row:hover { background: var(--surface-alt); }
+
+.tag-row .tag-preview {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+.tag-row-name {
+  flex: 1;
+  min-width: 0;
+}
+.tag-row-name input {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1.5px solid transparent;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: inherit;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.tag-row-name input:hover { background: rgba(0,0,0,0.03); }
+.tag-row-name input:focus { border-color: var(--primary); background: #fff; }
+.tag-row-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.tag-row-del {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+.tag-row-del:hover { background: rgba(229,72,77,0.1); color: var(--danger); }
+
+.tag-modal-footer {
+  padding: 12px 22px;
+  border-top: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* detail panel: tag editing */
+.detail-tags-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.tag-removable {
+  cursor: pointer;
+  position: relative;
+  transition: opacity 150ms ease;
+}
+.tag-removable:hover { opacity: 0.7; }
+.tag-removable::after {
+  content: '×';
+  position: absolute;
+  top: -5px;
+  right: -3px;
+  width: 14px;
+  height: 14px;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.tag-removable:hover::after { opacity: 1; }
+.tag-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1.5px dashed var(--border);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--transition);
+}
+.tag-add-btn:hover { border-color: var(--primary); color: var(--primary); }
+.tag-add-dropdown {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 50;
+  min-width: 120px;
+}
+.tag-add-dropdown .dd-item {
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+.tag-add-dropdown .dd-item:hover { background: var(--primary-glow); }
+.tag-add-dropdown .dd-empty {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  border: 1px solid transparent;
+}
+
+.detail-meta-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  font-size: 12px;
+}
+.meta-key {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+.meta-val {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.meta-val.mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dep-list {
+  list-style: none;
+}
+.dep-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin: 3px 0;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  transition: var(--transition);
+  cursor: default;
+  word-break: break-all;
+}
+.dep-item.clickable {
+  cursor: pointer;
+}
+.dep-item.clickable:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(0,122,255,0.04);
+}
+.dep-arrow {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.dep-missing {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  font-family: var(--font-sans);
+}
+
+.detail-children-count {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+</style>
+</head>
+<body>
+
+<!-- FILE PICKER OVERLAY -->
+<div id="overlay">
+  <div class="picker-card">
+    <span class="picker-icon">🗂️</span>
+    <h1>项目文件画像</h1>
+    <p>选择项目的 <strong>descriptions.json</strong> 文件<br>以可视化浏览文件结构与描述</p>
+    <div class="drop-zone" id="dropZone">
+      <input type="file" accept=".json" class="file-input" id="fileInput">
+      <div class="drop-zone-text">
+        将文件拖放到此处，或 <strong>点击选择</strong>
+      </div>
+    </div>
+    <div class="picker-hint">文件位于项目的 .project-meta/ 目录下</div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" class="hidden">
+  <header id="header">
+    <div class="header-info">
+      <div class="header-title" id="hTitle">项目名称</div>
+      <div class="header-desc" id="hDesc"></div>
+    </div>
+    <div class="header-stats" id="hStats"></div>
+    <span class="edit-count hidden" id="editCount"></span>
+    <button class="btn-save hidden" id="btnSave">💾 保存文件</button>
+    <button class="btn-change" id="btnChange">📂 更换文件</button>
+  </header>
+
+  <nav id="breadcrumb">
+    <span class="crumb current">根目录</span>
+  </nav>
+
+  <div id="main">
+    <div id="columns"></div>
+    <aside id="detail">
+      <div class="detail-empty">选择文件或文件夹<br>以查看详细信息</div>
+    </aside>
+  </div>
+</div>
+
+<button class="fab-tags" id="fabTags" title="标签管理">🏷</button>
+
+<div class="modal-backdrop" id="tagModal">
+  <div class="tag-modal">
+    <div class="tag-modal-header">
+      <h3>标签管理</h3>
+      <button class="tag-modal-close" id="tagModalClose">×</button>
+    </div>
+    <div class="tag-modal-add">
+      <input type="text" id="newTagInput" placeholder="输入新标签名称…">
+      <button id="newTagBtn">＋ 新增</button>
+    </div>
+    <div class="tag-modal-body" id="tagList"></div>
+    <div class="tag-modal-footer">修改标签名或删除标签会影响所有使用该标签的文件</div>
+  </div>
+</div>
+
+<script>
+/* ═══ CONSTANTS ═══ */
+const ICONS = {
+  '.r':'.R','.R':'📊','.py':'🐍','.sh':'⚙️','.bash':'⚙️',
+  '.csv':'📋','.tsv':'📋','.xlsx':'📋','.xls':'📋',
+  '.fastq':'🧬','.fasta':'🧬','.fastq.gz':'🧬','.fq.gz':'🧬','.bam':'🧬','.sam':'🧬','.vcf':'🧬',
+  '.rds':'💾','.RData':'💾','.rdata':'💾','.h5':'💾','.hdf5':'💾','.h5ad':'💾',
+  '.png':'🖼️','.jpg':'🖼️','.jpeg':'🖼️','.tiff':'🖼️','.tif':'🖼️','.svg':'🎨','.gif':'🖼️',
+  '.pdf':'📕','.doc':'📝','.docx':'📝','.pptx':'📊',
+  '.md':'📝','.txt':'📝','.rst':'📝',
+  '.qmd':'📓','.Rmd':'📓','.rmd':'📓','.ipynb':'📓',
+  '.yaml':'🔧','.yml':'🔧','.json':'🔧','.toml':'🔧','.ini':'🔧',
+  '.html':'🌐','.css':'🌐','.js':'🌐','.ts':'🌐','.tsx':'🌐','.jsx':'🌐',
+  '.bib':'📚','.ris':'📚','.enw':'📚',
+  '.zip':'📦','.tar':'📦','.gz':'📦','.7z':'📦','.rar':'📦',
+  '.log':'📜','.out':'📜','.err':'📜',
+};
+ICONS['.r'] = '📊';
+const FOLDER_ICON = '📁';
+const DEFAULT_ICON = '📄';
+
+/* ═══ STATE ═══ */
+const state = { tree: null, columns: [], selectedItem: null, raw: null, activeColIdx: -1 };
+const DEPTH_BG = ['#ffffff','#fdfcfa','#faf9f6','#f8f6f3','#f5f4f0','#f3f2ee'];
+let dirtyCount = 0;
+
+function markDirty(delta) {
+  dirtyCount += delta;
+  const btn = document.getElementById('btnSave');
+  const badge = document.getElementById('editCount');
+  if (dirtyCount > 0) {
+    btn.classList.remove('hidden');
+    badge.classList.remove('hidden');
+    badge.textContent = `${dirtyCount} 处修改`;
+  } else {
+    btn.classList.add('hidden');
+    badge.classList.add('hidden');
+  }
+}
+
+function applyDescriptionEdit(node, newDesc) {
+  if (!node || !node.meta) return;
+  const oldDesc = node.meta.description || '';
+  if (newDesc === oldDesc) return;
+  node.meta.description = newDesc;
+  const rawKey = node.path;
+  if (rawKey) {
+    const bucket = node.type === 'folder' ? state.raw.folders : state.raw.files;
+    if (bucket && bucket[rawKey]) {
+      bucket[rawKey].description = newDesc;
+    }
+  }
+  markDirty(1);
+  refreshColumnItemMeta(node);
+}
+
+function refreshColumnItemMeta(node) {
+  const container = document.getElementById('columns');
+  container.querySelectorAll('.item').forEach(item => {
+    if (item.dataset.name === node.name) {
+      const metaEl = item.querySelector('.item-meta');
+      if (metaEl) {
+        metaEl.textContent = node.meta.description || '';
+      } else if (node.meta.description) {
+        const div = document.createElement('div');
+        div.className = 'item-meta';
+        div.textContent = node.meta.description;
+        item.querySelector('.item-info').appendChild(div);
+      }
+    }
+  });
+}
+
+function saveFile() {
+  if (!state.raw) return;
+  const json = JSON.stringify(state.raw, null, 2);
+  const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'descriptions.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  dirtyCount = 0;
+  markDirty(0);
+}
+
+/* ═══ TAG MANAGEMENT ═══ */
+const tagRegistry = new Set();
+
+function rebuildTagRegistry() {
+  tagRegistry.clear();
+  if (!state.raw) return;
+  for (const v of Object.values(state.raw.files || {})) {
+    (v.tags || []).forEach(t => tagRegistry.add(t));
+  }
+  for (const v of Object.values(state.raw.folders || {})) {
+    (v.tags || []).forEach(t => tagRegistry.add(t));
+  }
+}
+
+function getTagCounts() {
+  const counts = {};
+  tagRegistry.forEach(t => { counts[t] = 0; });
+  const scan = (bucket) => {
+    for (const v of Object.values(bucket || {})) {
+      (v.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; });
+    }
+  };
+  scan(state.raw.files);
+  scan(state.raw.folders);
+  return counts;
+}
+
+function walkTree(node, fn) {
+  fn(node);
+  if (node.children) node.children.forEach(child => walkTree(child, fn));
+}
+
+function renameTagGlobal(oldName, newName) {
+  if (!newName || newName === oldName) return;
+  if (tagRegistry.has(newName)) {
+    alert(`标签 "${newName}" 已存在，无法重命名。`);
+    return false;
+  }
+  const replace = (bucket) => {
+    for (const v of Object.values(bucket || {})) {
+      if (!v.tags) continue;
+      const idx = v.tags.indexOf(oldName);
+      if (idx !== -1) v.tags[idx] = newName;
+    }
+  };
+  replace(state.raw.files);
+  replace(state.raw.folders);
+  walkTree(state.tree, (node) => {
+    if (!node.meta || !node.meta.tags) return;
+    const idx = node.meta.tags.indexOf(oldName);
+    if (idx !== -1) node.meta.tags[idx] = newName;
+  });
+  tagRegistry.delete(oldName);
+  tagRegistry.add(newName);
+  markDirty(1);
+  renderDetail();
+  return true;
+}
+
+function deleteTagGlobal(tagName) {
+  const remove = (bucket) => {
+    for (const v of Object.values(bucket || {})) {
+      if (!v.tags) continue;
+      const idx = v.tags.indexOf(tagName);
+      if (idx !== -1) v.tags.splice(idx, 1);
+    }
+  };
+  remove(state.raw.files);
+  remove(state.raw.folders);
+  walkTree(state.tree, (node) => {
+    if (!node.meta || !node.meta.tags) return;
+    const idx = node.meta.tags.indexOf(tagName);
+    if (idx !== -1) node.meta.tags.splice(idx, 1);
+  });
+  tagRegistry.delete(tagName);
+  markDirty(1);
+  renderDetail();
+}
+
+function addTagToRegistry(name) {
+  if (!name || tagRegistry.has(name)) return false;
+  tagRegistry.add(name);
+  return true;
+}
+
+function addTagToNode(node, tagName) {
+  if (!node.meta) node.meta = {};
+  if (!node.meta.tags) node.meta.tags = [];
+  if (node.meta.tags.includes(tagName)) return;
+  node.meta.tags.push(tagName);
+  const rawKey = node.path;
+  if (rawKey) {
+    const bucket = node.type === 'folder' ? state.raw.folders : state.raw.files;
+    if (bucket && bucket[rawKey]) {
+      if (!bucket[rawKey].tags) bucket[rawKey].tags = [];
+      bucket[rawKey].tags.push(tagName);
+    }
+  }
+  markDirty(1);
+}
+
+function removeTagFromNode(node, tagName) {
+  if (!node.meta || !node.meta.tags) return;
+  const idx = node.meta.tags.indexOf(tagName);
+  if (idx === -1) return;
+  node.meta.tags.splice(idx, 1);
+  const rawKey = node.path;
+  if (rawKey) {
+    const bucket = node.type === 'folder' ? state.raw.folders : state.raw.files;
+    if (bucket && bucket[rawKey] && bucket[rawKey].tags) {
+      const ri = bucket[rawKey].tags.indexOf(tagName);
+      if (ri !== -1) bucket[rawKey].tags.splice(ri, 1);
+    }
+  }
+  markDirty(1);
+}
+
+function renderTagModal() {
+  const list = document.getElementById('tagList');
+  const counts = getTagCounts();
+  const sorted = Array.from(tagRegistry).sort((a, b) => a.localeCompare(b, 'zh'));
+
+  if (sorted.length === 0) {
+    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-tertiary)">暂无标签</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  sorted.forEach(tag => {
+    const c = tagColor(tag);
+    const row = document.createElement('div');
+    row.className = 'tag-row';
+
+    const preview = document.createElement('span');
+    preview.className = 'tag-preview';
+    preview.style.background = c.bg;
+    preview.style.color = c.fg;
+    preview.style.borderColor = c.border;
+    preview.textContent = tag;
+
+    const nameWrap = document.createElement('div');
+    nameWrap.className = 'tag-row-name';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = tag;
+    let lastVal = tag;
+    const doRename = () => {
+      const nv = input.value.trim();
+      if (!nv) { input.value = lastVal; return; }
+      if (nv !== lastVal) {
+        if (renameTagGlobal(lastVal, nv)) {
+          lastVal = nv;
+          const nc = tagColor(nv);
+          preview.style.background = nc.bg;
+          preview.style.color = nc.fg;
+          preview.style.borderColor = nc.border;
+          preview.textContent = nv;
+          count.textContent = `${counts[nv] || getTagCounts()[nv] || 0} 项`;
+        } else {
+          input.value = lastVal;
+        }
+      }
+    };
+    input.addEventListener('blur', doRename);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      if (e.key === 'Escape') { input.value = lastVal; input.blur(); }
+    });
+    nameWrap.appendChild(input);
+
+    const count = document.createElement('span');
+    count.className = 'tag-row-count';
+    count.textContent = `${counts[tag] || 0} 项`;
+
+    const del = document.createElement('button');
+    del.className = 'tag-row-del';
+    del.textContent = '✕';
+    del.title = '删除此标签';
+    del.addEventListener('click', () => {
+      if (!confirm(`确定删除标签 "${input.value}"？所有使用该标签的文件都会被移除此标签。`)) return;
+      deleteTagGlobal(input.value);
+      renderTagModal();
+    });
+
+    row.append(preview, nameWrap, count, del);
+    list.appendChild(row);
+  });
+}
+
+/* ═══ UTILITIES ═══ */
+function getIcon(name, isFolder) {
+  if (isFolder) return FOLDER_ICON;
+  const lower = name.toLowerCase();
+  for (const ext of ['.fastq.gz','.fq.gz']) {
+    if (lower.endsWith(ext)) return ICONS[ext] || DEFAULT_ICON;
+  }
+  const dot = lower.lastIndexOf('.');
+  if (dot >= 0) {
+    const ext = lower.slice(dot);
+    if (ICONS[ext]) return ICONS[ext];
+    const orig = name.slice(name.lastIndexOf('.'));
+    if (ICONS[orig]) return ICONS[orig];
+  }
+  return DEFAULT_ICON;
+}
+
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return Math.abs(h);
+}
+
+function tagColor(tag) {
+  const h = hashStr(tag) % 360;
+  return {
+    bg: `hsla(${h},50%,52%,0.10)`,
+    fg: `hsl(${h},45%,38%)`,
+    border: `hsla(${h},45%,50%,0.18)`
+  };
+}
+
+function fmtSize(bytes) {
+  if (bytes == null) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'})
+      + ' ' + d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  } catch { return iso; }
+}
+
+/* ═══ TREE BUILDING ═══ */
+function makeNode(name, path, type, meta) {
+  return { name, path, type, meta: meta || { description:'', tags:[] }, children: type === 'folder' ? new Map() : null };
+}
+
+function ensureFolders(root, segments) {
+  let cur = root, p = '';
+  for (const seg of segments) {
+    p = p ? p + '/' + seg : seg;
+    if (!cur.children.has(seg)) cur.children.set(seg, makeNode(seg, p, 'folder'));
+    cur = cur.children.get(seg);
+  }
+  return cur;
+}
+
+function buildTree(data) {
+  const root = makeNode(data.projectName || '项目', '', 'folder', { description: data.projectDescription || '', tags: [] });
+
+  if (data.folders) {
+    for (const [fp, meta] of Object.entries(data.folders)) {
+      const segs = fp.replace(/\\/g, '/').split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const node = ensureFolders(root, segs);
+      Object.assign(node.meta, meta);
+    }
+  }
+
+  if (data.files) {
+    for (const [fp, meta] of Object.entries(data.files)) {
+      const segs = fp.replace(/\\/g, '/').split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const parent = segs.length > 1 ? ensureFolders(root, segs.slice(0, -1)) : root;
+      const fname = segs[segs.length - 1];
+      parent.children.set(fname, makeNode(fname, segs.join('/'), 'file', meta));
+    }
+  }
+  return root;
+}
+
+function sortedChildren(node) {
+  if (!node.children) return [];
+  const arr = Array.from(node.children.values());
+  const folders = arr.filter(c => c.type === 'folder').sort((a,b) => a.name.localeCompare(b.name,'zh-CN'));
+  const files = arr.filter(c => c.type === 'file').sort((a,b) => a.name.localeCompare(b.name,'zh-CN'));
+  return [...folders, ...files];
+}
+
+function findNode(path) {
+  if (!path || !state.tree) return null;
+  const segs = path.replace(/\\/g, '/').split('/').filter(Boolean);
+  let cur = state.tree;
+  for (const seg of segs) {
+    if (!cur.children || !cur.children.has(seg)) return null;
+    cur = cur.children.get(seg);
+  }
+  return cur;
+}
+
+/* ═══ FILE LOADING ═══ */
+function loadData(data) {
+  if (!data.files && !data.folders) throw new Error('无效格式');
+  state.raw = data;
+  state.tree = buildTree(data);
+  state.columns = [{ node: state.tree, selectedChild: null }];
+  state.selectedItem = null;
+  state.activeColIdx = -1;
+  initApp();
+}
+
+function readFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try { loadData(JSON.parse(e.target.result)); }
+    catch (err) { alert('文件格式错误：' + err.message + '\n请选择有效的 descriptions.json 文件。'); }
+  };
+  reader.readAsText(file, 'UTF-8');
+}
+
+/* ═══ INIT APP ═══ */
+function initApp() {
+  document.getElementById('overlay').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('fabTags').style.display = 'flex';
+  rebuildTagRegistry();
+  renderHeader();
+  renderBreadcrumb();
+  renderColumns();
+  renderDetail();
+}
+
+/* ═══ RENDER: HEADER ═══ */
+function renderHeader() {
+  const d = state.raw;
+  document.getElementById('hTitle').textContent = d.projectName || '未命名项目';
+  document.getElementById('hDesc').textContent = d.projectDescription || '';
+
+  const totalFiles = Object.keys(d.files || {}).length;
+  const totalFolders = Object.keys(d.folders || {}).length;
+  const described = Object.values(d.files || {}).filter(f => f.description).length;
+
+  document.getElementById('hStats').innerHTML =
+    `<span class="stat-pill">📄 <span class="stat-num">${totalFiles}</span> 文件</span>` +
+    `<span class="stat-pill">📁 <span class="stat-num">${totalFolders}</span> 文件夹</span>` +
+    `<span class="stat-pill">✅ <span class="stat-num">${described}</span> 已描述</span>` +
+    `<span class="stat-pill">🕐 ${fmtDate(d.lastScan)}</span>`;
+}
+
+/* ═══ RENDER: BREADCRUMB ═══ */
+function renderBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  const parts = [{ name: state.tree.name || '根目录', path: '' }];
+
+  for (let i = 0; i < state.columns.length; i++) {
+    const sel = state.columns[i].selectedChild;
+    if (sel) {
+      const child = state.columns[i].node.children.get(sel);
+      if (child) parts.push({ name: child.name, path: child.path });
+    }
+  }
+
+  bc.innerHTML = parts.map((p, i) => {
+    const isCurrent = i === parts.length - 1;
+    const cls = isCurrent ? 'crumb current' : 'crumb';
+    const sep = i < parts.length - 1 ? '<span class="crumb-sep">›</span>' : '';
+    return `<span class="${cls}" data-path="${p.path}">${p.name}</span>${sep}`;
+  }).join('');
+
+  bc.querySelectorAll('.crumb:not(.current)').forEach(el => {
+    el.addEventListener('click', () => navigateToPath(el.dataset.path));
+  });
+}
+
+/* ═══ RENDER: COLUMNS ═══ */
+function createColumnElement(colData, idx) {
+  const div = document.createElement('div');
+  div.className = 'column';
+  div.dataset.nodePath = colData.node.path || '__root__';
+  div.style.background = DEPTH_BG[Math.min(idx, DEPTH_BG.length - 1)];
+
+  const children = sortedChildren(colData.node);
+  const headerName = idx === 0 ? (state.tree.name || '根目录') : colData.node.name;
+
+  div.innerHTML =
+    `<div class="col-header"><span>${headerName}</span><span class="col-count">${children.length} 项</span></div>` +
+    `<div class="col-body"></div>`;
+
+  const body = div.querySelector('.col-body');
+
+  if (children.length === 0) {
+    body.innerHTML = '<div class="col-empty">空文件夹</div>';
+  } else {
+    children.forEach(child => {
+      const item = document.createElement('div');
+      item.className = 'item' + (colData.selectedChild === child.name ? ' selected' : '');
+      item.dataset.name = child.name;
+      const icon = getIcon(child.name, child.type === 'folder');
+      const chevron = child.type === 'folder' ? '<span class="item-chevron">›</span>' : '';
+      const metaText = (child.meta && child.meta.description) || '';
+      const metaHtml = metaText ? `<div class="item-meta">${escHtml(metaText)}</div>` : '';
+
+      item.innerHTML =
+        `<span class="item-icon">${icon}</span>` +
+        `<div class="item-info"><div class="item-name">${escHtml(child.name)}</div>${metaHtml}</div>` +
+        chevron;
+
+      item.addEventListener('click', () => handleItemClick(idx, child.name));
+      body.appendChild(item);
+    });
+  }
+  return div;
+}
+
+function updateColumnSelection(colEl, colData, idx) {
+  colEl.classList.toggle('active', idx === state.activeColIdx);
+  colEl.style.background = DEPTH_BG[Math.min(idx, DEPTH_BG.length - 1)];
+  const items = colEl.querySelectorAll('.item');
+  items.forEach(item => {
+    item.classList.toggle('selected', item.dataset.name === colData.selectedChild);
+  });
+}
+
+let prevColCount = 0;
+
+function renderColumns() {
+  const container = document.getElementById('columns');
+  const target = state.columns.length;
+
+  while (container.children.length > target) {
+    container.removeChild(container.lastChild);
+  }
+
+  for (let i = 0; i < target; i++) {
+    const expectedPath = state.columns[i].node.path || '__root__';
+    if (i < container.children.length && container.children[i].dataset.nodePath === expectedPath) {
+      updateColumnSelection(container.children[i], state.columns[i], i);
+    } else if (i < container.children.length) {
+      const el = createColumnElement(state.columns[i], i);
+      el.classList.toggle('active', i === state.activeColIdx);
+      container.replaceChild(el, container.children[i]);
+    } else {
+      const el = createColumnElement(state.columns[i], i);
+      el.classList.add('entering');
+      el.addEventListener('animationend', () => el.classList.remove('entering'), { once: true });
+      el.classList.toggle('active', i === state.activeColIdx);
+      container.appendChild(el);
+    }
+  }
+
+  if (target > prevColCount) {
+    requestAnimationFrame(() => { container.scrollLeft = container.scrollWidth; });
+  }
+  prevColCount = target;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/* ═══ NAVIGATION ═══ */
+function handleItemClick(colIndex, childName) {
+  const col = state.columns[colIndex];
+  const child = col.node.children.get(childName);
+  if (!child) return;
+
+  if (col.selectedChild === childName && state.selectedItem === child) return;
+
+  col.selectedChild = childName;
+  state.activeColIdx = colIndex;
+  state.columns.length = colIndex + 1;
+
+  if (child.type === 'folder') {
+    state.columns.push({ node: child, selectedChild: null });
+  }
+
+  state.selectedItem = child;
+  renderColumns();
+  renderBreadcrumb();
+  renderDetail();
+}
+
+function navigateToPath(targetPath) {
+  if (!state.tree) return;
+  const normalized = (targetPath || '').replace(/\\/g, '/');
+
+  prevColCount = 0;
+  const container = document.getElementById('columns');
+  container.innerHTML = '';
+
+  if (!normalized) {
+    state.columns = [{ node: state.tree, selectedChild: null }];
+    state.selectedItem = null;
+    state.activeColIdx = -1;
+    renderColumns(); renderBreadcrumb(); renderDetail();
+    return;
+  }
+
+  const segs = normalized.split('/').filter(Boolean);
+  let cur = state.tree;
+  state.columns = [{ node: state.tree, selectedChild: null }];
+
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    const child = cur.children && cur.children.get(seg);
+    if (!child) break;
+
+    state.columns[state.columns.length - 1].selectedChild = seg;
+    state.activeColIdx = state.columns.length - 1;
+
+    if (child.type === 'folder') {
+      state.columns.push({ node: child, selectedChild: null });
+      cur = child;
+    }
+    if (i === segs.length - 1) {
+      state.selectedItem = child;
+    }
+  }
+
+  renderColumns(); renderBreadcrumb(); renderDetail();
+}
+
+/* ═══ RENDER: DETAIL ═══ */
+function renderDetail() {
+  const panel = document.getElementById('detail');
+  const node = state.selectedItem;
+
+  if (!node) {
+    panel.innerHTML = '<div class="detail-empty">选择文件或文件夹<br>以查看详细信息</div>';
+    return;
+  }
+
+  const m = node.meta || {};
+  const icon = getIcon(node.name, node.type === 'folder');
+  let html = '';
+
+  // Head
+  html += `<div class="detail-head">
+    <div class="detail-icon-name">
+      <span class="d-icon">${icon}</span>
+      <span class="d-name">${escHtml(node.name)}</span>
+    </div>
+    <div class="detail-path">${escHtml(node.path || '/')}</div>
+  </div>`;
+
+  // Description (editable)
+  const descText = m.description || '';
+  html += `<div class="detail-section">
+    <div class="detail-label">描述</div>
+    <div class="detail-desc" id="descDisplay">${descText ? escHtml(descText) : '<span style="color:var(--text-tertiary);font-style:italic">点击添加描述…</span>'}</div>
+    <div class="detail-desc-hint">点击描述可编辑</div>
+  </div>`;
+
+  // Tags (editable per-file)
+  const tags = m.tags || [];
+  const tagsHtml = tags.map(t => {
+    const c = tagColor(t);
+    return `<span class="tag tag-removable" data-tag="${escHtml(t)}" style="background:${c.bg};color:${c.fg};border-color:${c.border}">${escHtml(t)}</span>`;
+  }).join('');
+  html += `<div class="detail-section" style="position:relative">
+    <div class="detail-label">标签</div>
+    <div class="detail-tags-edit" id="detailTags">${tagsHtml}<button class="tag-add-btn" id="tagAddBtn">＋</button></div>
+  </div>`;
+
+  // Metadata
+  html += '<div class="detail-section"><div class="detail-label">属性</div><div class="detail-meta-grid">';
+  html += `<span class="meta-key">类型</span><span class="meta-val">${node.type === 'folder' ? '文件夹' : '文件'}</span>`;
+
+  if (node.type === 'file') {
+    html += `<span class="meta-key">大小</span><span class="meta-val">${fmtSize(m.size)}</span>`;
+    html += `<span class="meta-key">修改时间</span><span class="meta-val">${fmtDate(m.modified)}</span>`;
+  } else {
+    const count = node.children ? node.children.size : 0;
+    const folders = node.children ? Array.from(node.children.values()).filter(c => c.type === 'folder').length : 0;
+    const files = count - folders;
+    html += `<span class="meta-key">子项</span><span class="meta-val">${folders} 文件夹, ${files} 文件</span>`;
+  }
+  html += '</div></div>';
+
+  // Dependencies: produces
+  const produces = m.produces || [];
+  if (produces.length) {
+    html += `<div class="detail-section"><div class="detail-label">产出 →</div><ul class="dep-list">`;
+    produces.forEach(p => {
+      const exists = !!findNode(p);
+      const cls = exists ? 'dep-item clickable' : 'dep-item';
+      const missing = exists ? '' : ' <span class="dep-missing">(未收录)</span>';
+      html += `<li class="${cls}" ${exists ? `data-nav="${escHtml(p)}"` : ''}>
+        <span class="dep-arrow">→</span>${escHtml(p)}${missing}</li>`;
+    });
+    html += '</ul></div>';
+  }
+
+  // Dependencies: depends_on
+  const deps = m.depends_on || [];
+  if (deps.length) {
+    html += `<div class="detail-section"><div class="detail-label">依赖 ←</div><ul class="dep-list">`;
+    deps.forEach(p => {
+      const exists = !!findNode(p);
+      const cls = exists ? 'dep-item clickable' : 'dep-item';
+      const missing = exists ? '' : ' <span class="dep-missing">(未收录)</span>';
+      html += `<li class="${cls}" ${exists ? `data-nav="${escHtml(p)}"` : ''}>
+        <span class="dep-arrow">←</span>${escHtml(p)}${missing}</li>`;
+    });
+    html += '</ul></div>';
+  }
+
+  panel.innerHTML = html;
+
+  panel.querySelectorAll('.dep-item.clickable').forEach(el => {
+    el.addEventListener('click', () => navigateToPath(el.dataset.nav));
+  });
+
+  const descEl = document.getElementById('descDisplay');
+  if (descEl) {
+    descEl.addEventListener('click', () => {
+      if (descEl.querySelector('textarea')) return;
+      const curText = (node.meta && node.meta.description) || '';
+      const ta = document.createElement('textarea');
+      ta.className = 'detail-desc-edit';
+      ta.value = curText;
+      ta.placeholder = '输入文件描述…';
+      descEl.replaceWith(ta);
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+
+      const commit = () => {
+        const newVal = ta.value.trim();
+        applyDescriptionEdit(node, newVal);
+        renderDetail();
+      };
+      ta.addEventListener('blur', commit);
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ta.blur(); }
+        if (e.key === 'Escape') { ta.value = curText; ta.blur(); }
+      });
+    });
+  }
+
+  // Tag: click to remove
+  panel.querySelectorAll('.tag-removable').forEach(el => {
+    el.addEventListener('click', () => {
+      removeTagFromNode(node, el.dataset.tag);
+      renderDetail();
+    });
+  });
+
+  // Tag: add dropdown
+  const addBtn = document.getElementById('tagAddBtn');
+  if (addBtn) {
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const existing = panel.querySelector('.tag-add-dropdown');
+      if (existing) { existing.remove(); return; }
+      const nodeTags = (node.meta && node.meta.tags) || [];
+      const available = Array.from(tagRegistry).filter(t => !nodeTags.includes(t)).sort((a, b) => a.localeCompare(b, 'zh'));
+      const dd = document.createElement('div');
+      dd.className = 'tag-add-dropdown';
+      if (available.length === 0) {
+        dd.innerHTML = '<div class="dd-empty">无可用标签，请先在标签管理中新增</div>';
+      } else {
+        available.forEach(t => {
+          const item = document.createElement('div');
+          item.className = 'dd-item';
+          const c = tagColor(t);
+          item.innerHTML = `<span class="tag" style="background:${c.bg};color:${c.fg};border-color:${c.border};pointer-events:none">${escHtml(t)}</span>`;
+          item.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            addTagToNode(node, t);
+            renderDetail();
+          });
+          dd.appendChild(item);
+        });
+      }
+      const rect = addBtn.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      dd.style.position = 'absolute';
+      dd.style.left = (rect.left - panelRect.left) + 'px';
+      dd.style.top = (rect.bottom - panelRect.top + 4) + 'px';
+      addBtn.closest('.detail-section').appendChild(dd);
+      const dismiss = (ev) => { if (!dd.contains(ev.target)) { dd.remove(); document.removeEventListener('click', dismiss); } };
+      setTimeout(() => document.addEventListener('click', dismiss), 0);
+    });
+  }
+}
+
+/* ═══ KEYBOARD NAVIGATION ═══ */
+document.addEventListener('keydown', (e) => {
+  if (!state.tree || document.getElementById('app').classList.contains('hidden')) return;
+  if (document.activeElement && (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT')) return;
+
+  const lastColIdx = state.columns.length - 1;
+  const lastCol = state.columns[lastColIdx];
+  const children = sortedChildren(lastCol.node);
+  if (!children.length) return;
+
+  const selIdx = lastCol.selectedChild
+    ? children.findIndex(c => c.name === lastCol.selectedChild)
+    : -1;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const next = Math.min(selIdx + 1, children.length - 1);
+    handleItemClick(lastColIdx, children[next].name);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const prev = Math.max(selIdx - 1, 0);
+    handleItemClick(lastColIdx, children[prev].name);
+  } else if (e.key === 'ArrowLeft' && state.columns.length > 1) {
+    e.preventDefault();
+    state.columns.length = lastColIdx;
+    const prevCol = state.columns[lastColIdx - 1];
+    state.activeColIdx = Math.max(0, lastColIdx - 2);
+    state.selectedItem = prevCol.selectedChild
+      ? prevCol.node.children.get(prevCol.selectedChild)
+      : null;
+    renderColumns(); renderBreadcrumb(); renderDetail();
+  } else if (e.key === 'ArrowRight' && state.selectedItem && state.selectedItem.type === 'folder') {
+    e.preventDefault();
+    const sel = state.selectedItem;
+    const sc = sortedChildren(sel);
+    if (sc.length) handleItemClick(lastColIdx, sc[0].name);
+  }
+});
+
+/* ═══ EVENT SETUP ═══ */
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => { if (e.target.files[0]) readFile(e.target.files[0]); });
+
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+});
+
+document.getElementById('btnChange').addEventListener('click', () => {
+  if (dirtyCount > 0 && !confirm(`有 ${dirtyCount} 处未保存的修改，确定要更换文件吗？`)) return;
+  document.getElementById('app').classList.add('hidden');
+  const overlay = document.getElementById('overlay');
+  overlay.classList.remove('hidden');
+  fileInput.value = '';
+  dirtyCount = 0;
+  markDirty(0);
+});
+
+document.getElementById('btnSave').addEventListener('click', saveFile);
+
+/* ═══ TAG MODAL EVENTS ═══ */
+document.getElementById('fabTags').addEventListener('click', () => {
+  renderTagModal();
+  document.getElementById('tagModal').classList.add('open');
+  document.getElementById('newTagInput').value = '';
+});
+document.getElementById('tagModalClose').addEventListener('click', () => {
+  document.getElementById('tagModal').classList.remove('open');
+});
+document.getElementById('tagModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) document.getElementById('tagModal').classList.remove('open');
+});
+document.getElementById('newTagBtn').addEventListener('click', () => {
+  const input = document.getElementById('newTagInput');
+  const name = input.value.trim();
+  if (!name) return;
+  if (tagRegistry.has(name)) { alert(`标签 "${name}" 已存在。`); return; }
+  addTagToRegistry(name);
+  input.value = '';
+  renderTagModal();
+});
+document.getElementById('newTagInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('newTagBtn').click(); }
+});
+
+/* ═══ AUTO-LOAD EMBEDDED DATA ═══ */
+if (window.EMBEDDED_DATA) {
+  try { loadData(window.EMBEDDED_DATA); } catch(e) { console.error('Embedded data error:', e); }
+}
+</script>
+</body>
+</html>
