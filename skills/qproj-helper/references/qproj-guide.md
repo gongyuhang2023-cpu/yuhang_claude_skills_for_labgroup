@@ -69,6 +69,7 @@ qproj::proj_use_workflow("analyses")
 1. 在项目根目录下创建 `analyses/` 文件夹及 `analyses/README.md`
 2. 在 `analyses/` 下创建 `data/` 文件夹及 `data/README.md`
 3. 在 `.gitignore` 中添加规则，忽略 `analyses/data/*`（但保留 README）
+4. 在 `analyses/` 下创建 `_quarto.yml`（包含 gfm 输出格式、code-fold、分页表格等默认配置）
 
 > **注意**：工作流目录**建议命名为 `analyses`**，这是团队约定。
 
@@ -134,6 +135,7 @@ pc047/                                    # 项目根目录
 │
 └── analyses/                             # 工作流目录
     ├── README.md                         # 工作流说明（自动生成）
+    ├── _quarto.yml                       # 渲染配置（自动生成）
     ├── 01-taxonomic-profiling.qmd        # 分析文件 1
     ├── 02-diversity-analysis.qmd         # 分析文件 2
     ├── 03-differential-abundance.qmd     # 分析文件 3
@@ -274,6 +276,15 @@ suppressPackageStartupMessages({
   library(data.table)
   devtools::load_all()  # 加载项目自定义函数（如果有的话）
 })
+# 预先解决 dplyr/data.table/stats 常见函数名冲突
+conflicted::conflicts_prefer(
+  dplyr::filter,
+  dplyr::lag,
+  dplyr::first,
+  dplyr::last,
+  dplyr::between,
+  .quiet = TRUE
+)
 ```
 
 ### Tasks 区域（用户编写分析代码）
@@ -302,9 +313,10 @@ knitr::kable(qproj::proj_dir_info(path_target(), tz = "CET"))
 
 | 函数 | 用途 | 示例 |
 |------|------|------|
-| `proj_create()` | 创建项目脚手架 | `qproj::proj_create("my-project")` |
-| `proj_use_workflow()` | 创建工作流目录 | `qproj::proj_use_workflow("analyses")` |
+| `proj_create()` | 创建项目脚手架 | `qproj::proj_create("my-project", fields = list(Title = "xxx"))` |
+| `proj_use_workflow()` | 创建工作流目录 + `_quarto.yml` | `qproj::proj_use_workflow("analyses")` |
 | `use_qmd()` | 创建 QMD 分析文件 | `qproj::use_qmd("01-import")` |
+| `proj_workflow_config()` | 读取 `_qproj.yml` 渲染配置 | 一般不需要手动调用 |
 
 ### 目录与路径管理（在 QMD 文件内部使用）
 
@@ -322,6 +334,12 @@ knitr::kable(qproj::proj_dir_info(path_target(), tz = "CET"))
 | `proj_check_deps()` | 检查依赖是否完整 | 对比代码引用 vs DESCRIPTION 声明 |
 | `proj_update_deps()` | 扫描代码更新 DESCRIPTION | 自动检测用到的包 |
 | `proj_install_deps()` | 安装 DESCRIPTION 中的包 | 基于 `pak`，克隆项目后一键装包 |
+
+### 项目分析（进阶）
+
+| 函数 | 用途 | 说明 |
+|------|------|------|
+| `proj_scan_graph()` | 扫描项目依赖关系图 | 生成 JSON/MD/HTML 三种格式，配套 `qg` CLI 查询工具 |
 
 ---
 
@@ -490,7 +508,42 @@ render:
 
 ---
 
-## 十二、命名约定总结
+## 十二、项目依赖图扫描（进阶）
+
+当项目步骤变多后，记不住谁依赖谁、改了某个文件会影响哪些下游。`proj_scan_graph()` 可以自动扫描项目代码结构，生成依赖关系图。
+
+### 使用方式
+
+```r
+qproj::proj_scan_graph()
+```
+
+运行后在 `.qproj/graph/` 目录下生成三个文件：
+
+| 文件 | 用途 |
+|------|------|
+| `graph.json` | 机器可读的依赖数据（给 AI 助手或脚本用） |
+| `graph.md` | Markdown 文字版依赖报告 |
+| `graph.html` | **交互式可视化**（浏览器打开，可拖拽点击） |
+
+### `qg` 命令行查询工具
+
+`proj_scan_graph()` 会自动安装一个 `qg` CLI 到 `.qproj/graph/qg`，用于快速查询依赖关系：
+
+```bash
+qg list step                        # 列出所有步骤
+qg upstream 02-clean                # 02 依赖了谁（上游）
+qg downstream 01-import             # 改了 01 会影响谁（下游）
+qg paths 01-import 99-publish       # 从 01 到 99 的完整路径
+qg unused                           # 找出孤立步骤或死代码
+qg bypass                           # 检测绕过 qproj 路径系统的直接 here::here 调用
+```
+
+> **建议**：将 `.qproj/` 加入 `.gitignore`，扫描结果不必纳入版本控制。
+
+---
+
+## 十三、命名约定总结
 
 | 元素 | 命名规则 | 示例 |
 |------|----------|------|
@@ -504,7 +557,7 @@ render:
 
 | 前缀 | 使用者 | 含义 |
 |------|--------|------|
-| `00-` | **框架保留** | 仅用于 `data/00-raw/`，用户不要用 |
+| `00-` | **框架保留** | 仅用于 `data/00-raw/`，`use_qmd()` 会直接报错阻止 |
 | `01-`、`02-`… | 用户 | 正常分析步骤 |
 | `001-`、`010-`… | 用户 | 需要在已有步骤之间插入时使用 |
 
@@ -512,7 +565,7 @@ render:
 
 ---
 
-## 十三、常见问题
+## 十四、常见问题
 
 **Q: 为什么 qproj 模板中 `proj_create_dir_target(name, clean = FALSE)`？**
 A: 模板写 `clean = FALSE` 是为了增量开发——修改代码后不会丢失之前的结果。如需每次 Render 都从零开始（确保完全可重复），改为 `clean = TRUE`。注意 `clean = TRUE` 只清空计算结果目录（`data/{name}/`），**不会动** `00-raw/` 下的原始数据，所以可以放心开启。
