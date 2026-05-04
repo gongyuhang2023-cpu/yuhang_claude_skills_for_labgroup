@@ -135,6 +135,7 @@ def main():
     )
     parser.add_argument("--root", default=".", help="项目根目录")
     parser.add_argument("--data", default=None, help="JSON 数据字符串")
+    parser.add_argument("--file", default=None, help="JSON 数据文件路径（优先于 --data）")
     parser.add_argument("--folder", default=None, help="批量归类的目标文件夹")
     parser.add_argument("--tags", default=None, help="逗号分隔的标签列表")
     parser.add_argument("--description", default=None, help="文件夹描述")
@@ -143,10 +144,14 @@ def main():
     root = os.path.abspath(args.root)
 
     if args.action == "update":
-        if not args.data:
-            print(json.dumps({"error": "缺少 --data 参数"}, ensure_ascii=False))
+        if args.file:
+            with open(args.file, "r", encoding="utf-8") as f:
+                new_data = json.load(f)
+        elif args.data:
+            new_data = json.loads(args.data)
+        else:
+            print(json.dumps({"error": "需要 --file 或 --data 参数"}, ensure_ascii=False))
             sys.exit(1)
-        new_data = json.loads(args.data)
         result = update_descriptions(root, new_data)
         file_count = len(result["files"])
         folder_count = len(result["folders"])

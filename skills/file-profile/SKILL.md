@@ -68,10 +68,12 @@ python ~/.claude/skills/file-profile/scripts/snapshot_tool.py --action scan --ro
 将生成的描述通过脚本写入：
 
 ```bash
-python ~/.claude/skills/file-profile/scripts/meta_updater.py --action update --root . --data '<json_string>'
+python ~/.claude/skills/file-profile/scripts/meta_updater.py --action update --root . --file .project-meta/update_data.json
 ```
 
-传入的 JSON 格式：
+**推荐流程**：先用 Write 工具将描述 JSON 写入 `.project-meta/update_data.json`，再通过 `--file` 传入。这避免了命令行参数长度限制（大项目 JSON 可能超过 shell 参数上限）。也仍支持 `--data '<json_string>'` 直接传入（适合小量更新）。
+
+JSON 格式：
 ```json
 {
   "files": {
