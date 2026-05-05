@@ -54,6 +54,13 @@ IMPORTANT: All `.qmd` in `analyses/` follow qproj conventions. YOU MUST use the 
 
 **Data flow is single-direction**: `path_source()` only reads steps with *smaller* numbers (enforced by warning). `path_data` is strictly private — downstream cannot access it via any qproj API. Raw input must be processed and published to `path_target` for downstream use.
 
+**Change impact check**: When a modification touches cross-step data flow (renaming output files, changing output format, reordering steps, removing a `saveRDS` call), first check the blast radius before editing downstream files:
+```bash
+bash .qproj/graph/qg impact <step-id>   # which downstream steps are affected
+bash .qproj/graph/qg deps <step-id>     # which upstream steps this depends on
+```
+If `.qproj/graph/` does not exist, ask the user to run `qproj::proj_scan_graph()` in R Console first. Routine single-step edits (tweaking a plot, adjusting a parameter) do NOT require this check.
+
 ## R Coding Conventions
 
 [填写指引 — R 编码规范]

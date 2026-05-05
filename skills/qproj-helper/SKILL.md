@@ -184,6 +184,43 @@ qproj::proj_check_deps()
 
 先用下方速查表回答，如需深入解释则读取 `references/qproj-guide.md`。
 
+### 场景 8：查看步骤间依赖关系（变更影响检查）
+
+**信号**：用户说"依赖关系"、"哪些步骤受影响"、"dependency graph"、"blast radius"、"影响范围"。
+
+**操作**：先检查 `.qproj/graph/` 是否存在。
+
+**若不存在**，告诉用户：
+
+```r
+qproj::proj_scan_graph()
+```
+
+这会：扫描 analyses/ 下所有 .qmd 的数据读写关系，生成依赖图到 `.qproj/graph/`（含 JSON + HTML 可视化 + `qg` CLI 工具）。
+
+**若已存在**，直接用 `qg` CLI 回答用户问题（需已安装 `jq`）：
+
+```bash
+# 查看某步骤的影响范围（改了它，谁会受影响）
+bash .qproj/graph/qg impact 01-import
+
+# 查看某步骤依赖的上游
+bash .qproj/graph/qg deps 02-taxonomic-diversity
+
+# 查看两步骤间的所有依赖路径
+bash .qproj/graph/qg paths 01-import 03-functional
+
+# 查看未被任何步骤引用的孤立产出
+bash .qproj/graph/qg unused
+```
+
+提醒：
+- `qg` 依赖 `jq`，Windows 可通过 `winget install jqlang.jq` 安装
+- 依赖图是静态快照，添加新步骤或修改数据流后需重新运行 `proj_scan_graph()`
+- 也可直接在浏览器中打开 `.qproj/graph/qproj-graph.html` 查看交互式拓扑图
+
+**AI 写代码时的使用场景**：当修改涉及多个 .qmd 步骤的数据流（如改变输出格式、重命名产出文件、调整步骤顺序）时，应先用 `qg impact` 检查影响范围再动手。日常单步骤内部修改（加个图、改个参数）不需要调用。
+
 ## 快速参考
 
 ### 五个路径绑定

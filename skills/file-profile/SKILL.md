@@ -63,6 +63,28 @@ python ~/.claude/skills/file-profile/scripts/snapshot_tool.py --action scan --ro
 - 如果能判断文件间的依赖关系（谁产出谁、谁调用谁），记录到 `produces` / `depends_on` 字段
 - 对无法判断内容的二进制文件，基于文件名和扩展名推断用途
 
+### Step 3.5：依赖关系扫描（脚本执行）
+
+在描述生成完成后，扫描项目中 .qmd/.Rmd/.R 文件的数据读写依赖：
+
+```bash
+python ~/.claude/skills/file-profile/scripts/dep_scanner.py --root . --output update
+```
+
+脚本工作原理：
+1. **优先使用 qproj**：若项目已有 `.qproj/graph/qproj-graph.json`（由 qproj R 包生成），直接导入其依赖图
+2. **否则自动扫描**：通过正则匹配提取 R 代码中的文件 I/O 调用（readRDS/saveRDS/read_csv/ggsave 等），支持 `here::here()` 嵌套路径解析
+3. 输出与 `meta_updater.py --action update` 兼容的 JSON 格式，包含每个脚本文件的 `produces` 和 `depends_on` 字段
+
+将扫描结果合并到 Step 4 的更新数据中一起写入 descriptions.json。
+
+**查看器集成**：写入依赖数据后，viewer.html 会自动在标题栏显示「📁 文件 | 🔗 依赖」切换按钮，可在 Miller Columns 文件视图和 SVG 依赖关系图之间切换：
+- 脚本文件（.qmd/.R）显示为蓝色矩形节点
+- 数据文件（.rds/.csv 等）显示为绿色圆角节点
+- 箭头表示数据流向（从依赖到产出）
+- 支持鼠标拖拽平移和滚轮缩放
+- 点击节点查看详情，可直接跳转到文件视图
+
 ### Step 4：写入元数据（脚本执行）
 
 将生成的描述通过脚本写入：
