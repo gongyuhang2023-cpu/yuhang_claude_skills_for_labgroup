@@ -28,7 +28,7 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
-### `group_meeting_recorder` — 组会自动截图 + AI 总结
+### `group_meeting_recorder` — 组会自动截图 + AI 总结（旧版，仍可用）
 
 **用途**：Teams 线上组会时后台自动截图（检测 PPT 翻页），会后由 Claude 生成图文总结。
 
@@ -41,6 +41,42 @@ cp -r skills/<skill-name> ~/.claude/skills/
 **依赖**：`mss`, `PyGetWindow`, `Pillow`, `numpy`（首次运行自动安装到 `.venv`）
 
 **注意**：目前适配 Windows + Teams，截图保存到 `~/Desktop/meeting_captures/`
+
+> **推荐使用下方的 `meeting_mind`**，它是此工具的全面升级版。本工具保留供已有用户继续使用。
+
+---
+
+### `meeting_mind` — MeetingMind 组会录制全流程（新版）
+
+**用途**：一键录制组会，自动完成：录音（系统音频）+ 截图（PPT 翻页检测）+ 语音转文字 + AI 解读 + 自动导入知识库。是 `group_meeting_recorder` 的全面升级版。
+
+**触发词**：`录制组会`、`开始录制`、`/meeting`
+
+**相比旧版的升级**：
+| 功能 | group_meeting_recorder | meeting_mind |
+|------|----------------------|--------------|
+| 截图 | mss 屏幕截图（窗口被遮挡则截不到） | Windows Graphics Capture API（遮挡/离屏均可） |
+| 录音 | 无 | WASAPI loopback 系统音频录制 |
+| 语音转文字 | 无 | Qwen3-ASR-1.7B 本地推理 |
+| PPT 回翻去重 | 无 | 全历史去重，revisit 元数据记录 |
+| 会议软件 | 仅 Teams | Teams / Zoom / 腾讯会议 |
+| AI 后处理 | 一次性读全部截图生成 summary | 分批 sub-agent 并行读图 → interpretation.md + summary.md |
+| 知识库集成 | 无 | 自动导入 [LLM Wiki](https://github.com/nashsu/llm_wiki) |
+
+**工作流**：
+1. 说"录制组会" → 确认会议软件 + 截图灵敏度
+2. 后台自动录音 + 截图（支持遮挡窗口）
+3. 会议结束说"停止" → 自动转录 + 分批解读截图 + 生成总结
+4. 输出自动进入 LLM Wiki raw 目录，wiki 软件自动识别并生成知识页面
+
+**依赖**：
+- **核心**：`PyAudioWPatch`, `windows-capture`, `Pillow`, `numpy`, `PyGetWindow`, `pywin32`, `PyYAML`
+- **ASR（可选）**：`qwen-asr`, `torch`(CUDA), `librosa`, `soundfile`
+- 首次使用时 Claude 自动引导环境配置
+
+**系统要求**：Windows 10/11 + Python 3.10+ + NVIDIA GPU（ASR 推荐，非必须）
+
+**知识库集成**：强烈推荐配合 [LLM Wiki](https://github.com/nashsu/llm_wiki) 使用（见下方说明）
 
 ---
 
@@ -147,6 +183,26 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
+## 推荐搭配：LLM Wiki — AI 驱动的知识库
+
+[**LLM Wiki**](https://github.com/nashsu/llm_wiki)（开源，GPLv3）是一个跨平台桌面应用，能自动将文档转化为结构化、互相关联的知识库。
+
+**为什么推荐**：
+- `meeting_mind` 的录制产物（转录文本、截图解读、总结）可直接放入 LLM Wiki 的 `raw/sources/` 目录
+- LLM Wiki 自动检测新文件 → 分析内容 → 生成 Wiki 页面 → 关联到已有知识网络
+- 支持知识图谱可视化、社区检测、语义搜索
+- 兼容 Obsidian（生成的 Wiki 可直接用 Obsidian 打开浏览）
+
+**快速开始**：
+1. 从 [Releases](https://github.com/nashsu/llm_wiki/releases) 下载安装（Windows .msi / macOS .dmg / Linux .AppImage）
+2. 创建一个 Wiki 项目，LLM 后端可选 DeepSeek / OpenAI / Anthropic / Ollama
+3. 在 `meeting_mind` 首次配置时，将输出目录设为 Wiki 的 `raw/sources/` 路径
+4. 之后每次组会录制结束，产物自动进入 Wiki，软件自动生成知识页面
+
+**适用场景**：组会笔记沉淀、文献阅读管理、课程知识整理、项目文档归档
+
+---
+
 ## 目录结构
 
 ```
@@ -167,13 +223,27 @@ skills/
 │   └── scripts/
 │       ├── sync.py
 │       └── update_directory.py
-├── group_meeting_recorder/
+├── group_meeting_recorder/        ← 旧版（保留，仍可用）
 │   ├── SKILL.md
 │   ├── requirements.txt
 │   └── scripts/
 │       ├── run.py
 │       ├── capture.py
 │       └── setup_environment.py
+├── meeting_mind/                  ← 新版（推荐）
+│   ├── SKILL.md                   ← 完整工作流（Phase 0-3）
+│   ├── SETUP_GUIDE.md             ← 首次使用环境配置指南
+│   ├── config.yaml                ← 持久配置
+│   ├── requirements.txt           ← 核心依赖
+│   ├── requirements-asr.txt       ← ASR 可选依赖
+│   ├── vocabulary.txt             ← 领域词汇表
+│   └── scripts/
+│       ├── run.py                 ← venv 管理 + 脚本启动器
+│       ├── setup_environment.py   ← 环境初始化
+│       ├── session.py             ← 录音 + 截图并行主入口
+│       ├── audio_recorder.py      ← WASAPI loopback 录音
+│       ├── slide_capture.py       ← WGC 截图 + 去重
+│       └── transcribe.py          ← Qwen3-ASR 语音转文字
 ├── humanizer/
 │   ├── SKILL.md
 │   ├── README.md

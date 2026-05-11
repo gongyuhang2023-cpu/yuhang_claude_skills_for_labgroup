@@ -1,0 +1,4 @@
+qwen-asr>=0.0.6
+torch>=2.0.0
+librosa>=0.10.0
+soundfile>=0.12.1

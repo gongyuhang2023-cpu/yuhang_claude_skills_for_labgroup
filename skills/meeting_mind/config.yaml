@@ -1,0 +1,15 @@
+# MeetingMind 配置
+# output.base_dir 首次使用时由 Claude 自动填写，之后不再询问
+
+output:
+  base_dir: ""  # 首次使用时由 Claude 填写，建议直接设为 wiki raw 路径，如: C:/Users/Yuhang/Library/PhD wiki/PhD wiki/raw/sources
+
+defaults:
+  meeting: "teams"
+  interval: 5.0
+  threshold: 5.0
+
+transcription:
+  engine: "qwen3-asr-local"
+  model: "Qwen/Qwen3-ASR-1.7B"
+  device: "cuda:0"
