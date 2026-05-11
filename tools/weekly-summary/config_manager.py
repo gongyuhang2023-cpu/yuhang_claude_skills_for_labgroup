@@ -18,7 +18,7 @@ class ConfigManager:
         "user_name_cn": "",
         "user_name_en": "",
         "api_key": "",
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-v4-flash",
         "save_location": "",
         "max_tokens": 4000,
         "temperature": 1.0,

@@ -8,6 +8,8 @@ Windows便笺读取器
 import sqlite3
 import os
 import re
+import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -125,6 +127,33 @@ def classify_note(title: str) -> str:
 
     # 默认归为项目（让活跃便笺都能被记录）
     return "项目"
+
+
+def close_sticky_notes(timeout: float = 2.0):
+    """关闭便笺应用，等待进程完全退出"""
+    subprocess.run(
+        ["taskkill", "/f", "/im", "Microsoft.Notes.exe"],
+        capture_output=True,
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ret = subprocess.run(
+            ["tasklist", "/fi", "IMAGENAME eq Microsoft.Notes.exe"],
+            capture_output=True, text=True,
+        )
+        if "Microsoft.Notes.exe" not in ret.stdout:
+            return
+        time.sleep(0.2)
+
+
+def open_sticky_notes():
+    """重新启动便笺应用"""
+    subprocess.Popen(
+        'start shell:appsFolder\\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe!App',
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 class StickyNotesReader:

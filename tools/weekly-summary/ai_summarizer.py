@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 AI周报总结器
-使用DeepSeek V4 Pro对便笺内容进行智能总结，支持中英文双语输出
+使用DeepSeek V4 Flash对便笺内容进行智能总结，支持中英文双语输出
 """
 
 import os
@@ -79,7 +79,7 @@ class BilingualSummarizer:
 
         self.api_key = api_key or cfg.get_api_key()
         self.base_url = "https://api.deepseek.com"
-        self.model = model or config.get("model", "deepseek-v4-pro")
+        self.model = model or config.get("model", "deepseek-v4-flash")
         self.max_tokens = max_tokens or config.get("max_tokens", 4000)
         self.temperature = temperature if temperature is not None else config.get("temperature", 1.0)
 
@@ -103,7 +103,8 @@ class BilingualSummarizer:
                 {"role": "user", "content": prompt}
             ],
             max_tokens=self.max_tokens,
-            temperature=self.temperature
+            temperature=self.temperature,
+            extra_body={"thinking": {"type": "disabled"}}
         )
 
         return response.choices[0].message.content
@@ -128,7 +129,7 @@ class BilingualSummarizer:
         return chinese, english
 
     @staticmethod
-    def test_connection(api_key: str, model: str = "deepseek-v4-pro") -> tuple:
+    def test_connection(api_key: str, model: str = "deepseek-v4-flash") -> tuple:
         """测试 API 连接，返回 (success: bool, message: str)"""
         try:
             from openai import OpenAI
@@ -140,7 +141,8 @@ class BilingualSummarizer:
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=5
+                max_tokens=5,
+                extra_body={"thinking": {"type": "disabled"}}
             )
             return True, "连接成功"
         except Exception as e:

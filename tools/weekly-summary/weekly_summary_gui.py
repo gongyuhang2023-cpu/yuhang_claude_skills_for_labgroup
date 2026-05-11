@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""每周工作总结生成器 v2.0"""
+"""每周工作总结生成器 v2.1"""
 
 import os
 import re
@@ -26,7 +26,7 @@ except ImportError:
 
 from PIL import Image
 
-from sticky_notes_reader import StickyNotesReader
+from sticky_notes_reader import StickyNotesReader, close_sticky_notes, open_sticky_notes
 from ai_summarizer import BilingualSummarizer
 from config_manager import ConfigManager
 
@@ -491,12 +491,17 @@ class WeeklySummaryApp(ctk.CTk):
             reader = StickyNotesReader()
             projs = [(k, n) for k, n in self.target_notes.items()
                      if n.get("category") == "项目"]
+
+            close_sticky_notes()
+
             cnt = 0
             for _, note in projs:
                 name = re.sub(r'\d{2}-\d{2}\s*[~～]\s*\d{2}-\d{2}.*', '',
                               note["title"]).strip() or note["title"]
-                reader.append_to_note(note["id"], f"{name}{nr}")
+                reader.append_to_note(note["id"], f"\\b {name}\\b0\n\\b {nr}\\b0")
                 cnt += 1
+
+            open_sticky_notes()
 
             self._set_status(
                 f"✅ 已初始化 {cnt} 个项目 → {nr}", SUCCESS)
