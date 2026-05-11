@@ -22,7 +22,7 @@
 
 ### Phase 1: 参数确认
 
-Use **AskUserQuestion** with 2 questions:
+Use **AskUserQuestion** with 3 questions:
 
 Question 1 — Meeting software:
 - header: "会议软件"
@@ -35,6 +35,12 @@ Question 2 — Screenshot settings:
   - "敏感 (间隔3s, 阈值3%)" — fast presentations
   - "宽松 (间隔10s, 阈值8%)" — slow discussions
 
+Question 3 — Microphone recording:
+- header: "麦克风"
+- Options:
+  - "仅系统声音" — recommended, only record what others say (loopback)
+  - "系统 + 麦克风" — also record your voice, mixed into one file
+
 ### Phase 2: 启动录制
 
 1. Read `output.base_dir` from config.yaml, determine output: `<base_dir>/YYYY-MM-DD/`
@@ -44,11 +50,13 @@ Question 2 — Screenshot settings:
    - 敏感 → `--interval 3 --threshold 3`
    - 宽松 → `--interval 10 --threshold 8`
    - Teams → `--meeting teams`, Zoom → `--meeting zoom`, 腾讯会议 → `--meeting tencent`
+   - 系统 + 麦克风 → `--mic`
 
 3. **Launch in background**:
    ```bash
    python ~/.claude/skills/meeting_mind/scripts/run.py session.py \
      --meeting <software> --interval <N> --threshold <N> \
+     [--mic] \
      --output "<base_dir>/YYYY-MM-DD"
    ```
    Use `run_in_background: true`.

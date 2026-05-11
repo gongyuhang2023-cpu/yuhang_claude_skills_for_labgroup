@@ -20,8 +20,9 @@ from slide_capture import SlideCapture, MEETING_PRESETS
 
 class MeetingSession:
 
-    def __init__(self, meeting: str, interval: float, threshold: float, output_dir: str):
+    def __init__(self, meeting: str, interval: float, threshold: float, output_dir: str, record_mic: bool = False):
         self._stop_event = threading.Event()
+        self._record_mic = record_mic
 
         self._output_dir = Path(output_dir)
         self._audio_dir = self._output_dir / "audio"
@@ -34,7 +35,8 @@ class MeetingSession:
         title_keyword = MEETING_PRESETS.get(meeting, meeting)
 
         self._recorder = WasapiLoopbackRecorder(
-            output_path=self._audio_dir / "recording.wav"
+            output_path=self._audio_dir / "recording.wav",
+            record_mic=record_mic,
         )
         self._capture = SlideCapture(
             output_dir=self._slides_dir,
@@ -141,6 +143,8 @@ def main():
                         help="Change detection threshold (%%)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output directory for this session")
+    parser.add_argument("--mic", action="store_true",
+                        help="Also record microphone input (mixed with system audio)")
     args = parser.parse_args()
 
     session = MeetingSession(
@@ -148,6 +152,7 @@ def main():
         interval=args.interval,
         threshold=args.threshold,
         output_dir=args.output,
+        record_mic=args.mic,
     )
 
     def handle_signal(sig, frame):
@@ -163,6 +168,7 @@ def main():
     print(f"  Meeting    : {args.meeting}")
     print(f"  Interval   : {args.interval}s")
     print(f"  Threshold  : {args.threshold}%")
+    print(f"  Mic record : {'Yes' if args.mic else 'No'}")
     print(f"  Output     : {args.output}")
     print("=" * 60)
 
