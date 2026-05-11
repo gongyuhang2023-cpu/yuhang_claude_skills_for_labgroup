@@ -446,7 +446,12 @@ class WeeklySummaryApp(ctk.CTk):
         if re.search(pat, old, re.DOTALL):
             new = re.sub(pat, sec.rstrip(), old, flags=re.DOTALL)
         else:
-            new = old + "\n\n---\n\n" + sec
+            m = re.search(r'^(.*?---)\n', old, re.DOTALL)
+            if m:
+                insert_pos = m.end()
+                new = old[:insert_pos] + "\n\n" + sec + "\n---" + old[insert_pos:]
+            else:
+                new = old + "\n\n---\n\n" + sec
         with open(path, "w", encoding="utf-8") as f:
             f.write(new)
 
@@ -489,13 +494,12 @@ class WeeklySummaryApp(ctk.CTk):
 
             nr = f"{ns:%m-%d} ~ {ne:%m-%d}"
             reader = StickyNotesReader()
-            projs = [(k, n) for k, n in self.target_notes.items()
-                     if n.get("category") == "项目"]
+            notes = list(self.target_notes.items())
 
             close_sticky_notes()
 
             cnt = 0
-            for _, note in projs:
+            for _, note in notes:
                 name = re.sub(r'\d{2}-\d{2}\s*[~～]\s*\d{2}-\d{2}.*', '',
                               note["title"]).strip() or note["title"]
                 reader.append_to_note(note["id"], f"\\b {name}\\b0\n\\b {nr}\\b0")
@@ -504,7 +508,7 @@ class WeeklySummaryApp(ctk.CTk):
             open_sticky_notes()
 
             self._set_status(
-                f"✅ 已初始化 {cnt} 个项目 → {nr}", SUCCESS)
+                f"✅ 已初始化 {cnt} 个便笺 → {nr}", SUCCESS)
             self.nw_btn.configure(state="disabled", text="✓ 已初始化")
         except Exception as e:
             self._set_status(f"初始化失败: {e}", ERROR)
