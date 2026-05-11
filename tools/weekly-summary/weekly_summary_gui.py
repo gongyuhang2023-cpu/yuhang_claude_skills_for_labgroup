@@ -502,7 +502,7 @@ class WeeklySummaryApp(ctk.CTk):
             for _, note in notes:
                 name = re.sub(r'\d{2}-\d{2}\s*[~～]\s*\d{2}-\d{2}.*', '',
                               note["title"]).strip() or note["title"]
-                reader.append_to_note(note["id"], f"\\b {name}\\b0\n\\b {nr}\\b0")
+                reader.append_to_note(note["id"], f"\\b {name}\\b0\n\\b {nr}\\b0\n ")
                 cnt += 1
 
             open_sticky_notes()
