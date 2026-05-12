@@ -20,9 +20,18 @@ from slide_capture import SlideCapture, MEETING_PRESETS
 
 class MeetingSession:
 
-    def __init__(self, meeting: str, interval: float, threshold: float, output_dir: str, record_mic: bool = False):
+    def __init__(self, meeting: str, interval: float, threshold: float, output_dir: str,
+                 record_mic: bool = False, virtual_cable: str | None = None):
         self._stop_event = threading.Event()
         self._record_mic = record_mic
+        self._switcher = None
+        if virtual_cable:
+            try:
+                from audio_device import AudioDeviceSwitcher
+                self._switcher = AudioDeviceSwitcher()
+                self._cable_keyword = virtual_cable
+            except ImportError:
+                print("  [Warning] pycaw not installed, virtual cable disabled")
 
         self._output_dir = Path(output_dir)
         self._audio_dir = self._output_dir / "audio"
@@ -56,6 +65,12 @@ class MeetingSession:
         self._stop_event.set()
 
     def start(self):
+        if self._switcher:
+            if self._switcher.switch_to(self._cable_keyword):
+                time.sleep(0.5)
+            else:
+                print("  [Warning] Virtual cable switch failed, using default device")
+
         self._start_time = datetime.now()
 
         print(f"\n[Session] Starting at {self._start_time.strftime('%H:%M:%S')}")
@@ -89,6 +104,9 @@ class MeetingSession:
 
         self._write_metadata()
         self._output_json_summary()
+
+        if self._switcher:
+            self._switcher.restore()
 
         duration = self._end_time - self._start_time
         minutes = int(duration.total_seconds() // 60)
@@ -145,6 +163,8 @@ def main():
                         help="Output directory for this session")
     parser.add_argument("--mic", action="store_true",
                         help="Also record microphone input (mixed with system audio)")
+    parser.add_argument("--virtual-cable", type=str, default=None,
+                        help="Virtual cable device keyword (e.g. 'CABLE Input') for volume-independent capture")
     args = parser.parse_args()
 
     session = MeetingSession(
@@ -153,6 +173,7 @@ def main():
         threshold=args.threshold,
         output_dir=args.output,
         record_mic=args.mic,
+        virtual_cable=args.virtual_cable,
     )
 
     def handle_signal(sig, frame):
@@ -169,6 +190,7 @@ def main():
     print(f"  Interval   : {args.interval}s")
     print(f"  Threshold  : {args.threshold}%")
     print(f"  Mic record : {'Yes' if args.mic else 'No'}")
+    print(f"  V-Cable    : {args.virtual_cable or 'disabled'}")
     print(f"  Output     : {args.output}")
     print("=" * 60)
 

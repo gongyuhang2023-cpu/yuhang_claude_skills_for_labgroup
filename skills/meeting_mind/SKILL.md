@@ -51,17 +51,19 @@ Question 3 — Microphone recording:
    - 宽松 → `--interval 10 --threshold 8`
    - Teams → `--meeting teams`, Zoom → `--meeting zoom`, 腾讯会议 → `--meeting tencent`
    - 系统 + 麦克风 → `--mic`
+   - config `audio.virtual_cable.enabled` is true → `--virtual-cable "<keyword>"` (keyword from config)
 
 3. **Launch in background**:
    ```bash
    python ~/.claude/skills/meeting_mind/scripts/run.py session.py \
      --meeting <software> --interval <N> --threshold <N> \
      [--mic] \
+     [--virtual-cable "<audio.virtual_cable.keyword>"] \
      --output "<base_dir>/YYYY-MM-DD"
    ```
    Use `run_in_background: true`.
 
-4. Inform user: software, interval, threshold, output path, task ID.
+4. Inform user: software, interval, threshold, virtual cable status, output path, task ID.
 
 ### Phase 3: 停止 + 后处理
 
@@ -96,7 +98,8 @@ When user says "结束了"、"会议结束"、"停止录制"、"stop":
 If config `transcription.engine` is not "skip", launch transcription:
 ```bash
 python ~/.claude/skills/meeting_mind/scripts/run.py transcribe.py \
-  --audio "<audio_path>" --output "<output_dir>/transcript"
+  --audio "<audio_path>" --output "<output_dir>/transcript" \
+  --vocabulary "~/.claude/skills/meeting_mind/vocabulary.txt"
 ```
 Use `run_in_background: true`, inform user processing time. Wait for completion before proceeding.
 

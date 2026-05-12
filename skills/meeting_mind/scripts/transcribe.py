@@ -10,6 +10,37 @@ import time
 from pathlib import Path
 
 
+def load_vocabulary(vocab_path: Path) -> str:
+    """Load vocabulary.txt and format as ASR context string."""
+    if not vocab_path.exists():
+        return ""
+
+    categories: dict[str, list[str]] = {}
+    current_category = None
+
+    with open(vocab_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("# MeetingMind") or line.startswith("# 每行") or line.startswith("# 以"):
+                continue
+            if line.startswith("# "):
+                current_category = line[2:].strip()
+                categories[current_category] = []
+            elif line.startswith("#"):
+                continue
+            else:
+                if current_category is None:
+                    current_category = "General"
+                    categories[current_category] = []
+                categories[current_category].append(line)
+
+    if not categories:
+        return ""
+
+    parts = [f"{cat}: {', '.join(terms)}" for cat, terms in categories.items() if terms]
+    return "Transcribe accurately. Use these exact spellings for domain terms — " + "; ".join(parts)
+
+
 def resample_to_16k_mono(input_path: Path) -> Path:
     """Resample audio to 16kHz mono for ASR input."""
     import librosa
@@ -50,7 +81,7 @@ def split_audio(audio_path: Path, chunk_minutes: float = 15.0) -> list[tuple[Pat
     return chunks
 
 
-def transcribe_with_qwen_asr(audio_path: Path, model_name: str, device: str) -> list[dict]:
+def transcribe_with_qwen_asr(audio_path: Path, model_name: str, device: str, context: str = "") -> list[dict]:
     """
     Transcribe using qwen-asr package.
     Returns list of segments: [{"start": float, "end": float, "text": str}]
@@ -69,7 +100,7 @@ def transcribe_with_qwen_asr(audio_path: Path, model_name: str, device: str) -> 
 
     print(f"  [ASR] Transcribing {audio_path.name}...")
     t0 = time.time()
-    results = model.transcribe(str(audio_path))
+    results = model.transcribe(str(audio_path), context=context)
     elapsed = time.time() - t0
     print(f"  [ASR] Transcription done in {elapsed:.1f}s")
 
@@ -117,6 +148,8 @@ def main():
                         help="Device: cuda:0, cpu, etc.")
     parser.add_argument("--chunk-minutes", type=float, default=15.0,
                         help="Max chunk length in minutes")
+    parser.add_argument("--vocabulary", type=str, default="",
+                        help="Path to vocabulary.txt hotword file for ASR context")
     args = parser.parse_args()
 
     audio_path = Path(args.audio)
@@ -127,12 +160,19 @@ def main():
         print(f"[Error] Audio file not found: {audio_path}")
         sys.exit(1)
 
+    context = ""
+    if args.vocabulary:
+        context = load_vocabulary(Path(args.vocabulary))
+
     print("=" * 60)
     print("  MeetingMind Transcription")
     print("=" * 60)
     print(f"  Audio  : {audio_path}")
     print(f"  Model  : {args.model}")
     print(f"  Device : {args.device}")
+    if context:
+        term_count = context.count(",") + context.count(";") + 1
+        print(f"  Vocab  : {args.vocabulary} ({term_count} terms)")
     print("=" * 60)
 
     # Step 1: Resample to 16kHz mono
@@ -144,7 +184,7 @@ def main():
     # Step 3: Transcribe each chunk
     all_segments = []
     for chunk_path, offset in chunks:
-        segments = transcribe_with_qwen_asr(chunk_path, args.model, args.device)
+        segments = transcribe_with_qwen_asr(chunk_path, args.model, args.device, context=context)
         for seg in segments:
             seg["start"] = seg.get("start", 0.0) + offset
             seg["end"] = seg.get("end", 0.0) + offset

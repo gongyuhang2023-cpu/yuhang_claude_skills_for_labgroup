@@ -9,7 +9,13 @@ defaults:
   interval: 5.0
   threshold: 5.0
 
+audio:
+  virtual_cable:
+    enabled: true
+    keyword: "CABLE Input"
+
 transcription:
   engine: "qwen3-asr-local"
   model: "Qwen/Qwen3-ASR-1.7B"
   device: "cuda:0"
+  vocabulary: "~/.claude/skills/meeting_mind/vocabulary.txt"

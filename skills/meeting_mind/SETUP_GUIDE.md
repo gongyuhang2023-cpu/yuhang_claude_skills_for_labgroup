@@ -94,11 +94,41 @@ Options:
 python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
 ```
 
-### 3c. 更新 config.yaml
+### 3c. VB-CABLE 虚拟声卡（可选，推荐）
+
+安装后录制音量不受系统音量影响，静音也能正常采集。
+
+```
+Question: "是否启用 VB-CABLE 虚拟声卡？（录制音量不受系统音量影响）"
+Options:
+  - 已安装 VB-CABLE，启用
+  - 暂不配置（之后可在 config.yaml 中手动启用）
+```
+
+如果选择启用：
+1. 验证 VB-CABLE 已安装：
+```bash
+python -c "
+from pycaw.pycaw import AudioUtilities
+devs = [d for d in AudioUtilities.GetAllDevices() if 'CABLE' in (d.FriendlyName or '')]
+for d in devs: print(f'  {d.FriendlyName}')
+print(f'Found {len(devs)} CABLE device(s)')
+"
+```
+
+2. 写入 config.yaml：`audio.virtual_cable.enabled: true`
+
+3. 提醒用户完成一次性 Windows 设置（否则录制期间听不到声音）：
+   - 右键任务栏音量图标 → 声音设置 → 更多声音设置
+   - 录制 tab → 找到 "CABLE Output" → 属性 → 侦听
+   - 勾选 "侦听此设备" → 下拉选择你的物理音箱/耳机 → 确定
+
+### 3d. 更新 config.yaml
 
 将用户选择写入 config.yaml：
 - `output.base_dir`: 用户选择的保存路径
 - `transcription.engine`: "qwen3-asr-local" 或 "skip"
+- `audio.virtual_cable.enabled`: true 或 false
 
 写入后 base_dir 不再为空，下次使用不会再触发本引导。
 
