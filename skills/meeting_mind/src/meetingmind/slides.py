@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -215,12 +216,12 @@ class SlideCapture:
         if _is_minimized(self._hwnd):
             print(
                 "  [Capture] WARNING: window is minimized — WGC cannot capture iconic windows.",
-                flush=True,
+                flush=True, file=sys.stderr,
             )
 
         print(
             f"  [Capture] Target: '{window.title}' ({window.width}x{window.height})",
-            flush=True,
+            flush=True, file=sys.stderr,
         )
         self._start_wgc()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -234,14 +235,14 @@ class SlideCapture:
                 # CaptureControl exposes .stop() in windows-capture 2.0
                 self._capture_control.stop()  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 — best-effort teardown
-                print(f"  [Capture] CaptureControl.stop() raised: {exc!r}", flush=True)
+                print(f"  [Capture] CaptureControl.stop() raised: {exc!r}", flush=True, file=sys.stderr)
             self._capture_control = None
 
         if self._poll_thread is not None and self._poll_thread.is_alive():
             self._poll_thread.join(timeout=5)
         self._poll_thread = None
 
-        print(f"  [Capture] Stopped. Slides recorded: {len(self._slides)}", flush=True)
+        print(f"  [Capture] Stopped. Slides recorded: {len(self._slides)}", flush=True, file=sys.stderr)
         return list(self._slides)
 
     # ------------------------------------------------------------------ wgc
@@ -265,7 +266,7 @@ class SlideCapture:
         @capture.event
         def on_closed() -> None:
             if not self._stop_event.is_set():
-                print("  [Capture] Capture session closed by OS", flush=True)
+                print("  [Capture] Capture session closed by OS", flush=True, file=sys.stderr)
                 if self._on_window_lost is not None:
                     self._on_window_lost()
 
@@ -292,7 +293,7 @@ class SlideCapture:
             "filepath": str(filepath),
         }
         self._slides.append(meta)
-        print(f"  [Slide {slide_num:03d}] saved at {timestamp}", flush=True)
+        print(f"  [Slide {slide_num:03d}] saved at {timestamp}", flush=True, file=sys.stderr)
         return meta
 
     def _record_revisit(self, original: int) -> None:
@@ -303,7 +304,7 @@ class SlideCapture:
             "timestamp": timestamp,
         }
         self._slides.append(meta)
-        print(f"  [Capture] Revisit of slide {original:03d}", flush=True)
+        print(f"  [Capture] Revisit of slide {original:03d}", flush=True, file=sys.stderr)
 
     def _record_thumbnail(self, img: Image.Image, slide_num: int) -> None:
         self._saved_thumbnails.append((slide_num, _to_thumbnail(img)))
@@ -317,7 +318,7 @@ class SlideCapture:
                 break
             time.sleep(0.5)
         else:
-            print("  [Capture] Timed out waiting for first frame", flush=True)
+            print("  [Capture] Timed out waiting for first frame", flush=True, file=sys.stderr)
             if self._on_window_lost is not None:
                 self._on_window_lost()
             return
@@ -344,19 +345,19 @@ class SlideCapture:
                 print(
                     f"  [Capture] Window not found ({miss_count}/{self._MAX_MISSES}), "
                     f"auto-stop in {remaining:.0f}s",
-                    flush=True,
+                    flush=True, file=sys.stderr,
                 )
                 if miss_count >= self._MAX_MISSES:
-                    print("  [Capture] Window gone too long, stopping", flush=True)
+                    print("  [Capture] Window gone too long, stopping", flush=True, file=sys.stderr)
                     if self._on_window_lost is not None:
                         self._on_window_lost()
                     return
                 continue
             if miss_count > 0:
-                print("  [Capture] Window recovered", flush=True)
+                print("  [Capture] Window recovered", flush=True, file=sys.stderr)
                 miss_count = 0
             if _is_minimized(int(window._hWnd)):
-                print("  [Capture] WARNING: window is minimized", flush=True)
+                print("  [Capture] WARNING: window is minimized", flush=True, file=sys.stderr)
 
             current = self._latest()
             if current is None:
@@ -366,7 +367,7 @@ class SlideCapture:
             if change <= self._threshold:
                 continue
 
-            print(f"  [Capture] Change: {change:.1f}% > {self._threshold}%", flush=True)
+            print(f"  [Capture] Change: {change:.1f}% > {self._threshold}%", flush=True, file=sys.stderr)
             settled = self._debounce_and_settle(current)
             if settled is None:
                 continue
@@ -375,7 +376,7 @@ class SlideCapture:
             if final_change <= self._threshold:
                 print(
                     f"  [Capture] Settled back to {final_change:.1f}%, treating as transient",
-                    flush=True,
+                    flush=True, file=sys.stderr,
                 )
                 continue
 

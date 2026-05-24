@@ -116,26 +116,32 @@ Bash:
              --topic "<topic>" \
              --interval <interval> \
              --threshold <threshold> \
+             --output-root ~/meetings \
              --quiet
   description: "Recording <topic> via meetingmind in background"
   run_in_background: true
 ```
 
+⚠️ **必须加 `--output-root ~/meetings`**。Claude Code 的工作目录可能是
+`system32` 等无写入权限的位置，默认 `./meetings` 会 Access Denied。
+
 Bash 会立刻返回一个 task ID 和 output file 路径。**记下这两个**。
 
 ### 读取 meeting_dir 和 STOP 文件路径
 
-`meetingmind record` 启动后会在 stdout 第一行打印 `meeting_dir`，
-第二行打印 `STOP file` 路径。等 2-3 秒后读 task output：
+`meetingmind record` 启动后会在 stdout 前两行打印 `meeting_dir` 和
+`STOP file` 路径。等 3 秒后用 Read tool 读 task output 文件。
 
-```
-Bash: sleep 3 && head -2 "<task_output_file>"
-```
+在输出中找到包含绝对路径的前两行（形如 `C:\Users\...` 或 `/home/...`），
+分别存为 `<meeting_dir>` 和 `<stop_file>`。
 
-把第一行存为 `<meeting_dir>`，第二行存为 `<stop_file>`。
+**Fallback**：如果读不到路径行（输出为空或只有错误信息），尝试用命名
+规则推断：`~/meetings/YYYY-MM-DD-<topic>` 目录是否存在。用 PowerShell
+`Get-ChildItem ~/meetings -Directory` 确认。STOP 文件路径 =
+`<meeting_dir>/STOP`。
 
-**如果 output 文件前两行不是路径**（例如：录制启动失败、process
-not found），把整个 output 内容贴给用户，告诉他们出了什么错，
+**如果 output 文件包含错误信息**（如 `Failed to start`、`No process
+matches`），把整个 output 内容贴给用户，告诉他们出了什么错，
 **取消流程**。常见原因：
 - 没有匹配的进程 → 让用户检查会议软件是否在跑
 - 没有活跃音频会话 → 让用户先加入会议
