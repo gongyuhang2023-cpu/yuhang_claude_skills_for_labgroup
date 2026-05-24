@@ -46,37 +46,49 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
-### `meeting_mind` — MeetingMind 组会录制全流程（新版）
+### `meeting_mind` — MeetingMind 组会录制全流程（重写版，self-contained）
 
-**用途**：一键录制组会，自动完成：录音（系统音频）+ 截图（PPT 翻页检测）+ 语音转文字 + AI 解读 + 自动导入知识库。是 `group_meeting_recorder` 的全面升级版。
+**用途**：一键录制组会，自动完成：进程级音频抓取 + PPT 翻页截图 + 本地 ASR 转录 + Claude 分批并行解读 → `interpretation.md` + `summary.md` 两份产物。
 
-**触发词**：`录制组会`、`开始录制`、`/meeting`
+**触发词**：`录会议`、`录个会议`、`开始录制`、`start recording a meeting`
 
-**相比旧版的升级**：
-| 功能 | group_meeting_recorder | meeting_mind |
+**相比上一版的关键变化**（本 skill 已**完全重写**，旧版的 PyAudioWPatch + virtual cable 方案被 ProcTap 替代，自动 LLM Wiki 导入被精简掉）：
+
+| 功能 | group_meeting_recorder | meeting_mind (新版) |
 |------|----------------------|--------------|
-| 截图 | mss 屏幕截图（窗口被遮挡则截不到） | Windows Graphics Capture API（遮挡/离屏均可） |
-| 录音 | 无 | WASAPI loopback 系统音频录制 |
-| 语音转文字 | 无 | Qwen3-ASR-1.7B 本地推理 |
-| PPT 回翻去重 | 无 | 全历史去重，revisit 元数据记录 |
-| 会议软件 | 仅 Teams | Teams / Zoom / 腾讯会议 |
-| AI 后处理 | 一次性读全部截图生成 summary | 分批 sub-agent 并行读图 → interpretation.md + summary.md |
-| 知识库集成 | 无 | 自动导入 [LLM Wiki](https://github.com/nashsu/llm_wiki) |
+| 截图 | mss 屏幕截图（窗口遮挡截不到） | Windows Graphics Capture API（遮挡/离屏/跨虚拟桌面均可） |
+| 录音 | 无 | **ProcTap 进程级 WASAPI Loopback** — 调系统音量/静音不影响录制 |
+| 语音转文字 | 无 | Qwen3-ASR-1.7B 本地 GPU 推理（~0.14× 实时） |
+| PPT 回翻去重 | 无 | 全历史像素差去重，revisit 元数据记录 |
+| 会议软件 | 仅 Teams | Teams / Zoom / 腾讯会议 / Edge 浏览器直播 |
+| AI 后处理 | 一次性读全部截图生成 summary | **5 张/批并行 sub-agent** → interpretation.md + summary.md（per-slide 视觉/转录/解读三段） |
+| 包结构 | 散装 scripts/ | **bundle 化**：`SKILL.md + install.py + src/meetingmind/ + pyproject.toml`，`cp -r` 即装 |
 
 **工作流**：
-1. 说"录制组会" → 确认会议软件 + 截图灵敏度
-2. 后台自动录音 + 截图（支持遮挡窗口）
-3. 会议结束说"停止" → 自动转录 + 分批解读截图 + 生成总结
-4. 输出自动进入 LLM Wiki raw 目录，wiki 软件自动识别并生成知识页面
+1. 说"录会议" → AskUserQuestion 一次问 4 项（主题/软件/灵敏度/麦克风）
+2. 后台启动 `meetingmind record`（Bash run_in_background），停止信号靠写 `STOP` 文件
+3. 说"结束了" → 触发 STOP → 等录制进程退出 → 自动 `postprocess`（resample + Qwen3-ASR + 写 ai_input.json）
+4. **自动进入 AI 解读**：读 ai_input.json，过滤 revisit → spawn 并行 sub-agent（每批 5 张图 + 完整 transcript）→ 合并 interpretation.md → 1 个 summary sub-agent → summary.md
 
-**依赖**：
-- **核心**：`PyAudioWPatch`, `windows-capture`, `Pillow`, `numpy`, `PyGetWindow`, `pywin32`, `PyYAML`
-- **ASR（可选）**：`qwen-asr`, `torch`(CUDA), `librosa`, `soundfile`
-- 首次使用时 Claude 自动引导环境配置
+**安装**：
+```bash
+cp -r skills/meeting_mind ~/.claude/skills/
+cd ~/.claude/skills/meeting_mind
+python install.py
+```
+6 步全自动（Python/Windows/CUDA 检测 → 建自己的 venv → pip install `[transcribe]` extras → skill 已就位）。首次跑会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`（HF cache，下次共享）。
 
-**系统要求**：Windows 10/11 + Python 3.10+ + NVIDIA GPU（ASR 推荐，非必须）
+**依赖**（installer 自动装到 skill 自带 venv，**不污染你其他项目**）：
+- 核心：`proc-tap`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`
+- 转录：`torch==2.11.0+cu128`、`transformers==4.57.6`、`qwen-asr==0.0.6`、`librosa`、`soundfile`、`accelerate`
 
-**知识库集成**：强烈推荐配合 [LLM Wiki](https://github.com/nashsu/llm_wiki) 使用（见下方说明）
+**系统要求**：Windows 10 build 19041+ / Windows 11 + Python 3.10+ + NVIDIA GPU（推荐 6 GB+ 显存；CPU 推理可跑但慢 5-10×）
+
+**注意**：
+- 录到的会议数据**默认存在** `meetings/<date>-<topic>/` 下，**不外发**。AI 解读步骤会把截图 + transcript 作为 prompt 发给 Anthropic（Claude API），受 [Anthropic Privacy Policy](https://www.anthropic.com/legal/privacy) 约束。会议特别敏感时考虑只跑到 transcript 阶段。
+- v1 不录用户麦克风（只录会议软件输出音频，即其他人讲话）。
+- 会议窗口不能最小化到任务栏（WGC 限制），可以拖到角落或换桌面。
+- **架构参考**：详见 skill 内 `SKILL.md`（Phase 1-4 完整指令）和 `README.md`（朋友圈安装与隐私说明）。
 
 ---
 
@@ -188,16 +200,18 @@ cp -r skills/<skill-name> ~/.claude/skills/
 [**LLM Wiki**](https://github.com/nashsu/llm_wiki)（开源，GPLv3）是一个跨平台桌面应用，能自动将文档转化为结构化、互相关联的知识库。
 
 **为什么推荐**：
-- `meeting_mind` 的录制产物（转录文本、截图解读、总结）可直接放入 LLM Wiki 的 `raw/sources/` 目录
+- `meeting_mind` 的录制产物（`interpretation.md` / `summary.md` / `transcript.md`）可手动复制到 LLM Wiki 的 `raw/sources/` 目录
 - LLM Wiki 自动检测新文件 → 分析内容 → 生成 Wiki 页面 → 关联到已有知识网络
 - 支持知识图谱可视化、社区检测、语义搜索
 - 兼容 Obsidian（生成的 Wiki 可直接用 Obsidian 打开浏览）
 
+> 注：新版 `meeting_mind` 不自动导入 LLM Wiki（精简了原集成逻辑）。需要的话手动 `cp meetings/<date>-<topic>/{interpretation,summary}.md <wiki>/raw/sources/` 即可，wiki 软件会自动识别。
+
 **快速开始**：
 1. 从 [Releases](https://github.com/nashsu/llm_wiki/releases) 下载安装（Windows .msi / macOS .dmg / Linux .AppImage）
 2. 创建一个 Wiki 项目，LLM 后端可选 DeepSeek / OpenAI / Anthropic / Ollama
-3. 在 `meeting_mind` 首次配置时，将输出目录设为 Wiki 的 `raw/sources/` 路径
-4. 之后每次组会录制结束，产物自动进入 Wiki，软件自动生成知识页面
+3. 录会议结束后手动把 `interpretation.md` / `summary.md` 复制到 wiki 的 `raw/sources/` 目录
+4. Wiki 软件自动生成知识页面
 
 **适用场景**：组会笔记沉淀、文献阅读管理、课程知识整理、项目文档归档
 
@@ -230,20 +244,22 @@ skills/
 │       ├── run.py
 │       ├── capture.py
 │       └── setup_environment.py
-├── meeting_mind/                  ← 新版（推荐）
-│   ├── SKILL.md                   ← 完整工作流（Phase 0-3）
-│   ├── SETUP_GUIDE.md             ← 首次使用环境配置指南
-│   ├── config.yaml                ← 持久配置
-│   ├── requirements.txt           ← 核心依赖
-│   ├── requirements-asr.txt       ← ASR 可选依赖
-│   ├── vocabulary.txt             ← 领域词汇表
-│   └── scripts/
-│       ├── run.py                 ← venv 管理 + 脚本启动器
-│       ├── setup_environment.py   ← 环境初始化
-│       ├── session.py             ← 录音 + 截图并行主入口
-│       ├── audio_recorder.py      ← WASAPI loopback 录音
-│       ├── slide_capture.py       ← WGC 截图 + 去重
-│       └── transcribe.py          ← Qwen3-ASR 语音转文字
+├── meeting_mind/                  ← 重写版（self-contained bundle，推荐）
+│   ├── SKILL.md                   ← 完整工作流（Phase 1-4：参数确认 / 后台录制 / 转录 / AI 解读）
+│   ├── README.md                  ← 朋友圈安装 + 使用 + 隐私说明
+│   ├── install.py                 ← 6 步一键安装：Python/Win/CUDA 检测 → 建 venv → pip → SKILL.md 就位
+│   ├── pyproject.toml             ← Python 包元数据（[transcribe] extras pin 到 production 版本）
+│   ├── vocabulary.txt.example     ← ASR 热词示例（# 分类、## 注释）
+│   └── src/meetingmind/           ← 完整 Python 包（cli/audio/slides/session/transcribe/postprocess/...）
+│       ├── __main__.py            ← `python -m meetingmind` 入口
+│       ├── cli.py                 ← list-processes / record / transcribe / postprocess 子命令
+│       ├── audio.py               ← ProcTap 进程级录音
+│       ├── slides.py              ← WGC 截图 + 像素差去重
+│       ├── session.py             ← 录音 + 截图编排
+│       ├── transcribe.py          ← Qwen3-ASR wrapper（chunked + GPU/CPU 选择）
+│       ├── postprocess.py         ← transcript + ai_input.json 组装
+│       ├── process_finder.py      ← 进程探测（pycaw + psutil）
+│       └── vocabulary.py          ← 热词文件解析
 ├── humanizer/
 │   ├── SKILL.md
 │   ├── README.md

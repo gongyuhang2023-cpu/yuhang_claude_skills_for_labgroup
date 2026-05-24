@@ -1,0 +1,118 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetingmind"
+version = "0.1.0.dev0"
+description = "Auto-record online meetings (Teams/Zoom/Tencent): audio + PPT screenshots + transcription + AI summary. Volume-independent capture via Windows Process Loopback API."
+readme = "README.md"
+requires-python = ">=3.10"
+# No `license` field — personal project, not publicly licensed.
+# Default copyright posture: all rights reserved by the author.
+authors = [
+    { name = "Yuhang" },
+]
+keywords = ["meeting", "recording", "wasapi", "transcription", "asr", "windows", "claude-code-skill"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
+    "Topic :: Office/Business",
+]
+
+dependencies = [
+    # Audio capture (volume-independent process loopback)
+    "proc-tap>=1.0.3",
+    # Screen capture (Windows Graphics Capture API)
+    "windows-capture>=1.4.0",
+    # Image processing for change detection
+    "pillow>=10.0",
+    "numpy>=2.0",
+    # Process discovery and audio session inspection
+    "psutil>=5.9",
+    "pycaw>=20240210",
+    "comtypes>=1.4",
+    # Window management
+    "pygetwindow>=0.0.9",
+    "pywin32>=306",
+]
+
+[project.optional-dependencies]
+# Transcription stack — heavy (~2GB torch wheel, ~3.4GB model on first run).
+# Versions pinned to the production-validated set from the prior meeting_mind
+# skill so the model + tokenizer + qwen-asr API surface match exactly.
+# Install with CUDA support:
+#   pip install -e ".[transcribe]" --extra-index-url https://download.pytorch.org/whl/cu128
+# CPU-only (fallback, slower):
+#   pip install -e ".[transcribe]"
+transcribe = [
+    "torch==2.11.0",
+    "transformers==4.57.6",
+    "qwen-asr==0.0.6",
+    "qwen-omni-utils==0.0.9",
+    "accelerate==1.12.0",
+    "librosa==0.11.0",
+    "soundfile==0.13.1",
+]
+
+# Developer tooling
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+meetingmind = "meetingmind.cli:main"
+
+# No [project.urls] — not published on a public repo. If a friend-circle
+# git host (or eventual public repo) appears, add Homepage / Issues here.
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+meetingmind = ["py.typed"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line-too-long (handled by formatter)
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires CUDA GPU (skipped in CI)",
+    "realtime: requires live audio/window capture (skipped in CI)",
+]

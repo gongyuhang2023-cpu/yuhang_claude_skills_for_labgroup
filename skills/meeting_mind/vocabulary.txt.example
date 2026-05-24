@@ -1,0 +1,31 @@
+## MeetingMind vocabulary example — copy to vocabulary.txt and edit.
+## MeetingMind 热词示例文件 — 复制为 vocabulary.txt 后编辑。
+##
+## Format / 格式:
+##   `# CategoryName`  — a category title (hash + single space + name)
+##                       分类标题（# + 空格 + 分类名）
+##   `## anything`     — comment, ignored (double hash)
+##                       注释行，忽略（双井号开头）
+##   `term`            — a single term (one per line)
+##                       热词（每行一个）
+##   blank lines       — skipped / 跳过
+##
+## Why categorize: the ASR model uses the category to bias decoding
+## toward consistent domain spellings. Group related terms together.
+## 为什么要分类：ASR 引擎按分类提示统一术语拼写。把相关词放在一起。
+##
+## Bare terms before any category fall under "General".
+## 没有分类前导的热词归入 "General" 分类。
+
+# Common acronyms
+API
+CLI
+GPU
+
+# Project names
+MeetingMind
+Claude Code
+
+# 测试分类
+你好世界
+人工智能
