@@ -195,11 +195,14 @@ STOP 文件出现后，后台的 `record` 进程会在下一次 wait 轮询（�
 
 ```
 Bash:
-  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>" --device cuda
+  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>" --device cuda --chunk-minutes 5
   description: "Transcribe and build ai_input.json"
   (不开 run_in_background — 这步需要拿到结果)
   timeout: 600000  # 10 minutes — 1 小时会议在 RTX 5070 上 ~8.6 分钟
 ```
+
+⚠️ **`--chunk-minutes 5` 是必须的**。默认 15 分钟 chunk 在长会议（>30 min）
+上会导致 CUDA OOM。5 分钟 chunk 串行处理，总计算量相同，只降低峰值显存。
 
 ⚠️ **耗时预期**（参考 ADR-003，RTX 5070）：
 - 15 分钟会议：~2 分钟
@@ -315,18 +318,24 @@ project 等）不列。
 - 不要输出前言、不要输出收尾，**只输出上述 markdown 段落**
 - 不要重新解释会议主题——上面已经告诉你了
 - 不要总结全场——那是后续 summary 步骤的事，你只做你这 5 张
+- **最终输出必须写文件**：处理完所有 slide 后，用 Write tool 把上述全部
+  markdown 内容写到 `<meeting_dir>/interpretation_batch_<NN>.md`
+  （<NN> = 本批序号，两位数零填充，如 01、02、12）。
+  写入后只需回复一句："✓ 已写入 interpretation_batch_<NN>.md（<batch_size> 张 slide）"
+  **不要**在回复文本中重复 markdown 内容——文件才是产物，回复只是确认。
 ```
 
 把 `K` 个 Agent 调用并行发出去，等所有返回。
 
-### Step 4.3: 合并 sub-agent 输出 → interpretation.md
+### Step 4.3: 从文件合并 → interpretation.md
 
 所有 sub-agent 返回后：
 
-1. **按 batch 顺序拼接** sub-agent 的 markdown 输出（每个 sub-agent 内部
-   已按 slide_number 排序，且批次本身按 first slide_number 排序，所以
-   直接拼接即可）。
-2. **关键术语合并去重**：从每个 sub-agent 输出末尾抽出 `## 关键术语（本批次）`
+1. **从磁盘读取批次文件**：按 batch 序号顺序 Read
+   `<meeting_dir>/interpretation_batch_01.md` 到
+   `<meeting_dir>/interpretation_batch_<KK>.md`（KK = 总批数的两位零填充）。
+   如果某个文件不存在（对应 sub-agent 失败），用占位段落替代（见 Phase 4 失败兜底）。
+2. **关键术语合并去重**：从每个批次文件末尾抽出 `## 关键术语（本批次）`
    下的列表，合并成全局唯一一份 `## 关键术语`（同名 Term 取最早出现的定义，
    最多 20 项）。
 3. **加 header**（精确照抄）：
@@ -343,6 +352,9 @@ project 等）不列。
 ```
 
 4. 用 Write tool 写到 `<meeting_dir>/interpretation.md`。
+5. **清理批次文件**：合并成功后，删除所有 `interpretation_batch_*.md`
+   临时文件（用 Bash `rm "<meeting_dir>"/interpretation_batch_*.md`），
+   保持 meeting_dir 整洁。
 
 ### Step 4.4: 生成 summary.md
 
@@ -414,7 +426,10 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 
 ### Phase 4 失败兜底
 
-- **某个 sub-agent 返回错误 / 超时**：在合并 interpretation.md 时，
+- **某个 sub-agent 返回错误 / 超时**：先检查对应的
+  `interpretation_batch_NN.md` 是否存在且非空——sub-agent 可能已经
+  写了文件后才超时。如果文件存在且非空，优先用文件内容。
+  如果文件不存在或为空，在合并 interpretation.md 时，
   对应批次填占位段落：
   ```
   ## Slide <N> [<offset>]
