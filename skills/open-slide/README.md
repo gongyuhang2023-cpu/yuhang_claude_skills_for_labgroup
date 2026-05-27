@@ -12,21 +12,31 @@
 
 ## 安装
 
+### 1. 安装 Node.js（前置要求）
+
+本 Skill 依赖 Node.js 运行 Vite dev server。如果你的机器上还没有，先安装：
+
+- **下载**：https://nodejs.org/ （选 LTS 版本，≥ 18 即可）
+- Windows 安装后重启终端，运行 `node --version` 确认
+
+> npm 随 Node.js 附带，无需单独安装。
+
+### 2. 复制 Skill 文件
+
 ```bash
-# 复制到 Claude Code skills 目录
+# macOS / Linux
 cp -r skills/open-slide ~/.claude/skills/
 
 # Windows PowerShell
-Copy-Item -Recurse skills/open-slide $env:USERPROFILE/.claude/skills/
+Copy-Item -Recurse skills\open-slide $env:USERPROFILE\.claude\skills\
 ```
 
-首次使用时 skill 会自动运行 `npm install`（约 30-60 秒），后续启动秒开。
+### 3. 首次使用自动安装依赖
 
-### 前置要求
-
-- **Node.js ≥ 18**（`node --version` 检查）
-- **npm**（随 Node.js 附带）
-- Claude Code（CLI / Desktop / IDE 插件均可）
+无需手动 `npm install`。首次在 Claude Code 中触发 slide 制作时，`bootstrap.py` 会自动：
+1. 在 `~/.claude/skills/open-slide/runtime/` 下创建 Node 项目
+2. 运行 `npm install` 安装 `@open-slide/core`、`react`、`react-dom` 等依赖（约 30-60 秒）
+3. 后续启动秒开（幂等检测，hash 匹配则跳过安装）
 
 ## 使用
 

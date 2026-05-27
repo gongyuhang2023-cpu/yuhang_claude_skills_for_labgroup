@@ -171,7 +171,7 @@ python install.py
 **工作流**（6 个 Phase）：
 1. 选择输出路径 → 2. 提取内容（从项目或口述）→ 3. 风格决策 → 4. 编写 TSX → 5. 实时预览 → 6. 迭代修改
 
-**依赖**：Node.js ≥ 18 + npm（`@open-slide/core`、`react`、`react-dom` 自动安装到 skill 内部 `runtime/`）
+**依赖**：[Node.js ≥ 18](https://nodejs.org/)（需预装；npm 包 `@open-slide/core`、`react`、`react-dom` 首次使用时自动安装到 skill 内部 `runtime/`，无需手动操作）
 
 **架构参考**：详见 [`skills/open-slide/README.md`](skills/open-slide/README.md)
 
