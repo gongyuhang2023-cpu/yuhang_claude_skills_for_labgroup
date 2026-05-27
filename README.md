@@ -155,6 +155,28 @@ python install.py
 
 ---
 
+### `open-slide` — 自管理 HTML 幻灯片生成器
+
+**用途**：对话中说"做个 slide"即可生成 React 幻灯片。基于 [open-slide](https://github.com/1weiho/open-slide) 开源框架（MIT），自管理 runtime，无需预装 Node 项目。
+
+**触发词**：`做个幻灯片`、`制作 slide`、`/slide`、`把 paper 做成演示`、`准备组会汇报`
+
+**核心特性**：
+- 首次自动 `npm install`（约 30-60 秒），后续秒开
+- 每次选择输出路径，不绑定固定目录
+- 1920×1080 固定画布，React 18 + Vite 5 热重载
+- 支持 CSS keyframe 动画，纯 React 无额外依赖
+- 内置 authoring guide：字号/间距/垂直预算/反模式检查
+
+**工作流**（6 个 Phase）：
+1. 选择输出路径 → 2. 提取内容（从项目或口述）→ 3. 风格决策 → 4. 编写 TSX → 5. 实时预览 → 6. 迭代修改
+
+**依赖**：Node.js ≥ 18 + npm（`@open-slide/core`、`react`、`react-dom` 自动安装到 skill 内部 `runtime/`）
+
+**架构参考**：详见 [`skills/open-slide/README.md`](skills/open-slide/README.md)
+
+---
+
 ### `qproj-helper` — qproj 工作流指导助手
 
 **用途**：指导用户使用 [qproj](https://github.com/rujinlong/qproj)（轻量级 Quarto 分析工作流脚手架）。Claude Code 无法直接操作 R Console，因此本 Skill 的核心是**分析用户所处阶段，给出可粘贴到 Console 的 R 命令**。
@@ -280,6 +302,14 @@ skills/
 │   │   ├── run.py
 │   │   └── setup_environment.py
 │   └── snapshots/                 ← 历史版本快照
+├── open-slide/
+│   ├── SKILL.md                   ← 完整工作流（Phase 0-6）
+│   ├── README.md                  ← 安装 / 使用 / 架构 / 上游说明
+│   ├── scripts/
+│   │   ├── bootstrap.py           ← 幂等 runtime 初始化（package.json → npm install → 动态配置）
+│   │   └── server.py              ← dev server 生命周期（start / stop / status / open + IPv6）
+│   └── references/
+│       └── slide-authoring-guide.md ← TSX 编写规范（画布/字号/动画/反模式 checklist）
 └── qproj-helper/
     ├── SKILL.md                   ← 决策树 + 引导问题（220 行）
     ├── templates/
