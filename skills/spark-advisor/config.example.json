@@ -1,0 +1,11 @@
+{
+  "_comment": "Do NOT hand-edit. The skill auto-creates config.json on first run: `advise.py detect-server` (Tailscale scan) finds the server IP, then `advise.py init --user <name> --host <ip> --node <name>` writes it. The IP comes from the Tailscale scan, your lab usage guide, or the admin. config.json is gitignored so host/user never leak when this skill is open-sourced.",
+  "host": "SERVER_IP_OR_HOSTNAME",
+  "user": "YOUR_LOGIN_NAME",
+  "ssh_key": "",
+  "node": "SLURM_NODE_NAME",
+  "partition": "main",
+  "gpu_pool_gb": 120,
+  "gpu_floor_gb": 96,
+  "ssh_opts": ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]
+}

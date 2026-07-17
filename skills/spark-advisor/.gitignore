@@ -1,0 +1,6 @@
+# Never share the real server address / credentials / per-user env
+config.json
+env-profile.local.json
+.venv/
+__pycache__/
+*.pyc
