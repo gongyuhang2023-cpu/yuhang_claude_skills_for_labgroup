@@ -142,6 +142,10 @@ def cmd_status(cfg):
     d = parse_kv_line(ssh_run(cfg, f"scontrol show node {node} -o").strip())
     real = int0(d.get("RealMemory"))
     alloc = int0(d.get("AllocMem"))
+    # MemSpecLimit 是给系统守护进程预留的，不参与用户分配。
+    # 用户能申请的天花板 = RealMemory - MemSpecLimit，不减会多报、按其推荐会被 Slurm 拒。
+    spec = int0(d.get("MemSpecLimit"))
+    allocatable = max(0, real - spec)
     gpu_total = gres_count(d.get("Gres", ""))
     gpu_used = gres_count(d.get("GresUsed", ""))
 
@@ -169,8 +173,10 @@ def cmd_status(cfg):
         "gpu_free": gpu_used < gpu_total,
         "gpu_job_running": any(j["gpu"] for j in running),
         "mem_total_gb": mb_to_gb(real),
+        "mem_spec_reserved_gb": mb_to_gb(spec),        # 系统守护进程占用，用户碰不到
+        "mem_allocatable_gb": mb_to_gb(allocatable),   # 用户能申请的天花板
         "mem_reserved_gb": mb_to_gb(alloc),
-        "mem_schedulable_gb": round((real - alloc) / 1024, 1),
+        "mem_schedulable_gb": round((allocatable - alloc) / 1024, 1),
         "running_jobs": running,
         "pending_jobs": pending,
         "pending_count": len(pending),
@@ -215,22 +221,51 @@ def cmd_history(cfg, user, tool, days):
 def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
     st = cmd_status(cfg)
     hist = cmd_history(cfg, cfg["user"], tool, 90)
-    pool = cfg.get("gpu_pool_gb", 120)
+    # 池子大小从服务器实时读，不用 config 里的写死值 —— 配置改过好几次，
+    # 写死的数迟早过时（gpu_pool_gb 曾停留在 120，而实际早已是 113.9）。
+    pool = st.get("mem_allocatable_gb") or cfg.get("gpu_pool_gb", 120)
     floor = cfg.get("gpu_floor_gb", 96)
     rec = {"gres": None, "cpus": cpus, "mem_gb": None, "time": None,
            "confidence": "low", "basis": [], "warnings": [], "run_now": None}
 
     if needs_gpu:
         rec["gres"] = "gpu:1"
-        # MVP: no GPU-VRAM history yet -> lean generous (serialized => cheap to over-reserve)
-        rec["mem_gb"] = min(int(round(floor * 1.15)), pool - 10)
-        rec["confidence"] = "low"
-        rec["basis"].append(
-            f"GPU job, no VRAM history yet -> generous default ~{rec['mem_gb']}G "
-            f"(lua auto-floors to {floor}G regardless). Over-reserving a GPU job is cheap "
-            f"because GPU jobs are serialized.")
-        rec["warnings"].append("Recommend a calibration/profiled run to pin real VRAM peak, "
-                               "then this becomes exact.")
+        # ★ 2026-07-20 起规则变了：GPU 作业的 --mem 会被**尊重**，不再一律抬到 96G。
+        #   没写才兜底给 96G。所以 --mem 从"写了也白写"变成了一份**申报**——
+        #   spark-memguard 在内存吃紧时按"实际占用 vs 申报量"对账，冻结超得最多的那个。
+        #   往小了申报不是占便宜，是把自己放到优先被冻结的位置。
+        if mem_guess:
+            rec["mem_gb"] = max(4, int(round(mem_guess * 1.3)))
+            rec["confidence"] = "medium"
+            rec["basis"].append(
+                f"GPU job: your estimate {mem_guess}G +30% margin -> declare --mem={rec['mem_gb']}G. "
+                f"Since 2026-07-20 an explicit --mem on a GPU job is RESPECTED (no longer floored "
+                f"to {floor}G), so a small job no longer has to wait for {floor}G to free up.")
+            rec["basis"].append(
+                f"Declaring {rec['mem_gb']}G instead of the {floor}G default leaves "
+                f"{round(pool - rec['mem_gb'], 1)}G for everyone else while you run "
+                f"(the default would leave only {round(pool - floor, 1)}G).")
+            rec["warnings"].append(
+                "Declare honestly. spark-memguard reconciles actual usage against this number "
+                "when memory gets tight (>=88%) and freezes whoever exceeds their own declaration "
+                "by the most. Under-declaring puts you first in line to be frozen. "
+                "Rounding UP is free; rounding down is not.")
+        else:
+            # 第一次跑某个工具/某个输入规模时，猜不如量。让 lua 兜底给 96G 跑一趟，
+            # 采样器会记下真实峰值，下一次就能精确申报。
+            rec["mem_gb"] = None
+            rec["confidence"] = "low"
+            rec["basis"].append(
+                f"GPU job with no estimate: OMIT --mem for this first run -> lua gives the safe "
+                f"{floor}G default. The sampler records this job's real VRAM peak per-job "
+                f"(nvidia-smi --query-compute-apps, verified accurate on GB10), so after one run "
+                f"you can declare an exact number instead of guessing.")
+            rec["basis"].append(
+                f"Cost of that default: only {round(pool - floor, 1)}G left for everyone else "
+                f"while this runs. Worth it once, to get a real measurement.")
+            rec["warnings"].append(
+                "If you already know roughly how much VRAM this needs, pass --mem-guess instead "
+                "-- declaring a smaller number lets others use the machine alongside you.")
     else:
         peaks = hist["host_mem_peaks_gb"]
         if peaks:
@@ -270,7 +305,61 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             "history_summary": {"count": hist["count"], "host_mem_peaks_gb": hist["host_mem_peaks_gb"]}}
 
 
+# GPU 显存自限的已知写法。本机 cudaMalloc 绕过 cgroup（实测 8GB 只记 0.08GB），
+# --mem 管不住显存，失控的 GPU 程序会吃满统一内存池把整机搞僵。所以生成 GPU 作业
+# 脚本时机械检查一遍：命令里没有任何自限手段就明确警告，别让它悄悄溜过去。
+_GPU_CAP_HINTS = (
+    "gpu-memory-utilization",           # vLLM
+    "gpu_memory_utilization",
+    "set_per_process_memory_fraction",  # PyTorch
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "memory_fraction",
+    "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT",
+)
+
+
+def gpu_cap_warning(gres, command):
+    """GPU 作业但命令里看不到显存自限 -> 返回警告文本；否则 None。"""
+    if not gres or "gpu" not in str(gres).lower():
+        return None
+    cmd = command or ""
+    if any(h.lower() in cmd.lower() for h in _GPU_CAP_HINTS):
+        return None
+    return ("这是 GPU 作业，但命令里没有任何显存自限参数。本机 --mem 管不住显存"
+            "（cudaMalloc 绕过 cgroup），只有程序自己能限制自己。"
+            "支持自限的工具请带上（如 vLLM 的 --gpu-memory-utilization；"
+            "自写 PyTorch 加 torch.cuda.set_per_process_memory_fraction）。"
+            "工具确实不支持（如 Boltz）则靠控制输入规模，并按实测峰值申报 --mem。"
+            "后果：程序涨过你申报的量、且机器内存吃紧时，spark-memguard 会冻结你这个作业"
+            "（暂停不是杀掉，可解冻续跑，但会打断）。")
+
+
+def vram_cap_block(mem_gb, pool_gb):
+    """生成一段可直接粘进脚本的显存自限提示（按申报量算好比例）。
+
+    刻意生成成**注释**而不是可执行代码：不同工具限制显存的方式完全不同，
+    自动插一行 torch 调用可能直接改坏用户的程序。给出算好的数字让人自己选。
+    """
+    if not mem_gb or not pool_gb:
+        return []
+    frac = max(0.02, min(0.95, round(float(mem_gb) / float(pool_gb), 2)))
+    return [
+        "# ── 显存自限（强烈建议）──────────────────────────────",
+        f"# 本机 --mem 管不住显存，上面那个 {mem_gb}G 是**申报**：机器内存吃紧时",
+        f"# spark-memguard 按它对账，超出最多的作业会被冻结。请让程序自己也守住：",
+        f"#   vLLM     : --gpu-memory-utilization {frac}",
+        f"#   PyTorch  : torch.cuda.set_per_process_memory_fraction({frac})",
+        "#   不支持的工具（如 Boltz）：控制输入规模，跑完按实测峰值修正申报",
+        "# ─────────────────────────────────────────────────────",
+    ]
+
+
 def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
+    # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
+    # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
+    if not mem_gb and not (gres and "gpu" in str(gres).lower()):
+        die("CPU 作业必须指定 --mem-gb：服务器的 job_submit.lua 会拒绝没写 --mem 的 CPU 作业。"
+            "先用 recommend 拿一个推荐值，或让用户给个估计。")
     L = ["#!/bin/bash",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --partition={cfg.get('partition', 'main')}"]
@@ -278,18 +367,34 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
         L.append(f"#SBATCH --gres={gres}")
     if cpus:
         L.append(f"#SBATCH --cpus-per-task={cpus}")
+    is_gpu = bool(gres and "gpu" in str(gres).lower())
     if mem_gb:
         L.append(f"#SBATCH --mem={mem_gb}G")
+    elif is_gpu:
+        # GPU 作业不写 --mem 是合法的（lua 兜底给 96G），但要让人知道这是有意为之
+        L.append("# 未写 --mem：job_submit.lua 会兜底预留 96000M。")
+        L.append("# 跑完看实测峰值（面板/spark-usage），下次改成 #SBATCH --mem=<实测+30%>G，")
+        L.append("# 别人就能和你同时用机器。")
     if time:
         L.append(f"#SBATCH --time={time}")
-    L += ["#SBATCH --output=%x-%j.log", "",
-          command or "# TODO: your command here", ""]
+    L.append("#SBATCH --output=%x-%j.log")
+    if is_gpu:
+        try:
+            pool = cmd_status(cfg).get("mem_allocatable_gb")
+        except Exception:
+            pool = None       # 连不上服务器不该让生成脚本失败，只是少一段提示
+        if pool:
+            L += [""] + vram_cap_block(mem_gb, pool)
+    L += ["", command or "# TODO: your command here", ""]
     script = "\n".join(L)
     result = {"sbatch_script": script}
     if out:
         with open(out, "w", encoding="utf-8", newline="\n") as f:
             f.write(script)
         result["written_to"] = out
+    warn = gpu_cap_warning(gres, command)
+    if warn:
+        result["warnings"] = [warn]
     result["next"] = "Review, get user OK, then: advise.py submit --script <file>"
     return result
 

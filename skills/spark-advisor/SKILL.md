@@ -47,6 +47,20 @@ python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--c
 
 **④ 判断能跑还是排队**——看 `recommendation.run_now` 和 `warnings`：GPU 忙就明说会排队、前面几个、看 `pending_jobs` 和 running 的 `time_left` 估等多久；内存不够也明说会排队。
 
+**④· GPU 作业必做：显存自限 + 讲清 `--mem` 的新语义**
+
+`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup，实测 8 GB 只记 0.08 GB），只有程序自己能限制自己：
+- 工具支持自限（如 vLLM `--gpu-memory-utilization`）→ **生成脚本时直接带上**，用户不必知道
+- 工具不支持（如 Boltz）→ **明说拦不住**，给替代建议（控制输入规模 / 按实测峰值申报）
+- 审用户已有脚本时，GPU 作业缺上限 → **主动指出**，这是职责不是可选项
+
+★**2026-07-20 起 `--mem` 的语义变了，必须跟用户讲清**：
+- 写了就**按写的给**（不再一律抬到 96G）；不写才兜底 96G
+- 它是一份**申报**：内存 ≥88% 时 `spark-memguard` 按"实际占用 vs 申报量"对账，
+  **冻结超出最多的那个作业**（冻结≠杀掉，可解冻续跑，但会打断）
+- ⇒ 申报小不是占便宜，是把自己排到第一个被冻的位置。**没把握就别写**，
+  走 96G 默认跑一趟，采样器会记下真实峰值，下次照着填
+
 **⑤ 提交前确认门（强制）**：
 > **IMPORTANT — YOU MUST**：生成 sbatch 后，**先把推荐参数（资源/时间）给用户看，问一句"要现在提交吗？"，用户明确同意后才提交。** 提交 GPU 作业消耗贵资源，绝不自动提交。
 - 生成：`advise.py gen-sbatch --name <n> --gres <g> --mem-gb <m> --time <t> --command "<cmd>" --out /tmp/job.sh`
@@ -57,6 +71,12 @@ python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--c
 用户只问"服务器现在什么情况" → `advise.py status`，用人话汇总（GPU 空/忙、可调度 X G、队列 N 个），**不提交任何东西**。
 
 ## 诚实纪律（照 references/recommend-rules.md 执行）
-- 没历史就标**置信度低**，别装准；主动提议先跑标定采样。
-- GPU 显存历史目前 `sacct` 抓不到、尚未追踪 → GPU 侧靠"宁可多报 + 标定"，**别声称有 GPU 历史**。
+- 没历史就标**置信度低**，别装准。
+- ★ GPU 显存**现在有追踪了**：`sacct` 依然抓不到，但服务器的采样器在 GPU 作业运行时
+  每 5 秒按作业记一次显存（`nvidia-smi --query-compute-apps` → PID → `job_<N>`）。
+  ⇒ **低置信时别再提议"先做标定试跑"** —— 正常跑一次就有真实峰值了。正确建议是
+  "这次不写 `--mem` 走默认，跑完看实测再定"。
 - 估错有 cgroup 兜底（只崩用户自己的作业、可重交）——可据此安心给推荐，但仍要诚实标不确定。
+  ★ 但**这条只对 CPU 内存成立**：`cudaMalloc` 的显存绕过 cgroup，GPU 侧没有兜底，
+  别把"估错也没关系"这句话套到 GPU 显存上。
+- CPU 作业的 `--mem` **必填**（不写会被拒绝提交），推荐里不能省。
