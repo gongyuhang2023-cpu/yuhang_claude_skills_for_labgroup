@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# spark-advisor 个人坑日志：绝不进公开库（只在个人库/私有快照保留）
+spark-pitfalls.md
