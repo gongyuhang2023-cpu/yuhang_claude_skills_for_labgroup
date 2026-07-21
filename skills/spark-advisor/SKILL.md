@@ -9,6 +9,23 @@ description: Slurm GPU 服务器作业顾问。查服务器现状+历史，为�
 > 引擎在 `scripts/advise.py`（纯标准库；把 SSH 和 slurm 命令封装好、只返回干净 JSON——**别自己现攒 ssh/slurm 命令**）。
 > **推荐的判断规则在 `references/recommend-rules.md`，推荐前先读它。** 机器的硬事实在 `references/server-facts.md`。
 
+## ⛔ 红线：GPU / 重活只能走 Slurm，绝不 ssh 裸跑
+
+**IMPORTANT — YOU MUST**：帮用户在服务器上跑任何 **GPU 活 / 重活**，**只能**经本 skill 的
+`gen-sbatch → submit`（或交互调试用 `srun`）走 Slurm 队列。**绝不 `ssh <server> 'python xxx.py'` 裸跑** ——
+哪怕用户说"就跑一下"、哪怕图省事直接 ssh 进去更快。裸跑绕过 Slurm，有四重后果：
+
+1. **不留痕** —— `sacct` 没有记录 → 用量统计算不到这个人 → 采购决策 / 公平调度的依据全失真。
+2. **逃过看门狗，反而连累守规矩的人** —— 裸跑进程不在任何 `job_<N>` cgroup 里，`spark-memguard`
+   按作业对账时归因不到它。内存吃紧时它超了也不会被冻，系统只能去冻**走了队列**的作业。
+   最可能吃爆内存的恰恰是失控的裸跑进程，却正好逃过全机唯一那道防线。
+3. **抢显存一起崩** —— 绕过 GPU 串行调度，和别人的作业撞同一块卡（这台机器的已知崩溃模式）。
+4. **不受 fairshare** —— 多吃不给用得少的人让位。
+
+**什么算可以直接跑的"轻活"**：改代码、跑几秒的小脚本、`nvidia-smi` / `squeue` 这类查看命令。
+判据同使用指南——**会吃 GPU 或跑得久 = 走队列；瞬间完成的杂事 = 直接跑**。拿不准就走队列
+（留痕 + 受保护，没有坏处）。
+
 ## 前置：首次配置（仅当 config.json 缺失时；有就跳过、直接干活）
 
 skill 根目录的 `config.json`（gitignore）存服务器连接信息。**没有它才走下面这套无感配置**：
