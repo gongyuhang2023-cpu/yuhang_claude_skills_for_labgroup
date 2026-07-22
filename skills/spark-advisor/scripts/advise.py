@@ -66,16 +66,21 @@ def ssh_run(cfg, remote_cmd, timeout=30, stdin_data=None):
     if cfg.get("ssh_key"):
         cmd += ["-i", cfg["ssh_key"]]
     cmd += [target, remote_cmd]
+    # 走字节 I/O，不用 text=True：Windows 文本模式会把 stdin 里的 \n 翻成 \r\n，
+    # sbatch 见到 CRLF 脚本会拒收（"Batch script contains DOS line breaks"）。
+    payload = stdin_data.encode("utf-8") if stdin_data is not None else None
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, input=stdin_data)
+        r = subprocess.run(cmd, capture_output=True,
+                           timeout=timeout, input=payload)
     except FileNotFoundError:
         die("`ssh` not found on PATH. Install an OpenSSH client.")
     except subprocess.TimeoutExpired:
         die(f"SSH timed out talking to {target}.")
-    if r.returncode != 0 and not r.stdout.strip():
-        die(f"SSH command failed ({r.returncode}) on {target}: {r.stderr.strip()[:300]}")
-    return r.stdout
+    stdout = r.stdout.decode("utf-8", "replace")
+    stderr = r.stderr.decode("utf-8", "replace")
+    if r.returncode != 0 and not stdout.strip():
+        die(f"SSH command failed ({r.returncode}) on {target}: {stderr.strip()[:300]}")
+    return stdout
 
 
 # ----------------------------- parse helpers -----------------------------
@@ -284,11 +289,29 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             rec["basis"].append("CPU job: no history or estimate -> default 16G. "
                                 "cgroup hard-caps this safely -- underestimate only kills your own job.")
 
-    elapsed = [j["elapsed"] for j in hist["jobs"] if j.get("elapsed") and j["elapsed"] != "00:00:00"]
-    if elapsed:
-        rec["time"] = f"history longest ~{max(elapsed)}; suggest ~1.5x that"
+    # ── 时间（--time）—— ★2026-07-22 策略：默认不设限 ──────────────────────
+    # 不再替用户估一个"紧"的 --time：谁也估不准运行时长，估短了作业撞墙钟被 TIMEOUT
+    # 杀掉、整段白跑（TIMEOUT 是终态、不触发 --requeue、不自动续），比不设限更浪费。
+    # 这台机 DefaultTime=MaxTime=14 天，不写 --time 就拿满 14 天（受支持的正规路径）。
+    # 防"卡死作业空占卡"的是服务器端 idleguard 闲置回收（连续闲置 ~1h 自动收），不是墙钟。
+    # → 默认 time=None（gen-sbatch 不写 --time）；仅当用户主动给上限才用。
+    #   详见 references/recommend-rules.md §时间。
+    if time_guess:
+        rec["time"] = time_guess
+        rec["basis"].append(
+            f"--time = your explicit cap {time_guess} (optional). A hung/forgotten job then "
+            f"auto-releases at this limit instead of squatting the single GPU. Overestimate freely "
+            f"-- being killed at the cap is the only downside, so leave generous margin.")
     else:
-        rec["time"] = time_guess or "6:00:00 (generous default -- set to your expected max; cap is 14 days)"
+        rec["time"] = None
+        rec["basis"].append(
+            "No --time on purpose -> partition default (14 days = the max). We do NOT guess a tight "
+            "limit: underestimating kills the job (TIMEOUT, no auto-requeue) and wastes the whole "
+            "run -- worse than not capping. Stuck jobs are reclaimed by the idle-watchdog (idleguard: "
+            "GPU+CPU both quiet ~1h -> auto scancel), not by wall-clock. So pass NOTHING for --time to "
+            "gen-sbatch. Only warn about time if this job plausibly needs MORE than 14 days to finish "
+            "(then it needs checkpointing + splitting). Pass --time only if the user gives a safe "
+            "upper bound and wants a forgotten job to release sooner.")
 
     if needs_gpu:
         rec["run_now"] = not st["gpu_job_running"]
@@ -332,6 +355,18 @@ def gpu_cap_warning(gres, command):
             "工具确实不支持（如 Boltz）则靠控制输入规模，并按实测峰值申报 --mem。"
             "后果：程序涨过你申报的量、且机器内存吃紧时，spark-memguard 会冻结你这个作业"
             "（暂停不是杀掉，可解冻续跑，但会打断）。")
+
+
+def boltz_num_workers_warning(command):
+    """Boltz 在本机 Slurm 上默认 num_workers=2 会静默死锁 -> 提醒加 --num_workers 0。"""
+    cmd = (command or "").lower()
+    if "boltz" not in cmd:
+        return None
+    if "num_workers" in cmd:            # 用户已写了（0 或别的值），不重复提醒
+        return None
+    return ("⚠️ Boltz 在本机 Slurm 上默认 num_workers=2 会**静默死锁**："
+            "GPU 0%、worker 卡在 futex、不报错不退出、状态却显示『在跑』，"
+            "无人值守会白挂几天。命令里务必加 `--num_workers 0`。（实测 2026-07-21）")
 
 
 def vram_cap_block(mem_gb, pool_gb):
@@ -392,9 +427,10 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
         with open(out, "w", encoding="utf-8", newline="\n") as f:
             f.write(script)
         result["written_to"] = out
-    warn = gpu_cap_warning(gres, command)
-    if warn:
-        result["warnings"] = [warn]
+    warns = [w for w in (gpu_cap_warning(gres, command),
+                         boltz_num_workers_warning(command)) if w]
+    if warns:
+        result["warnings"] = warns
     result["next"] = "Review, get user OK, then: advise.py submit --script <file>"
     return result
 
