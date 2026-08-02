@@ -153,6 +153,12 @@ def cmd_status(cfg):
     allocatable = max(0, real - spec)
     gpu_total = gres_count(d.get("Gres", ""))
     gpu_used = gres_count(d.get("GresUsed", ""))
+    # CPU 核：CPUTot 总数，CPUAlloc 已分配，CPUEfctv = 扣掉 CoreSpec 后的可分配有效核
+    # （没设 CoreSpec 时 == CPUTot）。可调度核 = 有效核 − 已分配，与 mem_schedulable 同理。
+    cpu_total = int0(d.get("CPUTot"))
+    cpu_eff = int0(d.get("CPUEfctv")) or cpu_total
+    cpu_alloc = int0(d.get("CPUAlloc"))
+    cpu_free = max(0, cpu_eff - cpu_alloc)
 
     fmt = "%i|%u|%T|%j|%m|%b|%M|%L|%R"
     running, pending = [], []
@@ -177,6 +183,9 @@ def cmd_status(cfg):
         "gpu_used": gpu_used,
         "gpu_free": gpu_used < gpu_total,
         "gpu_job_running": any(j["gpu"] for j in running),
+        "cpu_total": cpu_total,                        # 节点总核
+        "cpu_alloc": cpu_alloc,                        # 已被作业预留的核
+        "cpu_free": cpu_free,                          # 现在还能调度的核（有效核 − 已分配）
         "mem_total_gb": mb_to_gb(real),
         "mem_spec_reserved_gb": mb_to_gb(spec),        # 系统守护进程占用，用户碰不到
         "mem_allocatable_gb": mb_to_gb(allocatable),   # 用户能申请的天花板
@@ -217,8 +226,13 @@ def cmd_history(cfg, user, tool, days):
         "user": user, "tool_filter": tool, "days": days,
         "count": len(rows),
         "host_mem_peaks_gb": peaks,
-        "note": "MaxRSS = HOST (CPU-side) memory only. GPU/VRAM peak is NOT in sacct "
-                "and is not tracked yet (planned: profiled runs -> shared log).",
+        "note": "MaxRSS = HOST (CPU-side) memory. Reliable for CPU jobs; DISTORTED for GPU "
+                "jobs (cudaMalloc bypasses cgroup accounting -> under-reports by ~100x). "
+                "Real per-job VRAM peaks ARE sampled server-side since 2026-07-20 "
+                "(gpu_proc_samples), but nothing exposes them per job -- only the "
+                "fleet-wide aggregate via `spark-usage --all`. This engine does not fetch "
+                "VRAM at all: a known boundary, not a missing feature. Do not expect "
+                "host_mem_peaks_gb to say anything about GPU memory.",
         "jobs": rows[:40],
     }
 
@@ -262,9 +276,10 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             rec["confidence"] = "low"
             rec["basis"].append(
                 f"GPU job with no estimate: OMIT --mem for this first run -> lua gives the safe "
-                f"{floor}G default. The sampler records this job's real VRAM peak per-job "
-                f"(nvidia-smi --query-compute-apps, verified accurate on GB10), so after one run "
-                f"you can declare an exact number instead of guessing.")
+                f"{floor}G default. To get an exact number for NEXT time, make the job measure "
+                f"itself (PyTorch: print torch.cuda.max_memory_allocated()/1024**3 at the end). "
+                f"The server also samples per-job VRAM, but nothing exposes it per job -- do not "
+                f"promise the user they can just look it up afterwards.")
             rec["basis"].append(
                 f"Cost of that default: only {round(pool - floor, 1)}G left for everyone else "
                 f"while this runs. Worth it once, to get a real measurement.")
@@ -313,16 +328,60 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             "(then it needs checkpointing + splitting). Pass --time only if the user gives a safe "
             "upper bound and wants a forgotten job to release sooner.")
 
+    # ── CPU 核数（--cpus-per-task）─────────────────────────────────
+    # 类比内存"想要多少 vs 现在能给多少"，但核是**弹性**的（少给只是慢，不像内存少给会 OOM），
+    # 所以默认**不为多凑几个核而让 GPU 作业排队**——GPU 才是串行稀缺资源。不写 --cpus 会落
+    # Slurm 默认 1 核/task，把输入特征化/MSA/BLAS 那几步串行掉（静默降级、无告警）。
+    cpu_free = st.get("cpu_free")
+    cpu_total = st.get("cpu_total")
+    if cpus is not None:
+        rec["cpus"] = cpus                        # 用户显式指定 → 尊重
+        rec["basis"].append(f"CPU 核：用你指定的 {cpus} 核。")
+        if cpu_free is not None and cpus > cpu_free:
+            rec["warnings"].append(
+                f"要 {cpus} 核，但当前只 {cpu_free}/{cpu_total} 核空闲 -> 会排队等核空出。")
+    elif needs_gpu:
+        want = 4                                  # 喂特征化/MSA/BLAS 的多线程，够用又不霸核
+        if cpu_free is not None:
+            give = max(1, min(want, cpu_free))    # 按当前空闲收敛，绝不为凑核排队
+            rec["cpus"] = give
+            if give < want:
+                rec["basis"].append(
+                    f"CPU 核：想给 {want} 核（特征化/BLAS 多线程受益），但当前只 {cpu_free}/{cpu_total} "
+                    f"核空闲，先给 {give} 核以免为凑核排队——核是弹性的、少几个只是预处理慢一点，"
+                    f"GPU 那段不受影响。显式 --cpus 可覆盖。")
+            else:
+                rec["basis"].append(
+                    f"CPU 核：默认 {give} 核（当前 {cpu_free}/{cpu_total} 空闲，够）。不写会落 Slurm "
+                    f"默认 1 核、把特征化/MSA/BLAS 串行掉。显式 --cpus 可覆盖。")
+        else:
+            rec["cpus"] = want
+            rec["basis"].append(
+                f"CPU 核：默认 {want} 核（读不到当前核占用，按默认给；显式 --cpus 可覆盖）。")
+    else:
+        # 纯 CPU 作业：核=算力本身，最优值看工具并行度——单线程给 1，BLAS/sklearn/多进程按需。
+        # 不硬塞默认（免得给单线程作业预留一堆核、白占共享池），只提示按工具定 + 报当前可用核。
+        rec["cpus"] = cpus                        # 可能为 None -> gen-sbatch 不写 -> 默认 1 核（按需）
+        avail = f"（当前 {cpu_free}/{cpu_total} 核空闲）" if cpu_free is not None else ""
+        rec["basis"].append(
+            f"CPU 核：按工具并行度定——单线程/串行脚本 1 核，BLAS/sklearn/多进程按需要给{avail}。"
+            f"没传 --cpus 会落 Slurm 默认 1 核，别让并行工具白跑单核。")
+
     if needs_gpu:
         rec["run_now"] = not st["gpu_job_running"]
         if st["gpu_job_running"]:
             rec["warnings"].append(
                 f"GPU is BUSY now ({st['pending_count']} already queued) -> your job will QUEUE.")
     else:
-        rec["run_now"] = (rec["mem_gb"] or 0) <= st["mem_schedulable_gb"]
-        if not rec["run_now"]:
+        mem_ok = (rec["mem_gb"] or 0) <= st["mem_schedulable_gb"]
+        cpu_ok = rec["cpus"] is None or cpu_free is None or rec["cpus"] <= cpu_free
+        rec["run_now"] = mem_ok and cpu_ok
+        if not mem_ok:
             rec["warnings"].append(
                 f"Needs {rec['mem_gb']}G but only {st['mem_schedulable_gb']}G schedulable now -> will QUEUE.")
+        if not cpu_ok:
+            rec["warnings"].append(
+                f"Needs {rec['cpus']} cores but only {cpu_free}/{cpu_total} cores free now -> will QUEUE.")
 
     return {"recommendation": rec, "server_now": st,
             "history_summary": {"count": hist["count"], "host_mem_peaks_gb": hist["host_mem_peaks_gb"]}}
@@ -369,6 +428,17 @@ def boltz_num_workers_warning(command):
             "无人值守会白挂几天。命令里务必加 `--num_workers 0`。（实测 2026-07-21）")
 
 
+def cpus_warning(gres, cpus):
+    """GPU 作业没设 --cpus-per-task -> 会落 Slurm 默认 1 核，特征化/BLAS 被串行。"""
+    is_gpu = bool(gres and "gpu" in str(gres).lower())
+    if not is_gpu or cpus:
+        return None
+    return ("这是 GPU 作业但没设 --cpus-per-task，会落 Slurm 默认 1 核/task："
+            "输入特征化 / MSA 解析 / BLAS 那几步是多线程的，1 核会把它们串行掉"
+            "（GPU 那段不受影响，但预处理更慢）。走 recommend 拿按当前空闲核算好的默认值，"
+            "或显式 --cpus。")
+
+
 def vram_cap_block(mem_gb, pool_gb):
     """生成一段可直接粘进脚本的显存自限提示（按申报量算好比例）。
 
@@ -384,7 +454,8 @@ def vram_cap_block(mem_gb, pool_gb):
         f"# spark-memguard 按它对账，超出最多的作业会被冻结。请让程序自己也守住：",
         f"#   vLLM     : --gpu-memory-utilization {frac}",
         f"#   PyTorch  : torch.cuda.set_per_process_memory_fraction({frac})",
-        "#   不支持的工具（如 Boltz）：控制输入规模，跑完按实测峰值修正申报",
+        "#   不支持的工具（如 Boltz）：控制输入规模；结尾自己打印",
+        "#     torch.cuda.max_memory_allocated()/1024**3  拿到真值后修正申报",
         "# ─────────────────────────────────────────────────────",
     ]
 
@@ -407,9 +478,11 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
         L.append(f"#SBATCH --mem={mem_gb}G")
     elif is_gpu:
         # GPU 作业不写 --mem 是合法的（lua 兜底给 96G），但要让人知道这是有意为之
-        L.append("# 未写 --mem：job_submit.lua 会兜底预留 96000M。")
-        L.append("# 跑完看实测峰值（面板/spark-usage），下次改成 #SBATCH --mem=<实测+30%>G，")
-        L.append("# 别人就能和你同时用机器。")
+        L.append("# 未写 --mem：job_submit.lua 会兜底预留 96000M（这一趟别人只剩 ~18G）。")
+        L.append("# 想让下一趟能精确申报，让程序自己报峰值 —— PyTorch 在结尾加：")
+        L.append("#   print('VRAM peak GB:', torch.cuda.max_memory_allocated()/1024**3)")
+        L.append("# 拿到数后改成 #SBATCH --mem=<实测+30%>G，别人就能和你同时用机器。")
+        L.append("# （服务器侧也在采显存，但按作业的值取不回来，别指望跑完去面板查。）")
     if time:
         L.append(f"#SBATCH --time={time}")
     L.append("#SBATCH --output=%x-%j.log")
@@ -428,6 +501,7 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
             f.write(script)
         result["written_to"] = out
     warns = [w for w in (gpu_cap_warning(gres, command),
+                         cpus_warning(gres, cpus),
                          boltz_num_workers_warning(command)) if w]
     if warns:
         result["warnings"] = warns
@@ -572,6 +646,12 @@ def cmd_init(user, host, node, partition, gpu_pool_gb, gpu_floor_gb):
 # ----------------------------- CLI -----------------------------
 
 def main():
+    # Windows 控制台默认 cp936，emit()/die() 用 ensure_ascii=False 输出的中文（basis/warnings）
+    # 会 mojibake。强制 stdout 走 UTF-8，让中文在任何调用方（Bash/PowerShell）都正确。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="spark-advisor engine (facts + baseline; AI does final judgment)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

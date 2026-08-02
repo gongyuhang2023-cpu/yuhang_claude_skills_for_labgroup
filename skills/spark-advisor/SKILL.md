@@ -28,29 +28,41 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 
 ## 核心流程
 
-**第 0 步 · 执行地判定**（先做）——这活该本地跑还是上服务器？
+**0 · 执行地判定**（先做）——这活该本地跑还是上服务器？
 - 快速判据：**GPU / 峰值内存 >19G / 带宽·BLAS 密集 → 服务器**；**sklearn 树模型（RF/GBM）等分支密集 CPU 活 → 本地更快**；单线程指纹类两边打平。
 - 拿不准 / 要对新任务判 → 读 `references/execution-strategy.md`（带 benchmark 与判据）。
 - **判为本地 → 给本地建议，到此为止、不碰服务器。** 判为服务器 → 往下走（并守红线：走队列）。
 
-**① 抽输入特征**（你做）→ 决定规模：Boltz token ≈ 蛋白残基 + 配体原子；Uni-Dock 盒子 × 并行配体数；纯 CPU 用 `--mem-guess <GB>`。
+**1 · 抽输入特征**（你做）→ 决定规模：Boltz token ≈ 蛋白残基 + 配体原子；Uni-Dock 盒子 × 并行配体数；纯 CPU 用 `--mem-guess <GB>`。
 
-**② 查现状 + 历史 + baseline**（引擎一条命令）：
+**2 · 查现状 + 历史 + baseline**（引擎一条命令）：
 ```
 python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]
 ```
 → 返回 `recommendation` + `server_now` + `history_summary`。
 
-**③ 出推荐**（依 `references/recommend-rules.md`）——人话讲清，**务必带置信度 + 依据**，GPU 侧宁可多报。
+**3 · 定三个参数、出推荐**（依 `references/recommend-rules.md`）——人话讲清，**务必带置信度 + 依据**：
 
-**④ 判排队还是能跑**——看 `run_now` / `warnings`：GPU 忙就明说排队、前面几个、按正在跑那个的 `time_left` 估等多久；内存不够也明说会排队。
+| 参数 | 默认动作 | 为什么 |
+|---|---|---|
+| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟） | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
+| `--cpus` | 用 `recommendation.cpus`，**别漏传** | 不写落 Slurm 默认 1 核，把输入特征化 / MSA / BLAS 串行掉——**静默降级、无告警** |
+| `--time` | **默认不传** | 估短了作业被 TIMEOUT 杀、整段白跑；不写 = 拿满 14 天默认（正规路径）。防"卡死作业空占卡"的是服务器端 idleguard 闲置看门狗，不是墙钟 |
 
-**④· GPU 作业必做 · 显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成脚本时直接带上；不支持的（Boltz）明说拦不住 + 按实测峰值申报。`--mem` 是会被 memguard 对账的**申报**（写了按写的给、报低 = 优先被冻）。**各工具写法 / 机制 → `references/recommend-rules.md`「GPU 显存自限」+ `references/server-facts.md`。**
+- 仅当用户主动给安全上限时才传 `--time`；预计 >14 天才跑得完 → 提醒必须 checkpoint 分段。
+- 每个参数具体怎么算、置信度怎么标 → `references/recommend-rules.md`。
 
-**④· 时间（--time）· ★默认不设限**：不替用户估紧 `--time`——估短了作业被 TIMEOUT 杀、整段白跑，比不设限更糟。不写 `--time` = 拿满 14 天默认（正规路径）；防"卡死作业空占卡"的是服务器端 **idleguard 闲置看门狗**（GPU+CPU 连续 ~1h 双静默 → 自动回收），不是墙钟。→ **gen-sbatch 默认不传 `--time`**；仅当用户主动给安全上限（想让忘关的作业早点释放）才传。预计 >14 天才跑得完的活 → 提醒得 checkpoint 分段。详见 `references/recommend-rules.md §时间`。
+**4 · 判排队还是能跑**——看 `run_now` / `warnings`：GPU 忙就明说排队、前面几个、按正在跑那个的 `time_left` 估等多久；内存或核数不够也明说会排队。
 
-**⑤ 提交前确认门（强制）**：**IMPORTANT — YOU MUST** 先把资源（默认无时限）给用户看、问一句"要现在提交吗？"、明确同意才提交。绝不自动提交 GPU 作业。
-- `gen-sbatch --name <n> --gres <g> --mem-gb <m> --command "<cmd>" --out /tmp/job.sh`（**默认不带 `--time`**，除非用户给了上限）→ 用户点头 → `submit --script /tmp/job.sh` → 返回 JobID（告诉用户："可关机走人，`squeue` 看进度、`sacct -j <id>` 看用量"）。
+**5 · 生成脚本**：
+```
+gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" --out /tmp/job.sh
+```
+- **GPU 作业必查显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成时直接带上；不支持的（Boltz）**明说拦不住**，靠控制输入规模 + 让程序结尾自己打印峰值。写法与机制 → `references/recommend-rules.md`「GPU 显存自限」。
+- 引擎会回 `warnings`（漏 `--cpus` / 无显存自限 / Boltz `num_workers` 死锁）——**别忽略**。
+
+**6 · 提交前确认门（强制）**：**IMPORTANT — YOU MUST** 先把资源给用户看、问一句"要现在提交吗？"、明确同意才提交。**绝不自动提交 GPU 作业。**
+→ 用户点头 → `submit --script /tmp/job.sh` → 返回 JobID（告诉用户："可关机走人，`squeue` 看进度、`sacct -j <id>` 看用量"）。
 
 ## 踩坑即记（服务器相关坑，个人积累）
 
@@ -58,4 +70,4 @@ python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--c
 
 ## 只是查状态？
 
-用户只问"服务器现在什么情况" → `advise.py status`，人话汇总（GPU 空/忙、可调度 X G、队列 N 个），**不提交任何东西**。
+用户只问"服务器现在什么情况" → `advise.py status`，人话汇总（GPU 空/忙、可调度 X G、CPU `cpu_free`/`cpu_total` 核空闲、队列 N 个），**不提交任何东西**。
