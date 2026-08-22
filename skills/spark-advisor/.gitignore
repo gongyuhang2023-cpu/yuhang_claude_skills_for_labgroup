@@ -1,6 +1,20 @@
-# Never share the real server address / credentials / per-user env
+# ─── 绝不上传：服务器地址 / 凭据 / 每人各异的环境 ───
 config.json
 env-profile.local.json
+
+# ─── 用户自己积累的东西，升级时也绝不能被覆盖 ───
+# 这两个文件是**用户在使用过程中长出来的**，仓库里永远没有它们的版本。
+# 升级 skill 时如果用"删掉整个目录再解压"的方式，它们会一起消失 —— 那是
+# 用户几个月踩坑的记录和自己项目的路径约定，没有任何地方能找回来。
+# 正确的升级方式：只覆盖仓库里有的文件（随发布邮件附了可直接粘贴的升级 prompt）。
+#
+# 注：spark-pitfalls.md 在仓库根 .gitignore 里也有一条；这里再写一遍是为了
+# 让本目录被单独 cp 出去时规则也跟着走。gitignore 是叠加的，重复无害。
+references/spark-pitfalls.md          # 你自己踩过的坑（症状→根因→绕法）
+references/workspace-layout.local.md  # 你的项目目录约定 / 产物落在哪
+*.local.md
+*.local.json
+
 .venv/
 __pycache__/
 *.pyc

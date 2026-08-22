@@ -12,7 +12,8 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 - 硬约束 / `--mem` 语义 / 提交规则 / cgroup 兜底 → `references/server-facts.md`
 - 本地 vs 服务器怎么判（带 benchmark） → `references/execution-strategy.md`
 - aarch64 某包能不能装 → `references/env-notes.md`
-- 本机踩过的坑（**个人**，不进公开库） → `references/spark-pitfalls.md`
+- 本机踩过的坑（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/spark-pitfalls.md`
+- 目录约定 / 产物落在哪（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/workspace-layout.local.md`（生成 sbatch 前读；**文件不存在就问用户**，别自己编一个路径）
 
 ## ⛔ 红线：GPU / 重活只能走 Slurm，绝不 ssh 裸跑
 
@@ -20,7 +21,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 
 ## 首次配置（仅当 config.json 缺失；有就跳过）
 
-`config.json`（gitignore）存服务器连接信息。缺了才走：① `advise.py detect-server` 扫 tailnet 得 IP+名 → ② 问"你在服务器上的用户名？（拼音小写，如龚宇航 = `yuhang`）" → ③ `advise.py init --user <名> --host <IP> --node <名>`。**绝不硬编码服务器地址**，IP 只落进 gitignore 的 `config.json`。
+`config.json`（gitignore）存服务器连接信息。缺了才走：① `advise.py detect-server` 扫 tailnet 得 IP+名 → ② 问"你在服务器上的用户名？（通常是姓名拼音小写）" → ③ `advise.py init --user <名> --host <IP> --node <名>`。**绝不硬编码服务器地址**，IP 只落进 gitignore 的 `config.json`。
 
 ## 环境感知（在服务器上跑程序前）
 
@@ -56,8 +57,18 @@ python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--c
 
 **5 · 生成脚本**：
 ```
-gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" --out /tmp/job.sh
+gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" \
+           --workdir <项目在服务器上的绝对路径> --out /tmp/job.sh
 ```
+- **`--workdir` 决定产物落在哪，别省。** 作业会在该目录里跑、日志进 `<workdir>/logs/`（`submit` 会自动建这个目录）。
+  **不传的下场**：Slurm 的 `--output` 是相对路径，而作业经 SSH 提交时相对的是**登录目录**——
+  于是每跑一次就往 home 根扔一个 `<作业名>-<ID>.log`，攒几十个之后没人分得清哪个对应哪次分析
+  （本机就是这么攒出来的）。**产物落在项目目录里还顺带进了备份，落 home 根则不在任何备份范围内。**
+- 落点从哪来：本机约定读 `references/workspace-layout.local.md`；**该文件不存在（比如刚装到别人机器上）
+  就问用户"这个项目在服务器上的目录是哪个"**——不要自己编一个，也不要默认落 home 根。
+- ⚠ 在 Git Bash / MSYS 下调用要带 `MSYS_NO_PATHCONV=1`，否则 `/home/...` 会被自动改写成
+  `C:/Program Files/Git/home/...`；这种脚本照样能提交，但作业一 chdir 就失败、且失败信息没地方写。
+  引擎已会拦下并提示，但不如一开始就带上。
 - **GPU 作业必查显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成时直接带上；不支持的（Boltz）**明说拦不住**，靠控制输入规模 + 让程序结尾自己打印峰值。写法与机制 → `references/recommend-rules.md`「GPU 显存自限」。
 - 引擎会回 `warnings`（漏 `--cpus` / 无显存自限 / Boltz `num_workers` 死锁）——**别忽略**。
 
@@ -66,7 +77,7 @@ gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" --out
 
 ## 踩坑即记（服务器相关坑，个人积累）
 
-跑活时若撞到**和服务器（ARM / 统一内存 / slurm / 工具在本机的默认值）相关**的坑、且排出了根因或绕法 → **先问用户一句"要记进 `references/spark-pitfalls.md` 吗？下次不再踩"**，同意才追加（症状 → 根因 → 绕法 → 日期 + 置信度）。跑某类活前若可能撞已知坑，先扫 `spark-pitfalls.md`。该文件是**个人库**、不进分享给实验室的公开库；够通用且验证充分的坑可手动晋级到 `env-notes.md` 再随公开库发出。
+跑活时若撞到**和服务器（ARM / 统一内存 / slurm / 工具在本机的默认值）相关**的坑、且排出了根因或绕法 → **先问用户一句"要记进 `references/spark-pitfalls.md` 吗？下次不再踩"**，同意才追加（症状 → 根因 → 绕法 → 日期 + 置信度）。跑某类活前若可能撞已知坑，先扫 `spark-pitfalls.md`。该文件是**你自己的**，不在本仓库里、升级 skill 时也不会被覆盖；够通用且验证充分的坑，值得手动挪进 `env-notes.md`。
 
 ## 只是查状态？
 

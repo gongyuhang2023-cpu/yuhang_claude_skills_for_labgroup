@@ -23,6 +23,9 @@ import argparse
 import datetime
 import json
 import os
+import re
+import shlex
+import socket
 import subprocess
 import sys
 
@@ -59,9 +62,39 @@ def load_config():
     die("config.json not found. Copy config.example.json -> config.json and fill it in.")
 
 
+_RESOLVED_HOST = None
+
+
+def resolve_host(cfg):
+    """Pick the network path to the server.
+
+    If config has an optional `host_lan` (a direct/LAN address) and its SSH port
+    answers, use it -- a wired LAN is typically an order of magnitude faster than
+    a VPN/WAN path. Otherwise fall back to `host`, which is the address that works
+    from anywhere. Both point at the same machine, so the choice is transparent to
+    callers.
+
+    Probed once per process: a single command usually issues several ssh calls and
+    there is no reason to re-probe for each.
+    """
+    global _RESOLVED_HOST
+    if _RESOLVED_HOST is not None:
+        return _RESOLVED_HOST
+    lan = cfg.get("host_lan")
+    if lan:
+        try:
+            with socket.create_connection((lan, int(cfg.get("ssh_port", 22))), timeout=1.0):
+                _RESOLVED_HOST = lan
+                return _RESOLVED_HOST
+        except OSError:
+            pass  # LAN not reachable right now (different site, cable unplugged)
+    _RESOLVED_HOST = cfg["host"]
+    return _RESOLVED_HOST
+
+
 def ssh_run(cfg, remote_cmd, timeout=30, stdin_data=None):
     """Run a command on the server over SSH. Returns stdout (str)."""
-    target = f'{cfg["user"]}@{cfg["host"]}'
+    target = f'{cfg["user"]}@{resolve_host(cfg)}'
     cmd = ["ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
     if cfg.get("ssh_key"):
         cmd += ["-i", cfg["ssh_key"]]
@@ -460,7 +493,16 @@ def vram_cap_block(mem_gb, pool_gb):
     ]
 
 
-def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
+def workdir_warning(workdir):
+    """没给落点 → 日志会散在 SSH 登录目录（通常是 home 根）。"""
+    if workdir:
+        return None
+    return ("没传 --workdir：Slurm 的 --output 是相对路径，作业经 SSH 提交时相对的是登录目录"
+            "（通常就是 home 根）。跑几次之后 home 根会散一地 <作业名>-<ID>.log，"
+            "看不出哪个对应哪次分析。把项目目录传给 --workdir，日志就进 <workdir>/logs/。")
+
+
+def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None):
     # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
     # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
@@ -485,7 +527,19 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
         L.append("# （服务器侧也在采显存，但按作业的值取不回来，别指望跑完去面板查。）")
     if time:
         L.append(f"#SBATCH --time={time}")
-    L.append("#SBATCH --output=%x-%j.log")
+    if workdir:
+        # workdir 是**服务器上**的绝对路径。在 Git Bash / MSYS 下调用本脚本时，
+        # 形如 /home/... 的参数会被自动改写成 C:/Program Files/Git/home/...，
+        # 生成的脚本照样能提交，但作业一 chdir 就失败、且失败信息没地方写 —— 在这里拦住。
+        if not workdir.startswith("/"):
+            die(f"--workdir 必须是服务器上的绝对路径（以 / 开头），实际收到：{workdir}\n"
+                "看着像被 MSYS 路径转换改写过。在 Git Bash 里调用时前面加 MSYS_NO_PATHCONV=1，"
+                "或改用 PowerShell 调用。")
+        # 作业在项目目录里跑，日志进该项目的 logs/ —— 产物跟着项目走，不堆在 home 根。
+        L.append(f"#SBATCH --chdir={workdir}")
+        L.append("#SBATCH --output=logs/%x-%j.log")
+    else:
+        L.append("#SBATCH --output=%x-%j.log")
     if is_gpu:
         try:
             pool = cmd_status(cfg).get("mem_allocatable_gb")
@@ -502,6 +556,7 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out):
         result["written_to"] = out
     warns = [w for w in (gpu_cap_warning(gres, command),
                          cpus_warning(gres, cpus),
+                         workdir_warning(workdir),
                          boltz_num_workers_warning(command)) if w]
     if warns:
         result["warnings"] = warns
@@ -514,8 +569,19 @@ def cmd_submit(cfg, script_path):
         die(f"script not found: {script_path}")
     with open(script_path, encoding="utf-8") as f:
         script = f.read()
+    # --chdir 的目标和它下面的 logs/ 必须在作业启动前就存在：Slurm 打不开 --output
+    # 指定的文件时，作业直接失败，而且失败信息本身也没地方写。
+    created = None
+    m = re.search(r"^#SBATCH\s+--chdir=(\S+)", script, re.M)
+    if m:
+        wd = m.group(1)
+        ssh_run(cfg, f"mkdir -p {shlex.quote(wd)}/logs")
+        created = f"{wd}/logs"
     out = ssh_run(cfg, "sbatch", stdin_data=script)
-    return {"submitted": out.strip(), "as_user": cfg["user"]}
+    result = {"submitted": out.strip(), "as_user": cfg["user"]}
+    if created:
+        result["ensured_dir"] = created
+    return result
 
 
 # remote probe script: one SSH pass, section markers, parsed locally.
@@ -561,7 +627,7 @@ def cmd_probe_env(cfg):
 
     profile = {
         "probed_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "server": f'{cfg["node"]} ({cfg["host"]})',
+        "server": f'{cfg["node"]} ({resolve_host(cfg)})',
         "user": cfg["user"],
         "system": {
             "arch": one("ARCH"),
@@ -677,6 +743,9 @@ def main():
     g.add_argument("--cpus", type=int, default=None)
     g.add_argument("--command", default=None)
     g.add_argument("--out", default=None)
+    g.add_argument("--workdir", default=None,
+                   help="absolute path of the project dir on the server; job runs there and "
+                        "logs go to <workdir>/logs/ instead of piling up in the home dir")
 
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
@@ -713,7 +782,8 @@ def main():
     elif args.cmd == "recommend":
         emit(cmd_recommend(cfg, args.tool, args.gpu, args.mem_guess, args.cpus, args.time))
     elif args.cmd == "gen-sbatch":
-        emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command, args.out))
+        emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
+                            args.out, args.workdir))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script))
     elif args.cmd == "probe-env":
