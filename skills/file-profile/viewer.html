@@ -533,23 +533,21 @@ html, body {
 
 /* ═══ TAG MANAGER ═══ */
 .fab-tags {
-  position: fixed;
-  bottom: 24px;
-  left: 24px;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: var(--text);
-  color: #fff;
-  border: none;
-  font-size: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
   cursor: pointer;
-  box-shadow: var(--shadow-md);
-  transition: transform 150ms ease, background 150ms ease;
-  z-index: 100;
-  display: none;
+  transition: var(--transition);
+  font-family: inherit;
+  flex-shrink: 0;
 }
-.fab-tags:hover { transform: scale(1.08); background: #333; }
+.fab-tags:hover { background: var(--border-light); color: var(--text); }
 
 .modal-backdrop {
   position: fixed;
@@ -856,6 +854,142 @@ html, body {
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* ═══ VIEW TOGGLE ═══ */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.view-toggle-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: none;
+  background: var(--surface-alt);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--transition);
+}
+.view-toggle-btn:not(:last-child) { border-right: 1px solid var(--border); }
+.view-toggle-btn.active { background: var(--primary); color: #fff; }
+.view-toggle-btn:hover:not(.active) { background: var(--border-light); }
+
+/* ═══ GRAPH VIEW ═══ */
+#graphContainer {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  background:
+    radial-gradient(circle, var(--border-light) 0.8px, transparent 0.8px) 0 0 / 24px 24px,
+    var(--bg);
+}
+#graphSvg { display: block; }
+.graph-node { cursor: pointer; }
+.graph-node:hover rect { filter: brightness(0.9); }
+.graph-edge { fill: none; stroke: #b0aaa0; stroke-width: 1.5; }
+
+.graph-legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 11px;
+  box-shadow: var(--shadow-sm);
+  line-height: 1.8;
+  z-index: 5;
+}
+.legend-row { display: flex; align-items: center; gap: 8px; }
+.legend-swatch { width: 14px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+.graph-info {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  max-height: calc(100% - 32px);
+  z-index: 5;
+}
+.graph-info-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; gap: 8px;
+}
+.graph-info-head .gi-title {
+  flex: 1; font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.graph-info-head .gi-close {
+  border: none; background: none; cursor: pointer;
+  color: var(--text-tertiary); font-size: 16px; padding: 0;
+}
+.graph-info-body {
+  padding: 12px 16px;
+  font-size: 12px;
+  overflow-y: auto;
+  max-height: 320px;
+}
+
+/* graph toolbar */
+.graph-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  z-index: 5;
+}
+.gt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border-light);
+  border-radius: 20px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-sm);
+}
+.gt-btn {
+  padding: 5px 12px;
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 11px;
+  color: var(--primary);
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--transition);
+  box-shadow: var(--shadow-sm);
+}
+.gt-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* node states */
+.graph-node { transition: opacity 250ms ease; cursor: grab; }
+.graph-node.dragging { cursor: grabbing; transition: none; }
+.graph-node.dimmed { opacity: 0.12 !important; }
+.graph-edge { transition: opacity 250ms ease, stroke 200ms ease; }
+.graph-edge.dimmed { opacity: 0.06 !important; }
+
+/* legend glass */
+.graph-legend {
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(6px);
+}
 </style>
 </head>
 <body>
@@ -887,6 +1021,11 @@ html, body {
     <span class="edit-count hidden" id="editCount"></span>
     <button class="btn-save hidden" id="btnSave">💾 保存文件</button>
     <button class="btn-change" id="btnChange">📂 更换文件</button>
+    <button class="fab-tags" id="fabTags">🏷 标签</button>
+    <div class="view-toggle" id="viewToggle" style="display:none">
+      <button class="view-toggle-btn active" data-view="files">📁 文件</button>
+      <button class="view-toggle-btn" data-view="graph">🔗 依赖</button>
+    </div>
   </header>
 
   <nav id="breadcrumb">
@@ -898,10 +1037,22 @@ html, body {
     <aside id="detail">
       <div class="detail-empty">选择文件或文件夹<br>以查看详细信息</div>
     </aside>
+    <div id="graphContainer" class="hidden">
+      <div class="graph-toolbar" id="graphToolbar">
+        <span class="gt-pill hidden" id="hiddenPill">👁 已隐藏 <strong id="hiddenNum">0</strong> 个节点</span>
+        <button class="gt-btn hidden" id="showAllBtn">显示全部</button>
+        <button class="gt-btn hidden" id="resetLayoutBtn">↩ 复原布局</button>
+      </div>
+      <svg id="graphSvg" width="100%" height="100%"></svg>
+      <div id="graphInfo" class="graph-info hidden"></div>
+      <div class="graph-legend" id="graphLegend" style="display:none">
+        <div class="legend-row"><span class="legend-swatch" style="background:#4A90D9"></span>脚本文件 (.qmd/.R)</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:#6BBF6B;border-radius:50%"></span>数据文件</div>
+        <div style="margin-top:6px;color:var(--text-tertiary)">滚轮缩放 · 拖拽平移 · 拖拽节点</div>
+      </div>
+    </div>
   </div>
 </div>
-
-<button class="fab-tags" id="fabTags" title="标签管理">🏷</button>
 
 <div class="modal-backdrop" id="tagModal">
   <div class="tag-modal">
@@ -1325,12 +1476,16 @@ function readFile(file) {
 function initApp() {
   document.getElementById('overlay').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
-  document.getElementById('fabTags').style.display = 'flex';
   rebuildTagRegistry();
   renderHeader();
   renderBreadcrumb();
   renderColumns();
   renderDetail();
+  document.getElementById('viewToggle').style.display = hasGraphData() ? '' : 'none';
+  graphState.view = 'files';
+  graphState.pzReady = false;
+  graphState.hiddenNodes.clear();
+  graphState.customPos.clear();
 }
 
 /* ═══ RENDER: HEADER ═══ */
@@ -1728,6 +1883,441 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/* ═══ GRAPH MODULE ═══ */
+const graphState = { view: 'files', transform: { x: 0, y: 0, k: 1 }, data: null, pzReady: false, hiddenNodes: new Set(), customPos: new Map(), dragNode: null, dragStartPos: null };
+
+function hasGraphData() {
+  if (!state.raw || !state.raw.files) return false;
+  for (const m of Object.values(state.raw.files)) {
+    if ((m.produces && m.produces.length) || (m.depends_on && m.depends_on.length)) return true;
+  }
+  return false;
+}
+
+function buildGraph() {
+  const nodes = new Map();
+  const edges = [];
+  const files = state.raw.files || {};
+
+  for (const [path, meta] of Object.entries(files)) {
+    const ext = (path.match(/\.(\w+)$/i) || [])[1] || '';
+    const isScript = /^(qmd|rmd|r|py)$/i.test(ext);
+    const hasDeps = (meta.produces && meta.produces.length) || (meta.depends_on && meta.depends_on.length);
+
+    if (hasDeps && !nodes.has(path)) {
+      nodes.set(path, { id: path, type: isScript ? 'script' : 'data', label: path.split('/').pop() });
+    }
+
+    for (const t of (meta.produces || [])) {
+      if (!nodes.has(path)) nodes.set(path, { id: path, type: isScript ? 'script' : 'data', label: path.split('/').pop() });
+      if (!nodes.has(t)) nodes.set(t, { id: t, type: 'data', label: t.split('/').pop(), ghost: true });
+      edges.push({ source: path, target: t });
+    }
+    for (const d of (meta.depends_on || [])) {
+      if (!nodes.has(path)) nodes.set(path, { id: path, type: isScript ? 'script' : 'data', label: path.split('/').pop() });
+      if (!nodes.has(d)) nodes.set(d, { id: d, type: 'data', label: d.split('/').pop(), ghost: true });
+      edges.push({ source: d, target: path });
+    }
+  }
+
+  return { nodes: Array.from(nodes.values()), edges };
+}
+
+function layerAssign(nodes, edges) {
+  const inc = new Map(nodes.map(n => [n.id, []]));
+  edges.forEach(e => { if (inc.has(e.target)) inc.get(e.target).push(e.source); });
+
+  const rank = new Map();
+  const visiting = new Set();
+
+  function dfs(id) {
+    if (rank.has(id)) return rank.get(id);
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    let maxR = -1;
+    for (const s of (inc.get(id) || [])) maxR = Math.max(maxR, dfs(s));
+    visiting.delete(id);
+    const r = maxR + 1;
+    rank.set(id, r);
+    return r;
+  }
+
+  nodes.forEach(n => dfs(n.id));
+  return rank;
+}
+
+function renderGraph() {
+  const svg = document.getElementById('graphSvg');
+  if (!svg) return;
+
+  const fullGraph = buildGraph();
+  const hidden = graphState.hiddenNodes;
+  const graph = {
+    nodes: fullGraph.nodes.filter(n => !hidden.has(n.id)),
+    edges: fullGraph.edges.filter(e => !hidden.has(e.source) && !hidden.has(e.target)),
+  };
+  updateGraphToolbar();
+
+  if (graph.nodes.length === 0) {
+    const msg = hidden.size > 0 ? `所有节点已隐藏（共 ${hidden.size} 个）` : '暂无依赖关系数据';
+    svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#9c9a94" font-size="14" font-family="var(--font-sans)">${msg}</text>`;
+    graphState.data = null;
+    return;
+  }
+
+  const ranks = layerAssign(graph.nodes, graph.edges);
+
+  const layers = new Map();
+  graph.nodes.forEach(n => {
+    const r = ranks.get(n.id) || 0;
+    if (!layers.has(r)) layers.set(r, []);
+    layers.get(r).push(n);
+  });
+  const sorted = Array.from(layers.entries()).sort((a, b) => a[0] - b[0]);
+  sorted.forEach(([, ns]) => ns.sort((a, b) => a.label.localeCompare(b.label)));
+
+  const NW = 156, NH = 36, LG = 224, NG = 54, PX = 40, PY = 30;
+  const maxPer = Math.max(...sorted.map(([, ns]) => ns.length));
+  const totalW = PX * 2 + Math.max(0, sorted.length - 1) * LG + NW;
+  const totalH = PY * 2 + Math.max(0, maxPer - 1) * NG + NH;
+
+  const pos = new Map();
+  sorted.forEach(([, ns], i) => {
+    const x = PX + i * LG;
+    const h = (ns.length - 1) * NG;
+    const y0 = PY + (Math.max(0, maxPer - 1) * NG - h) / 2;
+    ns.forEach((n, j) => pos.set(n.id, { x, y: y0 + j * NG }));
+  });
+
+  graphState.customPos.forEach((cp, nid) => {
+    if (pos.has(nid)) pos.set(nid, { x: cp.x, y: cp.y });
+  });
+  updateResetLayoutBtn();
+
+  const rect = svg.getBoundingClientRect();
+  const scX = rect.width / totalW, scY = rect.height / totalH;
+  const scale = Math.min(scX, scY, 1.5) * 0.88;
+  const tx = (rect.width - totalW * scale) / 2;
+  const ty = (rect.height - totalH * scale) / 2;
+  graphState.transform = { x: tx, y: ty, k: scale };
+
+  let s = `<defs>
+    <marker id="gah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c0bab0"/></marker>
+    <marker id="gahH" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#007aff"/></marker>
+    <linearGradient id="gSc" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5B9AE8"/><stop offset="100%" stop-color="#4080D0"/></linearGradient>
+    <linearGradient id="gDt" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6CC990"/><stop offset="100%" stop-color="#4EA870"/></linearGradient>
+    <filter id="nSh"><feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-opacity="0.13"/></filter>
+  </defs>`;
+  s += `<g id="gG" transform="translate(${tx},${ty}) scale(${scale})">`;
+
+  graph.edges.forEach((e, i) => {
+    const a = pos.get(e.source), b = pos.get(e.target);
+    if (!a || !b) return;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+    const cx = (x1 + x2) / 2;
+    s += `<path class="graph-edge" data-ei="${i}" d="M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}" stroke="#c0bab0" stroke-width="1.5" fill="none" marker-end="url(#gah)"/>`;
+  });
+
+  graph.nodes.forEach(n => {
+    const p = pos.get(n.id);
+    if (!p) return;
+    const isSc = n.type === 'script';
+    const fill = isSc ? 'url(#gSc)' : 'url(#gDt)';
+    const rx = isSc ? 6 : NH / 2;
+    const op = n.ghost ? 0.55 : 1;
+    const lbl = n.label.length > 20 ? n.label.slice(0, 18) + '…' : n.label;
+    s += `<g class="graph-node" data-nid="${escHtml(n.id)}" style="opacity:${op}" filter="url(#nSh)">`;
+    s += `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${rx}" fill="${fill}"/>`;
+    s += `<text x="${p.x + NW / 2}" y="${p.y + NH / 2}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="11" font-weight="500" font-family="var(--font-sans)">${escHtml(lbl)}</text>`;
+    s += `</g>`;
+  });
+
+  s += '</g>';
+  svg.innerHTML = s;
+  graphState.data = { graph, pos };
+
+  svg.querySelectorAll('.graph-node').forEach(el => {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (graphState._justDragged) { graphState._justDragged = false; return; }
+      const nid = el.dataset.nid;
+      highlightGraphNode(nid);
+      showGraphNodeInfo(nid);
+    });
+  });
+
+  if (!graphState.pzReady) {
+    setupPanZoom(svg);
+    graphState.pzReady = true;
+  }
+}
+
+function updateGraphToolbar() {
+  const n = graphState.hiddenNodes.size;
+  const pill = document.getElementById('hiddenPill');
+  const btn = document.getElementById('showAllBtn');
+  if (pill) pill.classList.toggle('hidden', n === 0);
+  if (btn) btn.classList.toggle('hidden', n === 0);
+  const num = document.getElementById('hiddenNum');
+  if (num) num.textContent = n;
+}
+
+function traceChain(nid) {
+  if (!graphState.data) return { nodes: new Set(), edges: new Set() };
+  const { graph } = graphState.data;
+  const out = new Map(), inc = new Map();
+  graph.edges.forEach((e, i) => {
+    if (!out.has(e.source)) out.set(e.source, []);
+    out.get(e.source).push({ to: e.target, ei: i });
+    if (!inc.has(e.target)) inc.set(e.target, []);
+    inc.get(e.target).push({ from: e.source, ei: i });
+  });
+  const cn = new Set([nid]), ce = new Set();
+  let q = [nid];
+  while (q.length) { const c = q.shift(); for (const { to, ei } of (out.get(c) || [])) { ce.add(ei); if (!cn.has(to)) { cn.add(to); q.push(to); } } }
+  q = [nid]; const vis = new Set([nid]);
+  while (q.length) { const c = q.shift(); for (const { from, ei } of (inc.get(c) || [])) { ce.add(ei); if (!vis.has(from)) { vis.add(from); cn.add(from); q.push(from); } } }
+  return { nodes: cn, edges: ce };
+}
+
+function highlightGraphNode(nid) {
+  const svg = document.getElementById('graphSvg');
+  if (!svg || !graphState.data) return;
+  const { nodes: cn, edges: ce } = traceChain(nid);
+
+  svg.querySelectorAll('.graph-node').forEach(el => {
+    if (cn.has(el.dataset.nid)) { el.classList.remove('dimmed'); el.classList.add('chain'); }
+    else { el.classList.add('dimmed'); el.classList.remove('chain'); }
+  });
+  svg.querySelectorAll('.graph-edge').forEach(el => {
+    const ei = parseInt(el.dataset.ei);
+    if (ce.has(ei)) {
+      el.classList.remove('dimmed'); el.classList.add('chain');
+      el.setAttribute('stroke', '#007aff'); el.setAttribute('stroke-width', '2.5'); el.setAttribute('marker-end', 'url(#gahH)');
+    } else {
+      el.classList.add('dimmed'); el.classList.remove('chain');
+      el.setAttribute('stroke', '#c0bab0'); el.setAttribute('stroke-width', '1.5'); el.setAttribute('marker-end', 'url(#gah)');
+    }
+  });
+}
+
+function clearGraphHighlight() {
+  const svg = document.getElementById('graphSvg');
+  if (!svg) return;
+  svg.querySelectorAll('.graph-node').forEach(el => el.classList.remove('chain', 'dimmed'));
+  svg.querySelectorAll('.graph-edge').forEach(el => {
+    el.classList.remove('chain', 'dimmed');
+    el.setAttribute('stroke', '#c0bab0'); el.setAttribute('stroke-width', '1.5'); el.setAttribute('marker-end', 'url(#gah)');
+  });
+}
+
+function hideGraphNode(nid) {
+  graphState.hiddenNodes.add(nid);
+  document.getElementById('graphInfo').classList.add('hidden');
+  renderGraph();
+}
+
+function showAllGraphNodes() {
+  graphState.hiddenNodes.clear();
+  renderGraph();
+}
+
+function showGraphNodeInfo(nid) {
+  const panel = document.getElementById('graphInfo');
+  if (!panel) return;
+  const meta = (state.raw.files || {})[nid];
+  const icon = getIcon(nid.split('/').pop(), false);
+  const name = nid.split('/').pop();
+
+  let h = `<div class="graph-info-head"><span>${icon}</span><span class="gi-title">${escHtml(name)}</span><button class="gi-close" id="giClose">×</button></div>`;
+  h += '<div class="graph-info-body">';
+  h += `<div style="font-family:var(--font-mono);font-size:10px;color:var(--text-tertiary);word-break:break-all;margin-bottom:8px">${escHtml(nid)}</div>`;
+
+  if (meta) {
+    if (meta.description) h += `<div style="margin-bottom:8px">${escHtml(meta.description)}</div>`;
+    if (meta.produces && meta.produces.length) {
+      h += '<div class="detail-label" style="margin-top:8px">产出 →</div><ul class="dep-list">';
+      meta.produces.forEach(p => {
+        h += `<li class="dep-item clickable" data-gnav="${escHtml(p)}"><span class="dep-arrow">→</span>${escHtml(p.split('/').pop())}</li>`;
+      });
+      h += '</ul>';
+    }
+    if (meta.depends_on && meta.depends_on.length) {
+      h += '<div class="detail-label" style="margin-top:8px">依赖 ←</div><ul class="dep-list">';
+      meta.depends_on.forEach(d => {
+        h += `<li class="dep-item clickable" data-gnav="${escHtml(d)}"><span class="dep-arrow">←</span>${escHtml(d.split('/').pop())}</li>`;
+      });
+      h += '</ul>';
+    }
+  } else {
+    h += '<div style="color:var(--text-tertiary);font-style:italic">外部文件（未在描述中收录）</div>';
+  }
+
+  const inTree = !!findNode(nid);
+  h += '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">';
+  if (inTree) h += '<button class="btn-change" id="giOpenFile">📁 在文件视图中打开</button>';
+  h += `<button class="btn-change" id="giHide" style="color:var(--danger)">👁 隐藏此节点</button>`;
+  h += '</div></div>';
+
+  panel.innerHTML = h;
+  panel.classList.remove('hidden');
+
+  document.getElementById('giClose').addEventListener('click', () => { panel.classList.add('hidden'); clearGraphHighlight(); });
+  if (inTree) {
+    document.getElementById('giOpenFile').addEventListener('click', () => { switchView('files'); navigateToPath(nid); });
+  }
+  document.getElementById('giHide').addEventListener('click', () => hideGraphNode(nid));
+  panel.querySelectorAll('[data-gnav]').forEach(el => {
+    el.addEventListener('click', () => {
+      highlightGraphNode(el.dataset.gnav);
+      showGraphNodeInfo(el.dataset.gnav);
+    });
+  });
+}
+
+function setupPanZoom(svg) {
+  let panning = false, dragged = false, sx, sy;
+  let dragEl = null, dragNid = null, dragOx, dragOy, dragNx0, dragNy0, dragMoved = false;
+
+  svg.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.graph-info')) return;
+    const nodeG = e.target.closest('.graph-node');
+    if (nodeG) {
+      e.preventDefault();
+      dragEl = nodeG;
+      dragNid = nodeG.dataset.nid;
+      dragMoved = false;
+      const svgRect = svg.getBoundingClientRect();
+      const { x: tx, y: ty, k } = graphState.transform;
+      dragOx = (e.clientX - svgRect.left - tx) / k;
+      dragOy = (e.clientY - svgRect.top - ty) / k;
+      const p = graphState.data && graphState.data.pos.get(dragNid);
+      dragNx0 = p ? p.x : 0;
+      dragNy0 = p ? p.y : 0;
+      dragEl.classList.add('dragging');
+      return;
+    }
+    panning = true; dragged = false;
+    sx = e.clientX - graphState.transform.x;
+    sy = e.clientY - graphState.transform.y;
+    svg.style.cursor = 'grabbing';
+  });
+
+  svg.addEventListener('mousemove', (e) => {
+    if (dragEl) {
+      e.preventDefault();
+      dragMoved = true;
+      const svgRect = svg.getBoundingClientRect();
+      const { x: tx, y: ty, k } = graphState.transform;
+      const dx = (e.clientX - svgRect.left - tx) / k - dragOx;
+      const dy = (e.clientY - svgRect.top - ty) / k - dragOy;
+      const newX = dragNx0 + dx, newY = dragNy0 + dy;
+      const rect = dragEl.querySelector('rect');
+      const text = dragEl.querySelector('text');
+      if (rect) { rect.setAttribute('x', newX); rect.setAttribute('y', newY); }
+      if (text) {
+        text.setAttribute('x', newX + 156 / 2);
+        text.setAttribute('y', newY + 36 / 2);
+      }
+      updateEdgesForNode(dragNid, newX, newY);
+      return;
+    }
+    if (!panning) return;
+    dragged = true;
+    graphState.transform.x = e.clientX - sx;
+    graphState.transform.y = e.clientY - sy;
+    applyGT();
+  });
+
+  const stopDrag = (e) => {
+    if (dragEl) {
+      dragEl.classList.remove('dragging');
+      if (dragMoved) {
+        const svgRect = svg.getBoundingClientRect();
+        const { x: tx, y: ty, k } = graphState.transform;
+        const dx = (e.clientX - svgRect.left - tx) / k - dragOx;
+        const dy = (e.clientY - svgRect.top - ty) / k - dragOy;
+        const finalX = dragNx0 + dx, finalY = dragNy0 + dy;
+        graphState.data.pos.set(dragNid, { x: finalX, y: finalY });
+        graphState.customPos.set(dragNid, { x: finalX, y: finalY });
+        updateResetLayoutBtn();
+      }
+      const wasDragMove = dragMoved;
+      dragEl = null; dragNid = null; dragMoved = false;
+      if (wasDragMove) { graphState._justDragged = true; return; }
+    }
+    const wasDrag = dragged;
+    panning = false; svg.style.cursor = '';
+    if (!wasDrag && !e.target.closest('.graph-node')) {
+      clearGraphHighlight();
+      document.getElementById('graphInfo').classList.add('hidden');
+    }
+  };
+
+  svg.addEventListener('mouseup', stopDrag);
+  svg.addEventListener('mouseleave', (e) => {
+    if (dragEl) { stopDrag(e); return; }
+    panning = false; svg.style.cursor = '';
+  });
+
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const d = e.deltaY > 0 ? 0.9 : 1.1;
+    const nk = Math.max(0.15, Math.min(4, graphState.transform.k * d));
+    const r = svg.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    graphState.transform.x = mx - (mx - graphState.transform.x) * (nk / graphState.transform.k);
+    graphState.transform.y = my - (my - graphState.transform.y) * (nk / graphState.transform.k);
+    graphState.transform.k = nk;
+    applyGT();
+  }, { passive: false });
+}
+
+function updateEdgesForNode(nid, nx, ny) {
+  if (!graphState.data) return;
+  const NW = 156, NH = 36;
+  const { graph, pos } = graphState.data;
+  graph.edges.forEach((e, i) => {
+    if (e.source !== nid && e.target !== nid) return;
+    const a = e.source === nid ? { x: nx, y: ny } : pos.get(e.source);
+    const b = e.target === nid ? { x: nx, y: ny } : pos.get(e.target);
+    if (!a || !b) return;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+    const cx = (x1 + x2) / 2;
+    const path = document.querySelector(`.graph-edge[data-ei="${i}"]`);
+    if (path) path.setAttribute('d', `M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`);
+  });
+}
+
+function updateResetLayoutBtn() {
+  const btn = document.getElementById('resetLayoutBtn');
+  if (btn) btn.classList.toggle('hidden', graphState.customPos.size === 0);
+}
+
+function resetGraphLayout() {
+  graphState.customPos.clear();
+  renderGraph();
+}
+
+function applyGT() {
+  const g = document.getElementById('gG');
+  if (g) g.setAttribute('transform', `translate(${graphState.transform.x},${graphState.transform.y}) scale(${graphState.transform.k})`);
+}
+
+function switchView(v) {
+  graphState.view = v;
+  document.querySelectorAll('.view-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  const isG = v === 'graph';
+  document.getElementById('columns').classList.toggle('hidden', isG);
+  document.getElementById('detail').classList.toggle('hidden', isG);
+  document.getElementById('breadcrumb').classList.toggle('hidden', isG);
+  document.getElementById('graphContainer').classList.toggle('hidden', !isG);
+  document.getElementById('graphLegend').style.display = isG ? '' : 'none';
+  const gi = document.getElementById('graphInfo');
+  if (!isG && gi) gi.classList.add('hidden');
+  if (isG) renderGraph();
+}
+
 /* ═══ EVENT SETUP ═══ */
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -1779,6 +2369,14 @@ document.getElementById('newTagBtn').addEventListener('click', () => {
 document.getElementById('newTagInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); document.getElementById('newTagBtn').click(); }
 });
+
+/* ═══ VIEW TOGGLE & GRAPH TOOLBAR ═══ */
+document.getElementById('viewToggle').addEventListener('click', (e) => {
+  const btn = e.target.closest('.view-toggle-btn');
+  if (btn && btn.dataset.view) switchView(btn.dataset.view);
+});
+document.getElementById('showAllBtn').addEventListener('click', showAllGraphNodes);
+document.getElementById('resetLayoutBtn').addEventListener('click', resetGraphLayout);
 
 /* ═══ AUTO-LOAD EMBEDDED DATA ═══ */
 if (window.EMBEDDED_DATA) {

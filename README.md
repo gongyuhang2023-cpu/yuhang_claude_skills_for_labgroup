@@ -245,10 +245,11 @@ python install.py
 skills/
 ├── file-profile/
 │   ├── SKILL.md                   ← 完整执行流程（6 步）
-│   ├── viewer.html                ← 可视化查看器（列式浏览器）
+│   ├── viewer.html                ← 可视化查看器（列式浏览器 + 依赖关系图）
 │   ├── test-data.json             ← 示例 descriptions.json
 │   ├── scripts/
 │   │   ├── snapshot_tool.py       ← 文件快照扫描与变更检测
+│   │   ├── dep_scanner.py         ← 依赖图扫描（qproj 图导入 / R 代码 I/O 正则）
 │   │   ├── meta_updater.py        ← descriptions.json 增量更新
 │   │   └── generate_launcher.py   ← 生成自包含 HTML + .url 快捷方式
 │   └── references/
