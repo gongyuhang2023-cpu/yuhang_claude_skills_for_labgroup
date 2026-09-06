@@ -11,6 +11,22 @@
 - 系统 Python 3.12、gcc 13.3（可从源码编译）、**docker 可用**
 - **系统无 conda/mamba** —— 要 conda 得自己在家目录装 miniforge
 
+### ⚠ 「查不到」≠「没装」——非交互 ssh 的 PATH 是残缺的
+
+`ssh <server> '<cmd>'` 走的是**非交互 shell**，`~/.bashrc` 的 conda 初始化段会早退，
+所以 `command -v conda` / `command -v Rscript` **必然报 not found** ——
+那是 PATH 的事实，不是安装的事实。据此下「这台机器没有 X」的结论会一路错到底。
+
+| 想找什么 | 实际在哪 | 怎么调 |
+|---|---|---|
+| conda | `~/miniforge3/bin/conda` | `source ~/miniforge3/etc/profile.d/conda.sh` 后再用 |
+| **R / Rscript** | **只在 conda env 里**（`/usr/bin/R` 不存在），如 `~/miniforge3/envs/<env>/bin/Rscript` | 绝对路径直接调，非交互可用 |
+| 各类生信工具 | 常在项目内 `<project>/_data/envs/<name>/bin/` | 同上，绝对路径 |
+
+**先查 `env-profile.local.json` 的 `system.conda` / `system.r` 字段**（`probe-env` 会连
+conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下结论。
+缓存旧了（`probed_at` >14 天、或刚建了新 env）就重跑 `advise.py probe-env`。
+
 ## 关键：哪些包在 aarch64 上能装（决定能不能全速跑）
 
 **已确认有原生 aarch64 wheel（全速）**（部署摸底时 pip 探测过）：

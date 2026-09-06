@@ -7,11 +7,30 @@ live here and return CLEAN JSON, so the calling AI never freehands SSH and never
 gets a wall of raw terminal output dumped into its context.
 
 Subcommands:
-  status            current server state (GPU free?, schedulable mem, queue)
+  status            server state: Slurm accounting AND the physical truth from
+                    nvidia-smi (they disagree when someone bypasses the queue)
   history           this user's past jobs from sacct (host-mem peak, elapsed)
   recommend         baseline --gres/--mem/--time + confidence, combining the above
   gen-sbatch        emit an sbatch script from chosen params (does NOT submit)
   submit            submit a local sbatch script via the server (gated by SKILL.md)
+  wait              watch a job; returns the moment it finishes / fails / is
+                    CANCELLED / gets FROZEN. Run it in the background: a frozen
+                    job looks exactly like a running one in squeue, so without
+                    this an agent just waits forever. Fixed exit codes, see below.
+  cancel-frozen     cleanly cancel a frozen job: unfreeze -> scancel -> verify
+                    four conditions. Plain scancel on a frozen job wedges it in
+                    COMPLETING and never returns the memory.
+  gpu-peak          a job's observed LOWER BOUND on GPU memory (5s sampling can
+                    miss spikes), plus host memory pressure during the run, which
+                    decides whether "it finished, unfrozen" counts as an upper bound
+  debug-start/run/  interactive salloc session: hold resources ONCE, then push many
+  list/end          short runs into it via srun (33-61ms each, measured 2026-09-06).
+                    For the debug loop "run 2min -> think 20min -> run again", where
+                    re-queueing every round costs hours (measured: 2h51m wait for a
+                    51s job). Default 6h. --time cannot be raised later (permission
+                    denied) and expiry SIGTERMs whatever is running, so it defaults
+                    generous; idleguard exempts interactive jobs, so --time is the
+                    only safety net there is.
 
 Facts vs judgment: this script produces FACTS + a rule-based baseline. The final
 recommendation phrasing / confidence framing is the AI's job -- see
@@ -28,6 +47,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_CANDIDATES = [
@@ -114,6 +134,526 @@ def ssh_run(cfg, remote_cmd, timeout=30, stdin_data=None):
     if r.returncode != 0 and not stdout.strip():
         die(f"SSH command failed ({r.returncode}) on {target}: {stderr.strip()[:300]}")
     return stdout
+
+
+def ssh_try(cfg, remote_cmd, timeout=30):
+    """ssh_run 的不致命版本：返回 (rc, stdout, stderr)，绝不 die()。
+
+    ssh_run 在命令失败时直接退出整个进程 —— 对 status/recommend 这种一次性查询没问题，
+    但 wait/cancel-frozen 必须自己区分「命令失败」与「查到的结果就是空」，
+    并把失败映射成一个明确的错误码返回给调用者（含 AI agent）。
+    把两者混成一个结果，正是这次事故里看门狗犯的同一个错误。
+    """
+    target = f'{cfg["user"]}@{resolve_host(cfg)}'
+    cmd = ["ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
+    if cfg.get("ssh_key"):
+        cmd += ["-i", cfg["ssh_key"]]
+    cmd += [target, remote_cmd]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        return 255, "", "ssh not found on PATH"
+    except subprocess.TimeoutExpired:
+        return 255, "", f"ssh timed out after {timeout}s"
+    return (r.returncode,
+            r.stdout.decode("utf-8", "replace"),
+            r.stderr.decode("utf-8", "replace"))
+
+
+# GPU 上每个计算进程的身份。一次 ssh 拿全，避免 N 次往返。
+_GPU_PROBE = r"""
+if ! command -v nvidia-smi >/dev/null 2>&1; then echo "NVSMI_MISSING"; exit 0; fi
+if ! nvidia-smi --query-compute-apps=pid --format=csv,noheader >/dev/null 2>&1; then
+  echo "NVSMI_FAIL"; exit 0
+fi
+echo "NVSMI_OK"
+nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader,nounits |
+while IFS=, read -r pid mb; do
+  pid=$(echo "$pid" | tr -d ' '); mb=$(echo "$mb" | tr -d ' ')
+  [ -n "$pid" ] || continue
+  printf 'P|%s|%s|%s|%s|%s\n' "$pid" "$mb" \
+    "$(cat /proc/$pid/comm 2>/dev/null)" \
+    "$(stat -c %U /proc/$pid 2>/dev/null)" \
+    "$(head -1 /proc/$pid/cgroup 2>/dev/null)"
+done
+echo "FROZEN_BEGIN"
+cat /run/spark-usage/frozen-jobs.json 2>/dev/null || echo "{}"; echo
+"""
+
+
+def gpu_physical(cfg):
+    """GPU 的**物理**占用真相，而不是 Slurm 的记账。
+
+    ★ 为什么不能只信 Slurm：它是记账系统，只知道自己派出去的作业。有人不经队列
+    直接跑，它一无所知，照旧报告「GPU 空闲」—— 2026-08-27 当天实测就是如此。
+    照着这个提交作业，两个程序就会抢同一张卡。
+
+    ★ 为什么不做成 busy/free 两档：本机的桌面远程服务常驻占着 176 MiB，按「有进程
+    就算占用」的话 GPU 会永远显示占用，等于没有信息。所以分开呈现：系统服务 /
+    Slurm 作业 / 未归因的用户进程，三者含义完全不同。
+
+    ★ 查询失败一律报 unknown，**绝不降级成 free** —— 那正是把"我没查到"说成
+    "确实没有"，是这次事故的根错误。
+    """
+    rc, out, err = ssh_try(cfg, _GPU_PROBE, timeout=30)
+    if rc != 0:
+        return {"state": "unknown", "reason": f"ssh 失败: {err.strip()[:160]}",
+                "procs": [], "frozen_jobs": []}
+    lines = out.splitlines()
+    head = lines[0].strip() if lines else ""
+    if head == "NVSMI_MISSING":
+        return {"state": "unknown", "reason": "nvidia-smi 不存在", "procs": [],
+                "frozen_jobs": []}
+    if head != "NVSMI_OK":
+        return {"state": "unknown", "reason": "nvidia-smi 查询失败（不代表 GPU 空闲）",
+                "procs": [], "frozen_jobs": []}
+
+    procs, frozen_raw, in_frozen = [], [], False
+    for ln in lines[1:]:
+        if ln.strip() == "FROZEN_BEGIN":
+            in_frozen = True
+            continue
+        if in_frozen:
+            frozen_raw.append(ln)
+            continue
+        if not ln.startswith("P|"):
+            continue
+        f = ln.split("|", 5)
+        if len(f) < 6:
+            continue
+        cg = f[5].strip()
+        m = re.search(r"/job_(\d+)", cg)
+        # 归属三分：Slurm 作业 / systemd 服务 / 没走队列的用户进程
+        if m:
+            kind, job_id = "slurm-job", m.group(1)
+        elif cg.endswith(".service"):
+            kind, job_id = "system-service", None
+        else:
+            kind, job_id = "unattributed", None
+        try:
+            mb = float(f[2])
+        except ValueError:
+            mb = 0.0
+        procs.append({"pid": int0(f[1]), "gpu_mb": mb, "comm": f[3],
+                      "user": f[4], "cgroup": cg, "kind": kind, "job_id": job_id})
+
+    try:
+        frozen = json.loads("\n".join(frozen_raw) or "{}")
+    except ValueError:
+        frozen = {}
+
+    slurm = [p for p in procs if p["kind"] == "slurm-job"]
+    system = [p for p in procs if p["kind"] == "system-service"]
+    loose = [p for p in procs if p["kind"] == "unattributed"]
+    if loose:
+        state = "unattributed"       # 有人没走队列在用卡 —— 提交前必须知道
+    elif slurm:
+        state = "slurm-job"
+    elif system:
+        state = "system-use"         # 只有系统服务，用户计算意义上是空闲的
+    else:
+        state = "free"
+    return {
+        "state": state,
+        "reason": "",
+        "procs": procs,
+        "slurm_job_procs": slurm,
+        "system_procs": system,
+        "unattributed_procs": loose,
+        "unattributed_mb": round(sum(p["gpu_mb"] for p in loose), 1),
+        "frozen_jobs": frozen.get("frozen", []),
+        "frozen_list_complete": frozen.get("complete"),
+    }
+
+
+# ---- wait 的固定返回码。不透传 Slurm 的退出码，调用方只需认这几个数 ----
+WAIT_OK          = 0    # 正常结束且 ExitCode 为 0
+WAIT_NONZERO     = 10   # 跑完了但退出码非零
+WAIT_FROZEN      = 11   # ★ 被 memguard 冻结 —— 不是卡死，别 scancel
+WAIT_CANCELLED   = 12   # 被取消
+WAIT_FAILED      = 13   # FAILED / TIMEOUT / OOM / NODE_FAIL / PREEMPTED
+WAIT_TIMEOUT     = 20   # 监控自身超时（**不是**作业超时）
+WAIT_QUERY_FAIL  = 21   # 查询失败 —— 不知道作业怎么样了，绝不当成完成
+WAIT_SSH_FAIL    = 255  # 连不上服务器
+
+_WAIT_PROBE = r"""
+echo "SQ_BEGIN"
+squeue -h -j {jid} -o '%T' 2>/dev/null
+echo "FZ_BEGIN"
+cat /run/spark-usage/frozen-jobs.json 2>/dev/null || echo '{{}}'; echo
+echo "CGFZ_BEGIN"
+CG=$(ls -d /sys/fs/cgroup/system.slice/*slurmstepd.scope/job_{jid} 2>/dev/null | head -1)
+[ -n "$CG" ] && cat "$CG/cgroup.freeze" 2>/dev/null
+echo "SA_BEGIN"
+sacct -X -n -P -j {jid} -o State,ExitCode 2>/dev/null
+"""
+
+
+def cmd_wait(cfg, jid, interval, max_wait):
+    """盯住一个作业，出事就返回 —— 给 AI agent 用的。
+
+    ## 为什么需要它
+
+    AI agent 提交完作业不会去轮询（费 token，而且正常运行时轮询没有意义），
+    它等的是「命令返回」这个事件。**而冻结不产生任何事件**：
+      · wall 广播到不了一个已经断开的 ssh 会话；
+      · 被冻结的作业在 squeue 里状态**仍然显示 RUNNING** —— 冻结是 cgroup 层的事，
+        Slurm 完全不知道。
+    于是 agent 只能看到"在跑但日志不动"，然后误判成卡死去 scancel，
+    正好触发把作业永久卡死、内存永不释放的那条路径。这就是 2026-08-27 事故的走法。
+
+    本命令把轮询搬到**不花钱的地方**（一个本地循环 + 每轮一次短 ssh），
+    出事就返回，于是冻结对 agent 而言变成一个和"程序挂了"同类的事件。
+
+    ## 为什么在本地轮询而不是在服务器上跑循环
+
+    远端循环会在客户端断线、休眠或被杀时继续存活好几天，谁也不知道它还在。
+    本地循环随调用者一起消失，没有这个问题。
+
+    ## 为什么作业从 squeue 消失不等于成功
+
+    它可能是失败、被取消，也可能只是这一次查询失败了；而且 accounting 入库有延迟。
+    所以终态一律以 sacct 为准，并给 accounting 一小段收敛时间。
+    """
+    t0 = time.time()
+    gone_since = None       # 作业从 squeue 消失的时刻，用于给 sacct 留收敛时间
+    probe = _WAIT_PROBE.format(jid=shlex.quote(str(jid)))
+
+    while True:
+        if max_wait and time.time() - t0 > max_wait:
+            return WAIT_TIMEOUT, {"job": jid, "result": "wait-timeout",
+                                  "waited_s": int(time.time() - t0),
+                                  "note": "监控自身超时，作业状态未知 —— 这不代表作业失败"}
+
+        rc, out, err = ssh_try(cfg, probe, timeout=30)
+        if rc == 255 or "ssh not found" in err or "timed out" in err:
+            return WAIT_SSH_FAIL, {"job": jid, "result": "ssh-failed",
+                                   "error": err.strip()[:200]}
+        if rc != 0:
+            return WAIT_QUERY_FAIL, {"job": jid, "result": "query-failed",
+                                     "error": err.strip()[:200],
+                                     "note": "查询失败，作业状态未知 —— 不要当成已完成"}
+
+        sq, fz, cgfz, sa = _split_sections(
+            out, ["SQ_BEGIN", "FZ_BEGIN", "CGFZ_BEGIN", "SA_BEGIN"])
+        state = sq.strip().splitlines()[0].strip() if sq.strip() else ""
+
+        # ---- 冻结优先判断：它在 squeue 里长得跟正常运行一模一样 ----
+        # 两个来源都认：memguard 维护的清单（带 user/name 等元信息），以及直接读
+        # cgroup.freeze（后备）。只靠清单的话，memguard 没跑、刚重启、或文件还没
+        # 生成时就会漏判 —— 而漏判的后果是 agent 以为作业在正常跑，继续等下去。
+        try:
+            frozen = json.loads(fz.strip() or "{}")
+        except ValueError:
+            frozen = {}
+        frozen_ids = {str(j.get("job_id")) for j in frozen.get("frozen", [])}
+        if str(jid) in frozen_ids or cgfz.strip() == "1":
+            return WAIT_FROZEN, {
+                "job": jid, "result": "frozen", "slurm_state": state,
+                "waited_s": int(time.time() - t0),
+                "note": ("作业已被 memguard 冻结：实际用量超出申报量。"
+                         "它**没有死**，已算完的部分都在。"
+                         "不要直接 scancel（信号送不进去，会永久卡住且不还内存）——"
+                         "用 `advise.py cancel-frozen %s`。"
+                         "也不要拿任何观测到的数字当它的真实需求：它是在越线那一刻"
+                         "被打断的，真实峰值只会更高。" % jid),
+            }
+
+        if state:                    # 还在队列里跑着/排着
+            gone_since = None
+            time.sleep(interval)
+            continue
+
+        # ---- 不在 squeue 了 → 等 sacct 给终态，别急着说"完成了" ----
+        if gone_since is None:
+            gone_since = time.time()
+        final = _parse_sacct(sa)
+        if final is None:
+            if time.time() - gone_since > 60:
+                return WAIT_QUERY_FAIL, {
+                    "job": jid, "result": "no-final-state",
+                    "note": "作业已离开队列，但 60 秒内 sacct 仍给不出终态 —— 状态未知"}
+            time.sleep(min(interval, 5))
+            continue
+
+        st, exit_code = final
+        payload = {"job": jid, "result": st, "exit_code": exit_code,
+                   "waited_s": int(time.time() - t0)}
+        if st.startswith("COMPLETED"):
+            return (WAIT_OK if exit_code in ("0:0", "0") else WAIT_NONZERO), payload
+        if st.startswith("CANCELLED"):
+            return WAIT_CANCELLED, payload
+        return WAIT_FAILED, payload
+
+
+def cmd_gpu_peak(cfg, jid):
+    """一个作业的显存**观测下界** + 期间机器水位 + Slurm 终态，合成夹逼判断。
+
+    ## 为什么不是"查峰值"
+
+    采样每 5 秒一次，冲高又回落的尖峰拍不到（实测 Boltz 的读数会在 4.2~11.3 GiB
+    之间来回跳，说明它会降，那就存在没被拍到的更高点）。所以这个数永远是**下界**。
+
+    ## 夹逼：下界来自采样，上界来自"跑完了没被冻"
+
+    但那个上界**有条件**：memguard 只在内存 ≥88% 时查账。机器空闲时跑完，
+    只说明没人来查你的账，不说明你没超申报。所以必须同时看当时的机器水位 ——
+    水位到过查账线、且作业正常完成，申报值才是有效上界。
+
+    这套办法的好处是**不需要改被测程序**：任何工具都适用，包括源码你不想碰的。
+    """
+    rc, out, err = ssh_try(
+        cfg, "echo PEAK_BEGIN; spark-usage --gpu-peak %s --json 2>/dev/null; echo; "
+             "echo SACCT_BEGIN; sacct -X -n -P -j %s -o State,ReqMem,ExitCode 2>/dev/null"
+             % (shlex.quote(str(jid)), shlex.quote(str(jid))), timeout=30)
+    if rc != 0:
+        return {"job": jid, "error": f"查询失败: {err.strip()[:200]}"}
+    head, sa = _split_sections(out, ["PEAK_BEGIN", "SACCT_BEGIN"])
+    try:
+        prof = json.loads(head.strip().splitlines()[0]) if head.strip() else {}
+    except (ValueError, IndexError):
+        prof = {}
+    if not prof.get("peak_mb"):
+        return {"job": jid, "observed_lower_bound_gb": None,
+                "note": "没有显存采样记录（不是 GPU 作业 / 跑得太短 / 记录已清理）"}
+
+    state = req_mem = None
+    for ln in (sa or "").strip().splitlines():
+        f = ln.strip().split("|")
+        if len(f) >= 2 and f[0].strip():
+            state, req_mem = f[0].strip(), f[1].strip()
+            break
+
+    lower = prof["peak_mb"] / 1024.0
+    hi_ratio = prof.get("host_mem_ratio_max")
+    completed = bool(state and state.startswith("COMPLETED"))
+    audited = bool(hi_ratio is not None and hi_ratio >= 0.88)
+    upper = mb_to_gb(mem_to_mb_local(req_mem)) if (completed and audited and req_mem) else None
+
+    res = {
+        "job": jid,
+        "observed_lower_bound_gb": round(lower, 1),
+        "lower_bound_caveat": "采样每 5s 一次，尖峰可能被漏掉；真实峰值只会更大",
+        "samples": prof.get("samples"),
+        "host_mem_ratio_max": hi_ratio,
+        "slurm_state": state,
+        "requested_mem": req_mem,
+        "upper_bound_valid": bool(upper),
+        "effective_upper_bound_gb": upper,
+    }
+    if upper:
+        res["conclusion"] = (
+            "真实需求落在 [%.1f, %.1f] GiB：下界来自采样，上界成立是因为这次作业"
+            "正常完成、且期间机器水位到过 %.0f%%（查账线之上，memguard 真的在查账）。"
+            % (lower, upper, hi_ratio * 100))
+    elif completed and not audited:
+        res["conclusion"] = (
+            "只有下界 %.1f GiB。这次虽然跑完了，但期间机器水位最高才 %.0f%%，"
+            "没到查账线 —— memguard 当时根本没查账，所以「没被冻」不能当上界。"
+            % (lower, (hi_ratio or 0) * 100))
+    else:
+        res["conclusion"] = (
+            "只有下界 %.1f GiB（作业终态 %s，不是正常完成，拿不到上界）。"
+            % (lower, state or "未知"))
+    return res
+
+
+def mem_to_mb_local(s):
+    """'48G' / '96000M' -> MB。sacct 的 ReqMem 有时带 c/n 后缀，一并剥掉。"""
+    m = re.match(r"^([\d.]+)\s*([KMGT]?)", str(s or "").strip(), re.I)
+    if not m:
+        return 0
+    return float(m.group(1)) * {"K": 1 / 1024.0, "M": 1.0, "G": 1024.0,
+                                "T": 1048576.0}.get((m.group(2) or "M").upper(), 1.0)
+
+
+CF_OK            = 0    # 干净退出：终态已定、cgroup 空了、GPU 进程没了
+CF_STUCK         = 30   # cleanup-stuck：取消请求发出去了，但资源没确认释放
+CF_NOT_FROZEN    = 31   # 这个作业没被冻结 —— 不该用这条命令
+CF_NEED_PRIV     = 32   # 解冻需要 root，而当前拿不到
+CF_DRY_RUN       = 33   # 只做了检查（没带 --yes）
+
+_CF_INSPECT = r"""
+JID={jid}
+CG=$(ls -d /sys/fs/cgroup/system.slice/*slurmstepd.scope/job_$JID 2>/dev/null | head -1)
+echo "CG_PATH_BEGIN"; echo "$CG"
+echo "FREEZE_BEGIN"; [ -n "$CG" ] && cat "$CG/cgroup.freeze" 2>/dev/null
+echo "SQ_BEGIN"; squeue -h -j "$JID" -o '%T' 2>/dev/null
+echo "OWNER_BEGIN"; squeue -h -j "$JID" -o '%u' 2>/dev/null
+echo "AUDIT_BEGIN"; cat /run/spark-usage/frozen-jobs.json 2>/dev/null || echo '{{}}'; echo
+echo "SUDO_BEGIN"; sudo -n true 2>/dev/null && echo YES || echo NO
+"""
+
+_CF_EXECUTE = r"""
+JID={jid}
+CG={cg}
+sudo sh -c 'echo 0 > "'"$CG"'/cgroup.freeze"' 2>&1 || echo "UNFREEZE_FAILED"
+sleep 1
+sudo scancel "$JID" 2>&1 || echo "SCANCEL_FAILED"
+sleep 6
+echo "SACCT_BEGIN"; sacct -X -n -P -j "$JID" -o State,ExitCode 2>/dev/null
+echo "CGSTATE_BEGIN"; if [ -d "$CG" ]; then cat "$CG/cgroup.events" 2>/dev/null; else echo "GONE"; fi
+echo "GPUPROC_BEGIN"
+for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
+  if head -1 /proc/$p/cgroup 2>/dev/null | grep -q "job_$JID"; then echo "STILL:$p"; fi
+done
+echo "MEM_BEGIN"; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+"""
+
+
+def cmd_cancel_frozen(cfg, jid, confirm):
+    """干净地取消一个被冻结的作业：解冻 → 取消 → 确认真的退干净了。
+
+    ## 为什么必须是一条专门的命令
+
+    对一个**已冻结**的作业直接 scancel，信号送不进去（冻结的进程处理不了信号），
+    作业会永远卡在 COMPLETING、内存一直不还、squeue 里赖着不走。2026-08-27 就是
+    这么把整台机器堵了三小时。而"记得先解冻"这种知识，靠文档和一次性提示是传不住的
+    —— 事故当天的提示确实广播过，当事人没看到。
+
+    所以把正确顺序封装进工具：调用者（人或 AI）不需要知道这个坑存在。
+
+    ## 为什么"确认"要四个条件
+
+    scancel 返回 0 只表示请求被受理，**不表示清理完成**。只看其中一条都会误判：
+      · cgroup 目录消失得比进程晚，也可能相反；
+      · Slurm 给出终态时资源未必已经释放。
+    四条都满足才算干净；只满足一部分就报 cleanup-stuck，绝不报成功。
+    """
+    rc, out, err = ssh_try(cfg, _CF_INSPECT.format(jid=shlex.quote(str(jid))), timeout=30)
+    if rc != 0:
+        return WAIT_SSH_FAIL, {"job": jid, "result": "ssh-failed",
+                               "error": err.strip()[:200]}
+    cg, fz, sq, owner, aud, sudo_ok = _split_sections(
+        out, ["CG_PATH_BEGIN", "FREEZE_BEGIN", "SQ_BEGIN", "OWNER_BEGIN",
+              "AUDIT_BEGIN", "SUDO_BEGIN"])
+    cg, fz = cg.strip(), fz.strip()
+    state, owner = sq.strip(), owner.strip()
+
+    if not cg:
+        return CF_NOT_FROZEN, {
+            "job": jid, "result": "no-cgroup",
+            "note": "找不到该作业的 cgroup —— 它可能已经结束了。用普通 scancel 即可。"}
+    if fz != "1":
+        return CF_NOT_FROZEN, {
+            "job": jid, "result": "not-frozen", "cgroup": cg, "slurm_state": state,
+            "note": ("该作业**没有被冻结**（cgroup.freeze=%s），不需要这条命令。"
+                     "直接 scancel 就行。" % (fz or "读不到"))}
+
+    # 谁冻的：从 memguard 维护的冻结清单里取（该清单带 frozen_by_memguard 标志，
+    # 是它从自己的审计记录里恢复出来的 —— 审计文件本身普通用户读不到）。
+    # 人工冻结的作业不该由工具替人决定，所以这个标志要如实呈现，读不到就说读不到。
+    entry, list_seen = None, False
+    try:
+        fl = json.loads(aud.strip() or "{}")
+        list_seen = bool(fl)
+        for it in fl.get("frozen", []):
+            if str(it.get("job_id")) == str(jid):
+                entry = it
+                break
+    except ValueError:
+        pass
+    plan = {
+        "job": jid, "owner": owner, "cgroup": cg, "slurm_state": state,
+        "frozen": True,
+        "frozen_by_memguard": (entry or {}).get("frozen_by_memguard")
+                              if entry else (False if list_seen else None),
+        "frozen_at": (entry or {}).get("frozen_at"),
+        "frozen_list_seen": list_seen,   # False = 清单读不到，来源无从判断
+        "steps": ["解冻 cgroup.freeze -> 0", "scancel", "等待并确认四个条件"],
+    }
+    if plan["frozen_by_memguard"] is None:
+        plan["source_note"] = ("读不到 memguard 的冻结清单，**无法确认是谁冻的**。"
+                               "如果这是管理员手工冻的，取消前请先跟他确认。")
+    elif plan["frozen_by_memguard"] is False:
+        plan["source_note"] = ("该作业在冻结清单里，但**不是 memguard 冻的**"
+                               "（可能是人工操作）。取消前请确认对方的意图。")
+    if sudo_ok.strip() != "YES":
+        plan.update({"result": "need-privilege",
+                     "note": "解冻需要 root（写 cgroup.freeze），当前 sudo 不可用。"
+                             "请管理员执行，或为该用户配置 sudoers。"})
+        return CF_NEED_PRIV, plan
+    if not confirm:
+        plan.update({"result": "dry-run",
+                     "note": "以上是将要执行的步骤。确认无误后加 --yes 真正执行。"})
+        return CF_DRY_RUN, plan
+
+    rc2, out2, err2 = ssh_try(
+        cfg, _CF_EXECUTE.format(jid=shlex.quote(str(jid)), cg=shlex.quote(cg)),
+        timeout=90)
+    if rc2 != 0:
+        plan.update({"result": "execute-failed", "error": err2.strip()[:200]})
+        return CF_STUCK, plan
+
+    sacct, cgstate, gpuproc, mem = _split_sections(
+        out2, ["SACCT_BEGIN", "CGSTATE_BEGIN", "GPUPROC_BEGIN", "MEM_BEGIN"])
+    final = _parse_sacct(sacct)
+    still = [l.split(":", 1)[1] for l in gpuproc.splitlines() if l.startswith("STILL:")]
+    cg_gone = "GONE" in cgstate
+    cg_empty = "populated 0" in cgstate
+
+    checks = {
+        "sacct_terminal": bool(final) and not final[0].startswith("RUNNING"),
+        "cgroup_released": cg_gone or cg_empty,
+        "gpu_procs_gone": not still,
+        "unfreeze_ok": "UNFREEZE_FAILED" not in out2,
+    }
+    plan.update({
+        "final_state": final[0] if final else None,
+        "exit_code": final[1] if final else None,
+        "cgroup_state": "gone" if cg_gone else cgstate.strip()[:80],
+        "gpu_procs_still_alive": still,
+        "checks": checks,
+        "mem_after": mem.strip().replace("\n", " "),
+    })
+    if all(checks.values()):
+        plan.update({"result": "cancelled-clean",
+                     "note": "四项确认全部通过：终态已定、cgroup 已释放、"
+                             "该作业的 GPU 进程已消失、解冻成功。"})
+        return CF_OK, plan
+    plan.update({
+        "result": "cleanup-stuck",
+        "note": ("取消请求已发出，但**资源未确认释放**（见 checks）。"
+                 "不要当成成功 —— 这正是 2026-08-27 那种状态。请人工检查，"
+                 "必要时联系管理员。"),
+    })
+    return CF_STUCK, plan
+
+
+def _split_sections(text, markers):
+    """把探针输出按标记切成几段。
+
+    ★ 标记必须是非空、且不会出现在数据里的字面行。用空串当标记会把第一个空行
+    当成分隔点，前面那段直接丢掉 —— 2026-08-28 实测踩过一次（JSON 整段被吞，
+    表现为"查不到数据"而不是报错）。这类分段解析出错都是**静默**的，所以宁可
+    在这里硬拦。
+    """
+    bad = [m for m in markers if not (m or "").strip()]
+    if bad:
+        raise ValueError("_split_sections: 标记不能为空 —— %r" % (markers,))
+    parts, cur, out = [], [], []
+    idx = 0
+    for ln in text.splitlines():
+        if idx < len(markers) and ln.strip() == markers[idx]:
+            if idx > 0:
+                out.append("\n".join(cur))
+            cur = []
+            idx += 1
+            continue
+        cur.append(ln)
+    out.append("\n".join(cur))
+    while len(out) < len(markers):
+        out.append("")
+    return out[:len(markers)]
+
+
+def _parse_sacct(sa):
+    """sacct -X -n -P 的一行：State|ExitCode。拿不到返回 None（区别于"拿到了但是空"）。"""
+    for ln in (sa or "").strip().splitlines():
+        f = ln.strip().split("|")
+        if len(f) >= 2 and f[0].strip():
+            return f[0].strip(), f[1].strip()
+    return None
 
 
 # ----------------------------- parse helpers -----------------------------
@@ -209,13 +749,42 @@ def cmd_status(cfg):
         elif p[2] == "PENDING":
             pending.append(job)
 
+    phys = gpu_physical(cfg)
+
+    # Slurm 说空闲、但卡上真有用户进程 —— 交上去就撞。2026-08-27 实测出现过。
+    gpu_conflict = (gpu_used < gpu_total) and phys["state"] == "unattributed"
+    warns = []
+    if gpu_conflict:
+        warns.append(
+            "★ Slurm 报告 GPU 空闲，但卡上有 %d 个**未走队列**的用户进程"
+            "（合计 %.1f GB）。现在提交 GPU 作业会和它抢同一张卡。"
+            % (len(phys["unattributed_procs"]), phys["unattributed_mb"] / 1024.0))
+    if phys["state"] == "unknown":
+        warns.append("★ 查不到 GPU 的物理占用（%s）—— 这**不等于**空闲，"
+                     "提交前请人工确认。" % phys["reason"])
+    if phys.get("frozen_jobs"):
+        warns.append(
+            "有 %d 个作业处于**冻结**状态（%s）。它们占着资源但不会前进，"
+            "只有作业所有者能处置；查看用 `advise.py status`，取消用 `cancel-frozen`。"
+            % (len(phys["frozen_jobs"]),
+               "、".join(str(j.get("job_id")) for j in phys["frozen_jobs"][:5])))
+
     return {
         "node": node,
         "node_state": d.get("State", ""),
         "gpu_total": gpu_total,
         "gpu_used": gpu_used,
+        # ↓ 这两个是 **Slurm 记账**，不是物理真相。没走队列的进程它看不见。
         "gpu_free": gpu_used < gpu_total,
         "gpu_job_running": any(j["gpu"] for j in running),
+        # ↓ 这个才是卡上真实发生的事，来自 nvidia-smi
+        "gpu_physical": phys,
+        "gpu_conflict_risk": gpu_conflict,
+        "warnings": warns,
+        # 检查完到作业真正被调度之间仍有窗口：排队中的作业可能在检查后才启动，
+        # 裸跑也可能在作业启动后才出现。这里只保证「如实展示」，不保证不撞。
+        "collision_caveat": ("提交前检查挡不住所有撞卡：检查完到调度之间，"
+                             "别人可能才开始裸跑，或排队作业才被派上。"),
         "cpu_total": cpu_total,                        # 节点总核
         "cpu_alloc": cpu_alloc,                        # 已被作业预留的核
         "cpu_free": cpu_free,                          # 现在还能调度的核（有效核 − 已分配）
@@ -594,7 +1163,8 @@ echo "===CUDA==="; nvidia-smi 2>/dev/null | grep -oE "CUDA Version: [0-9.]+" | h
 echo "===PYTHON==="; python3 --version 2>&1
 echo "===PIP==="; python3 -m pip --version 2>&1 | head -1
 echo "===GCC==="; gcc --version 2>/dev/null | head -1
-echo "===CONDA==="; { command -v conda mamba micromamba ; } 2>/dev/null || echo none
+echo "===CONDA==="; { command -v conda mamba micromamba ; } 2>/dev/null || for d in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge; do [ -x "$d/bin/conda" ] && echo "$d/bin/conda (installed, absent from non-interactive PATH)"; done
+echo "===RSCRIPT==="; command -v Rscript 2>/dev/null; for d in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge; do ls "$d"/envs/*/bin/Rscript 2>/dev/null; done | head -20
 echo "===CONTAINER==="; { command -v docker podman ; } 2>/dev/null || echo none
 echo "===SLURM==="; sinfo --version 2>/dev/null
 echo "===VENVS==="; find ~ -maxdepth 3 -name pyvenv.cfg 2>/dev/null | sed "s#/pyvenv.cfg##" | head -20
@@ -639,6 +1209,9 @@ def cmd_probe_env(cfg):
             "pip": one("PIP"),
             "gcc": one("GCC"),
             "conda": many("CONDA") or "none",
+            # R 单独探：非交互 ssh 不初始化 conda，`command -v Rscript` 必然 not found，
+            # 而 R 恰恰只装在 conda env 里 —— 只看 PATH 会一路得出「这台机器没有 R」
+            "r": many("RSCRIPT") or "none",
             "container": many("CONTAINER") or "none",
             "slurm": one("SLURM"),
         },
@@ -649,7 +1222,9 @@ def cmd_probe_env(cfg):
             "shell_setup": sec.get("SHELL", []),
         },
         "note": "Auto-probed cache. Refresh: advise.py probe-env. "
-                "Re-probe if an env command fails or this looks stale.",
+                "Re-probe if an env command fails or this looks stale. "
+                "⚠ 非交互 ssh 不初始化 conda：PATH 里查不到 conda / Rscript "
+                "不等于没装，以本文件的 conda / r 字段为准，调用走绝对路径。",
     }
     out = os.path.join(HERE, "..", "env-profile.local.json")
     with open(out, "w", encoding="utf-8") as f:
@@ -711,6 +1286,217 @@ def cmd_init(user, host, node, partition, gpu_pool_gb, gpu_floor_gb):
 
 # ----------------------------- CLI -----------------------------
 
+
+# ── 交互式调试会话（salloc）──────────────────────────────────────────────────
+# 为什么要这一档：调试是「跑 2 分钟 → 想 20 分钟 → 再跑」的循环。每一轮都走 sbatch
+# 就要重排一次队 —— 2026-09-02 实测同一个 s2-probe 排了 2h51m 才轮上，而它只跑 51 秒。
+# salloc 把「壳」和「内容」拆开：壳（分配）按申请的时长活着，内容（每次 srun）想跑几次
+# 跑几次。实测每次启动 33–61ms，且跨 ssh 连接照样进得去（新连接 36–51ms）——
+# 所以调用方不必自己开终端、不必挂 tmux。
+#
+# ⚠️ --time 在这里是强制的，不是礼貌，是机制。三条实测支撑（2026-09-06）：
+#   1) idleguard（/opt/spark-usage/idleguard.py:35）对 BatchFlag=0 的交互式作业
+#      **豁免回收** —— 这正是它不打断你思考的原因，但也意味着忘了收工没人兜底。
+#      sbatch 那条路可以不写 --time（有 idleguard 兜底，见 recommend-rules.md）；
+#      交互式这条路没有第二道网，时限就是唯一那道。
+#   2) 时限**只能往下调，不能往上调**：普通用户 scontrol update TimeLimit 调大
+#      直接 "Access/permission denied"，调小成功。所以「先开短的、不够再延长」
+#      这条路走不通，必须一开始就报够。
+#   3) 到点**真掐**：实测 srun 收到 SIGTERM（退出码 143），报
+#      "CANCELLED ... DUE TO TIME LIMIT"，Slurm 终态 TIMEOUT，不重排、不续跑。
+# ⇒ 报少了修不了、报多了能随时 debug-end 释放 —— 风险不对称，所以默认往大了报。
+
+DEBUG_DEFAULT_TIME = "6:00:00"   # 默认 6 小时。够长到不会在干活途中被掐，
+                                 # 又短到不能拿调试会话当批处理使（正经长活该走 sbatch）。
+DEBUG_WARN_FRACTION = 0.25       # 剩余不足 1/4 时开始催「去排下一个会话」。
+                                 # 用比例不用固定值：时限不能延长，只能重开，
+                                 # 而重开要重新排队 —— 会话越长，需要的提前量越大。
+
+
+def _parse_alloc_id(text):
+    """从 salloc 输出里取作业号。拿不到返回 None。"""
+    m = re.search(r"Granted job allocation (\d+)", text or "")
+    return m.group(1) if m else None
+
+
+def _hms_to_seconds(s):
+    """squeue 的 %L / %M / %l -> 秒。形如 '15:00' / '1:23:45' / '2-03:04:05'。
+    拿不准返回 None（区别于 0）。"""
+    if not s:
+        return None
+    s = s.strip()
+    if s in ("UNLIMITED", "INVALID", "NOT_SET", "N/A", ""):
+        return None
+    days = 0
+    if "-" in s:
+        d, _, s = s.partition("-")
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+    try:
+        nums = [int(x) for x in s.split(":")]
+    except ValueError:
+        return None
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    h, m, sec = nums[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _debug_session_info(cfg, jobid):
+    """一个会话的现况：还活着吗、还剩多久。不在队列里返回 None。"""
+    rc, out, _ = ssh_try(cfg, "squeue -h -j %s -o '%%T|%%L|%%M|%%C|%%m|%%j|%%l'"
+                              % shlex.quote(str(jobid)))
+    if rc != 0 or not out.strip():
+        return None
+    p = out.strip().splitlines()[0].split("|")
+    if len(p) < 7:
+        return None
+    return {"state": p[0], "time_left": p[1], "elapsed": p[2],
+            "cpus": p[3], "mem": p[4], "name": p[5], "time_limit": p[6],
+            "time_left_seconds": _hms_to_seconds(p[1]),
+            "time_limit_seconds": _hms_to_seconds(p[6])}
+
+
+def _debug_time_warning(info):
+    """剩余时间跌破 1/4 就催。拿不到时间返回 None（不瞎猜）。"""
+    if not info:
+        return None
+    left = info.get("time_left_seconds")
+    total = info.get("time_limit_seconds")
+    if left is None or not total:
+        return None
+    if left > total * DEBUG_WARN_FRACTION:
+        return None
+    return ("⏰ 会话只剩 %s（时限 %s，已过 3/4）。时限**不能延长**，到点正在跑的活会被"
+            "SIGTERM 掐死且不重排。要接着调就现在去排下一个会话 —— 机器忙时排队本身"
+            "就要一阵子，这段提前量是留给排队的。"
+            % (info.get("time_left"), info.get("time_limit")))
+
+
+def _is_interactive(cfg, jobid):
+    """真判据是 BatchFlag=0（Slurm 自己记的），不是作业名 —— 名字谁都能乱起。
+    idleguard 判豁免用的也是这个字段。读不到返回 None（区别于 False）。"""
+    rc, out, _ = ssh_try(cfg, "scontrol show job %s -o" % shlex.quote(str(jobid)))
+    if rc != 0 or "BatchFlag=" not in out:
+        return None
+    return "BatchFlag=0" in out
+
+
+def cmd_debug_start(cfg, time_str, cpus, mem_gb, gpu, name, wait_secs):
+    time_str = time_str or DEBUG_DEFAULT_TIME
+    name = name or ("debug-" + cfg["user"])
+    parts = ["salloc", "--no-shell", "--immediate=%d" % int(wait_secs),
+             "--job-name=%s" % shlex.quote(name),
+             "--time=%s" % shlex.quote(time_str)]
+    if cpus:
+        parts.append("--cpus-per-task=%d" % int(cpus))
+    if mem_gb:
+        parts.append("--mem=%dG" % int(mem_gb))
+    if gpu:
+        parts.append("--gres=gpu:1")
+    rc, out, err = ssh_try(cfg, " ".join(parts), timeout=int(wait_secs) + 25)
+    blob = ((out or "") + "\n" + (err or "")).strip()
+    jid = _parse_alloc_id(blob)
+    if not jid:
+        # 没拿到 = 机器现在腾不出这个规格。把现场一并返回，让调用方决定
+        # 缩小 / 去 GPU / 等 —— 不在这里替用户选。
+        return {"ok": False, "reason": "not_granted",
+                "salloc_output": blob[:600],
+                "server_now": cmd_status(cfg),
+                "hint": "机器现在腾不出这个规格。可以：① 缩小 --cpus / --mem-gb "
+                        "② 去掉 --gpu ③ 等正在跑的作业结束（server_now 里有还剩多久）"}
+    info = _debug_session_info(cfg, jid) or {}
+    return {"ok": True, "jobid": jid, "name": name,
+            "requested": {"time": time_str, "cpus": cpus,
+                          "mem_gb": mem_gb, "gpu": bool(gpu)},
+            "session": info,
+            "warn_at_seconds_left": int((info.get("time_limit_seconds") or 0)
+                                        * DEBUG_WARN_FRACTION) or None,
+            "run_with": "advise.py debug-run --jobid %s --command '...'" % jid,
+            "end_with": "advise.py debug-end --jobid %s" % jid,
+            "note": "会话到 --time 自动释放。别人在 squeue 里看到的是一个正常作业，"
+                    "名字 '%s' —— 有名有姓有上限，不会被当成卡死的作业。" % name}
+
+
+def cmd_debug_run(cfg, jobid, command, timeout):
+    info = _debug_session_info(cfg, jobid)
+    if not info:
+        die("会话 %s 不在队列里 —— 已经到期或被取消了。"
+            "用 `advise.py debug-list` 看还有哪些活着的会话。" % jobid)
+    if info["state"] != "RUNNING":
+        die("会话 %s 现在是 %s，还不能往里塞活。" % (jobid, info["state"]))
+    # 用 login shell：非交互 shell 的 PATH 里没有 conda（probe-env 早就发现过这点），
+    # 直接 srun 用户的命令会报 "conda: command not found"。
+    remote = "srun --jobid=%s bash -lc %s" % (shlex.quote(str(jobid)),
+                                              shlex.quote(command))
+    t0 = time.time()
+    rc, out, err = ssh_try(cfg, remote, timeout=timeout)
+    elapsed = round(time.time() - t0, 2)
+    after = _debug_session_info(cfg, jobid)
+    result = {"jobid": str(jobid), "rc": rc, "wall_seconds": elapsed,
+              "stdout": out, "stderr": err,
+              "time_left": (after or {}).get("time_left"),
+              "warn": _debug_time_warning(after)}
+    if after is None:
+        # 会话在这次运行期间没了 —— 最可能就是撞上了时限。说清楚，
+        # 别让调用方把「被掐死」读成「程序自己失败了」。
+        result["session_gone"] = True
+        result["warn"] = ("⚠️ 会话在这次运行期间消失了。若 stderr 里有 "
+                          "'DUE TO TIME LIMIT'，就是撞上时限被掐 —— 这次的活没跑完，"
+                          "而且不会自动重跑。开个新会话重来。")
+    return result
+
+
+def cmd_debug_list(cfg):
+    user = cfg["user"]
+    rc, out, _ = ssh_try(cfg, "squeue -h -u %s -o '%%i|%%T|%%j|%%L|%%M|%%C|%%m|%%l'"
+                              % shlex.quote(user))
+    if rc != 0:
+        die("读不到队列（ssh 或 squeue 失败）。")
+    sessions, batch, unknown = [], [], []
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) < 8:
+            continue
+        rec = {"job": p[0], "state": p[1], "name": p[2], "time_left": p[3],
+               "elapsed": p[4], "cpus": p[5], "mem": p[6], "time_limit": p[7]}
+        flag = _is_interactive(cfg, p[0])
+        if flag is True:
+            rec["warn"] = _debug_time_warning({
+                "time_left": p[3], "time_limit": p[7],
+                "time_left_seconds": _hms_to_seconds(p[3]),
+                "time_limit_seconds": _hms_to_seconds(p[7])})
+            sessions.append(rec)
+        elif flag is False:
+            batch.append(rec)
+        else:
+            unknown.append(rec)   # 读不到 BatchFlag：不猜，单列一档
+    return {"user": user, "debug_sessions": sessions, "batch_jobs": batch,
+            "unknown": unknown,
+            "note": "debug_sessions = 交互式分配（BatchFlag=0）。idleguard 豁免它们，"
+                    "只有 --time 会收 —— 所以别忘了 debug-end。"}
+
+
+def cmd_debug_end(cfg, jobid):
+    before = _debug_session_info(cfg, jobid)
+    if not before:
+        return {"jobid": str(jobid), "released": True, "already_gone": True,
+                "note": "它已经不在队列里了（到期或早就取消过）。"}
+    ssh_try(cfg, "scancel %s" % shlex.quote(str(jobid)))
+    # 确认真的退干净了 —— 只发一条 scancel 就报「释放了」是假报告。
+    released = False
+    for _ in range(8):
+        time.sleep(1.0)
+        if _debug_session_info(cfg, jobid) is None:
+            released = True
+            break
+    return {"jobid": str(jobid), "released": released, "was": before,
+            "note": None if released else
+                    "scancel 已发出，但队列里还看得到 —— 再跑一次 debug-list 确认。"}
+
+
 def main():
     # Windows 控制台默认 cp936，emit()/die() 用 ensure_ascii=False 输出的中文（basis/warnings）
     # 会 mojibake。强制 stdout 走 UTF-8，让中文在任何调用方（Bash/PowerShell）都正确。
@@ -750,7 +1536,50 @@ def main():
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
 
+    # 盯住一个作业，出事就返回。给 AI agent 用：正常跑的时候一声不吭、不花 token，
+    # 作业结束/失败/**被冻结**/被取消时立刻返回，冻结于是变成一个会主动送达的事件。
+    w = sub.add_parser("wait")
+    w.add_argument("jobid")
+    w.add_argument("--interval", type=float, default=8.0,
+                   help="轮询间隔秒数（默认 8）")
+    w.add_argument("--max-wait", type=float, default=0,
+                   help="监控自身的最长存活秒数，0 = 不限。超时返回 20，"
+                        "含义是「监控放弃了」而不是「作业超时了」")
+
+    # 干净地取消一个被冻结的作业：解冻 → 取消 → 确认真的退干净了。
+    # 直接 scancel 一个冻结的作业会让它永久卡住且不还内存 —— 这条命令的全部意义
+    # 就是让调用者不必知道有这个坑。
+    gp = sub.add_parser("gpu-peak")
+    gp.add_argument("jobid")
+
+    cf = sub.add_parser("cancel-frozen")
+    cf.add_argument("jobid")
+    cf.add_argument("--yes", action="store_true",
+                    help="确认取消。不带此参数只做检查并报告将要做什么")
+
     sub.add_parser("probe-env")
+
+    # 交互式调试会话。默认 6 小时，理由见 cmd_debug_start 上面那段注释。
+    ds = sub.add_parser("debug-start")
+    ds.add_argument("--time", default=None,
+                    help="会话时长，默认 6:00:00。时限不能事后延长，往大了报")
+    ds.add_argument("--cpus", type=int, default=None)
+    ds.add_argument("--mem-gb", type=int, default=None)
+    ds.add_argument("--gpu", action="store_true", help="会话要占 GPU")
+    ds.add_argument("--name", default=None,
+                    help="squeue 里显示的名字，默认 debug-<user>")
+    ds.add_argument("--wait", type=int, default=20,
+                    help="等不到资源就放弃的秒数（默认 20），避免调用方被吊住")
+
+    dr = sub.add_parser("debug-run")
+    dr.add_argument("--jobid", required=True)
+    dr.add_argument("--command", required=True)
+    dr.add_argument("--timeout", type=int, default=900)
+
+    sub.add_parser("debug-list")
+
+    de = sub.add_parser("debug-end")
+    de.add_argument("--jobid", required=True)
 
     d = sub.add_parser("detect-server")
     d.add_argument("--pattern", default="spark", help="match tailnet device name")
@@ -786,8 +1615,29 @@ def main():
                             args.out, args.workdir))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script))
+    elif args.cmd == "wait":
+        # 退出码是这条命令的主要产物 —— 调用方（含 AI agent）靠它区分
+        # 「跑完了」「挂了」「被冻了」，不必解析文本。
+        rc, payload = cmd_wait(cfg, args.jobid, args.interval, args.max_wait)
+        emit(payload)
+        sys.exit(rc)
+    elif args.cmd == "gpu-peak":
+        emit(cmd_gpu_peak(cfg, args.jobid))
+    elif args.cmd == "cancel-frozen":
+        rc, payload = cmd_cancel_frozen(cfg, args.jobid, args.yes)
+        emit(payload)
+        sys.exit(rc)
     elif args.cmd == "probe-env":
         emit(cmd_probe_env(cfg))
+    elif args.cmd == "debug-start":
+        emit(cmd_debug_start(cfg, args.time, args.cpus, args.mem_gb,
+                             args.gpu, args.name, args.wait))
+    elif args.cmd == "debug-run":
+        emit(cmd_debug_run(cfg, args.jobid, args.command, args.timeout))
+    elif args.cmd == "debug-list":
+        emit(cmd_debug_list(cfg))
+    elif args.cmd == "debug-end":
+        emit(cmd_debug_end(cfg, args.jobid))
 
 
 if __name__ == "__main__":
