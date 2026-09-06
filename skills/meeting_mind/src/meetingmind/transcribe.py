@@ -32,18 +32,23 @@ if TYPE_CHECKING:  # avoid pulling numpy at import time
     import numpy as np
 
 DEFAULT_MODEL_ID: str = "Qwen/Qwen3-ASR-1.7B"
-DEFAULT_CHUNK_MINUTES: float = 15.0
+DEFAULT_CHUNK_MINUTES: float = 3.0
 
 _VALID_DEVICES: frozenset[str] = frozenset({"auto", "cuda", "cpu"})
 
 
 @dataclass(frozen=True)
 class Segment:
-    """One transcribed audio span. Timestamps are seconds from recording start."""
+    """One transcribed audio span. Timestamps are seconds from recording start.
+
+    `speaker` is None for single-stream (group) recordings and a label like
+    "对方"/"我" for the two-stream 1:1 path, where each stream is one voice.
+    """
 
     start: float
     end: float
     text: str
+    speaker: str | None = None
 
 
 # --------------------------------------------------------------------- helpers
@@ -213,13 +218,21 @@ def _save_chunk_wav(
 
 
 def _format_transcript_md(segments: list[Segment]) -> str:
-    """Render segments as a UTF-8 markdown transcript with timestamp prefixes."""
+    """Render segments as a UTF-8 markdown transcript with timestamp prefixes.
+
+    A segment carrying a `speaker` (two-stream 1:1 recordings) renders as
+    ``[HH:MM:SS] **speaker**: text``; single-stream segments (speaker is None)
+    keep the plain ``[HH:MM:SS] text`` form unchanged.
+    """
     lines: list[str] = ["# 会议转录", ""]
     for seg in segments:
         text = seg.text.strip()
         if not text:
             continue
-        lines.append(f"{format_timestamp(seg.start)} {text}")
+        if seg.speaker:
+            lines.append(f"{format_timestamp(seg.start)} **{seg.speaker}**: {text}")
+        else:
+            lines.append(f"{format_timestamp(seg.start)} {text}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -248,10 +261,16 @@ class Transcriber:
     """
 
     def __init__(
-        self, model_id: str = DEFAULT_MODEL_ID, device: str = "auto"
+        self,
+        model_id: str = DEFAULT_MODEL_ID,
+        device: str = "auto",
+        max_new_tokens: int = 1024,
+        memory_fraction: float = 0.85,
     ) -> None:
         self._model_id = model_id
         self._device = _select_device(device)
+        self._max_new_tokens = max_new_tokens
+        self._memory_fraction = memory_fraction
         self._model: Any = None
 
     @property
@@ -286,9 +305,24 @@ class Transcriber:
             import torch  # noqa: PLC0415
             from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
 
-            return Qwen3ASRModel.from_pretrained(
-                self._model_id, device_map=self._device
-            )
+            # Cap the caching allocator so a runaway generation OOM-exits the
+            # process instead of spilling into Windows WDDM shared VRAM (which
+            # drags system RAM down and hard-reboots the machine). CUDA only.
+            if self._device == "cuda":
+                torch.cuda.set_per_process_memory_fraction(
+                    self._memory_fraction, 0
+                )
+
+            # fp16 halves weight VRAM (1.7B: 6.8GB->3.4GB) with no measurable
+            # accuracy loss for inference; max_new_tokens caps autoregressive
+            # generation so a chunk the model can't parse can't spin VRAM to OOM.
+            load_kwargs: dict[str, Any] = {
+                "device_map": self._device,
+                "max_new_tokens": self._max_new_tokens,
+            }
+            if self._device == "cuda":
+                load_kwargs["torch_dtype"] = torch.float16
+            return Qwen3ASRModel.from_pretrained(self._model_id, **load_kwargs)
         except ImportError as exc:
             raise RuntimeError(
                 f"Transcription dependencies missing: {exc}. "
@@ -307,7 +341,11 @@ class Transcriber:
                 file=sys.stderr,
             )
             self._device = "cpu"
-            return Qwen3ASRModel.from_pretrained(self._model_id, device_map="cpu")
+            return Qwen3ASRModel.from_pretrained(
+                self._model_id,
+                device_map="cpu",
+                max_new_tokens=self._max_new_tokens,
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load model {self._model_id} on {self._device}: {exc}"
@@ -319,12 +357,15 @@ class Transcriber:
         audio_path: Path,
         vocab_context: str = "",
         chunk_minutes: float = DEFAULT_CHUNK_MINUTES,
+        partial_path: Path | None = None,
+        spans: list[tuple[float, float]] | None = None,
     ) -> list[Segment]:
         """Transcribe ``audio_path`` into a list of `Segment` (one per chunk).
 
         Pipeline:
           1. Resample to 16 kHz mono via librosa.
-          2. Plan chunks of ``chunk_minutes`` minutes (last chunk may be short).
+          2. Plan chunks of ``chunk_minutes`` minutes (last chunk may be short),
+             or use ``spans`` verbatim when the caller has its own boundaries.
           3. For each chunk, write a tmp WAV and call qwen-asr.transcribe with
              the same ``vocab_context`` (so hot-words apply uniformly).
           4. Collapse each chunk's results into one `Segment` whose `start`
@@ -341,11 +382,27 @@ class Transcriber:
         audio, sr = _resample_to_16k_mono(audio_path)
         total_seconds = len(audio) / sr if sr > 0 else 0.0
         chunk_seconds = chunk_minutes * 60.0
-        plan = _chunk_audio_indices(total_seconds, chunk_seconds)
+        # `spans` lets the caller decide where the cuts go. The speaker-labelled
+        # path needs it: fixed-length chunks straddle speaker changes, and one
+        # `Segment` per chunk can then only carry one speaker for a stretch of
+        # audio in which several people spoke (measured: a 2-minute two-person
+        # recording came back as one segment attributed entirely to one of them).
+        plan = list(spans) if spans is not None else _chunk_audio_indices(
+            total_seconds, chunk_seconds
+        )
         if not plan:
             return []
 
         segments: list[Segment] = []
+        # Incremental on-disk transcript: append each chunk the moment it's
+        # done so a mid-run crash (e.g. OOM on a later chunk) doesn't discard
+        # every chunk transcribed so far. The caller points this at
+        # transcript/_partial.md; None disables it (e.g. unit tests).
+        if partial_path is not None:
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            partial_path.write_text(
+                "# 会议转录（增量进行中）\n\n", encoding="utf-8"
+            )
         with tempfile.TemporaryDirectory(prefix="meetingmind_chunks_") as tmp:
             tmp_dir = Path(tmp)
             for idx, (start_sec, end_sec) in enumerate(plan, start=1):
@@ -378,12 +435,32 @@ class Transcriber:
                     if txt:
                         texts.append(txt)
                 if texts:
-                    segments.append(
-                        Segment(
-                            start=start_sec,
-                            end=end_sec,
-                            text=" ".join(texts),
-                        )
+                    seg = Segment(
+                        start=start_sec,
+                        end=end_sec,
+                        text=" ".join(texts),
                     )
+                    segments.append(seg)
+                    if partial_path is not None:
+                        with partial_path.open("a", encoding="utf-8") as fh:
+                            fh.write(
+                                f"{format_timestamp(start_sec)} {seg.text}\n\n"
+                            )
+
+                # Free this chunk's VRAM before the next one. Without this the
+                # caching allocator accumulates across chunks and a long meeting
+                # OOMs mid-run (the silent leak behind the original chunk-8 crash).
+                self._release_vram()
 
         return segments
+
+    def _release_vram(self) -> None:
+        """Empty the CUDA caching allocator between chunks (no-op on CPU)."""
+        if self._device != "cuda":
+            return
+        try:
+            import torch  # noqa: PLC0415
+
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 — cache release is best-effort
+            pass

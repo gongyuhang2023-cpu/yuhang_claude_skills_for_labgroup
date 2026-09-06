@@ -116,13 +116,22 @@ Bash:
              --topic "<topic>" \
              --interval <interval> \
              --threshold <threshold> \
-             --output-root ~/meetings \
+             --output-root ~/Report/Group_Meeting \
+             <若 software=teams 则加 --system-audio> \
              --quiet
   description: "Recording <topic> via meetingmind in background"
   run_in_background: true
 ```
 
-⚠️ **必须加 `--output-root ~/meetings`**。Claude Code 的工作目录可能是
+⚠️ **Teams 必须加 `--system-audio`**。新版 Teams（WebView2/Chromium 内核）的会议音频由
+Chromium audio-service 子进程渲染，逃出目标进程树，进程级 loopback **全程录成静音**（RMS=0，
+历史反复复现）。`--system-audio` 改录**默认输出端点的系统混音**（扬声器在放什么就录什么），
+绕开进程归属——声音在响就一定录得到。代价：会混入系统其它声音（通知等），录会前建议静音通知。
+- `<software>` = **teams** → **加** `--system-audio`
+- Zoom / 腾讯会议 / Edge 等 → **不加**（进程级 loopback 正常，音质更干净）；若录完出现音频
+  静音警告（`recording.wav` 静音），重录时再加 `--system-audio` 兜底。
+
+⚠️ **必须加 `--output-root ~/Report/Group_Meeting`**(大组会归档处)。Claude Code 的工作目录可能是
 `system32` 等无写入权限的位置，默认 `./meetings` 会 Access Denied。
 
 Bash 会立刻返回一个 task ID 和 output file 路径。**记下这两个**。
@@ -136,8 +145,8 @@ Bash 会立刻返回一个 task ID 和 output file 路径。**记下这两个**�
 分别存为 `<meeting_dir>` 和 `<stop_file>`。
 
 **Fallback**：如果读不到路径行（输出为空或只有错误信息），尝试用命名
-规则推断：`~/meetings/YYYY-MM-DD-<topic>` 目录是否存在。用 PowerShell
-`Get-ChildItem ~/meetings -Directory` 确认。STOP 文件路径 =
+规则推断：`~/Report/Group_Meeting/YYYY-MM-DD-<topic>` 目录是否存在。用 PowerShell
+`Get-ChildItem ~/Report/Group_Meeting -Directory` 确认。STOP 文件路径 =
 `<meeting_dir>/STOP`。
 
 **如果 output 文件包含错误信息**（如 `Failed to start`、`No process
@@ -195,14 +204,18 @@ STOP 文件出现后，后台的 `record` 进程会在下一次 wait 轮询（�
 
 ```
 Bash:
-  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>" --device cuda --chunk-minutes 5
+  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>" --device cuda --chunk-minutes 3
   description: "Transcribe and build ai_input.json"
   (不开 run_in_background — 这步需要拿到结果)
-  timeout: 600000  # 10 minutes — 1 小时会议在 RTX 5070 上 ~8.6 分钟
+  timeout: 600000  # 10 minutes
 ```
 
-⚠️ **`--chunk-minutes 5` 是必须的**。默认 15 分钟 chunk 在长会议（>30 min）
-上会导致 CUDA OOM。5 分钟 chunk 串行处理，总计算量相同，只降低峰值显存。
+⚠️ **显存安全（2026-06 修复后）**：转录现默认 fp16 加载（权重 6.8GB→3.4GB）+
+`max_new_tokens=1024` 上限 + 每 chunk 后 `empty_cache()` + 显存 fraction 0.85 护栏 +
+增量落盘（`transcript/_partial.md`，崩了不丢已转部分）。**默认 chunk 已是 3 分钟**，
+12GB 卡峰值约 5GB、恒定不爬升。`--chunk-minutes 3` 可省（已是默认）；显存更小的卡可降到 2。
+⚠️ **不要调回 5 分钟 + fp32**：旧版那样长会议会显存逐块累积到第 N 块触顶 → 经 Windows
+WDDM 共享显存溢出到系统内存 → **整机硬重启**（2026-06-15 实测踩过，详见 memory）。
 
 ⚠️ **耗时预期**（参考 ADR-003，RTX 5070）：
 - 15 分钟会议：~2 分钟
@@ -291,9 +304,12 @@ Slide <slide_number>:
 
 ═══ 输出格式（精确照抄） ═══
 
-按 slide_number 升序，每张图一段：
+按 slide_number 升序，每张图一段（**标题下紧跟一行图片引用** `![Slide <N>](<path>)`，
+让合并后的 interpretation.md 图文对照；`<path>` 用上面给你的相对路径 `slides/slide_xxx.png`）：
 
 ## Slide <N> [<offset>]
+
+![Slide <N>](<path>)
 **视觉内容**: <一段 1-3 句话描述图上画/写的什么。识别 PPT 标题、
 图表类型、代码片段、UI 截图、公式等。**只看本张图**，不要参考其他 slide。>
 **对应转录**: <从 transcript_segments 找出与本图 offset 前后 1-2 分钟
@@ -459,12 +475,62 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 直接把错误内容贴给用户，建议解决路径。**不要重试** — 用户得先处理
 环境问题（开软件 / 加入会议）才有意义。
 
+### 录制被中断（进程没走到 stop）
+
+**症状**：`postprocess` 抛 `Recording did not finish cleanly`，`recording_status` 是
+`recording` 或 `incomplete`。
+
+- `recording` —— 进程根本没走到收尾就没了（窗口重建、被杀、崩溃、断电）
+- `incomplete` —— 走到了收尾，但音频写入线程被卡住、`finish()` 等超时放弃了。
+  时长和静音判定都没算出来，所以 metadata 不敢声称 `complete`。
+
+**含义**：两种都不会丢音频。
+**音频不会因此丢失** —— 从 2026-08-04 起音频是边录边落盘的，`recording.wav`
+里已经有截止那一刻的全部内容。缺的只是 metadata 的收尾信息（结束时间、
+时长、幻灯片索引）。
+
+**处理**：跑 recover 补全，然后正常 postprocess：
+
+```
+~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind recover "<meeting_dir>"
+~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>"
+```
+
+想先看会改什么就加 `--dry-run`。recover **不会**自动跑，也不该自动跑 ——
+它要合并 metadata、WAV 头、截图三个来源，静默合并出错的代价比多敲一行命令高。
+
+recover 之后 `metadata.json` 的 `recording_status` 变成 `recovered`，并带一个
+`recovery` 段说明做了什么。注意 revisit（回顾型截图）记录**无法恢复**，
+它只存在于内存中；重建出的索引只有正式幻灯片。
+
+### 录制有丢失（Phase 2 结束时检查）
+
+`record` 结束时如果丢过音频，stderr 会打一条醒目横幅：
+
+```
+====================================================================
+⚠️  [session] 录制过程中有音频丢失 / audio was lost during capture:
+  - audio: writer failed — ...
+  - audio: 12345 bytes dropped (disk too slow)
+====================================================================
+```
+
+**退出码仍然是 0，这是有意的** —— 丢了几秒的录音仍然需要转录，非零退出会让
+本流程判定失败并跳过 Phase 3。所以**读 task output 时要主动扫这条横幅**，
+有的话如实告诉用户丢了什么，别因为退出码是 0 就当一切正常。
+
+精确数字也落在 `metadata.json` 的 `audio_stats` / `mic_stats` 里
+（`dropped_bytes` / `late_calls` / `writer_error` / `peak_queued_bytes`），
+控制台输出早没了之后仍然查得到。
+
 ### 转录失败（Phase 3）
 
 `postprocess` 抛 RuntimeError 常见原因：
 - `Transcription dependencies missing` → 用户没装 `[transcribe]` extras
 - `Failed to decode <audio>` → 音频损坏（录制过程中磁盘满 / 进程崩）
-- `CUDA OOM` → 模型加载失败，code 已经 fallback CPU 重试一次
+- `CUDA OOM`（推理时）→ 进程干净退出（**不会** fallback CPU，那只在模型加载阶段），
+  已转 chunk 保在 `transcript/_partial.md`；现默认 fp16 + 显存 fraction 0.85 护栏，
+  推理 OOM 也只是进程退出、不会再溢出系统内存拖垮整机
 
 把错误贴给用户。**transcript.md 没生成不要伪装成功**。会议数据
 （音频 + 截图）已经在 `<meeting_dir>` 里，用户可以晚点手动重跑
@@ -473,7 +539,8 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 ### 用户中途取消
 
 如果用户在 Phase 2 之后、Phase 3 之前说"取消"或"算了不录了"：
-1. 写 STOP 文件让 record 干净退出（不要 kill 进程，会丢 audio buffer）
+1. 写 STOP 文件让 record 干净退出（仍然优先这样做：干净收尾才有完整的
+   metadata。但即使被 kill，音频也已经在盘上了，用 `recover` 能收尾）
 2. **不**跑 postprocess
 3. 告诉用户：录制已停止，原始数据保留在 `<meeting_dir>`，需要时可以
    手动跑 `~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess <meeting_dir>` 后处理。
@@ -496,7 +563,10 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 ## 不要做的事
 
 - **不要替用户运行 `pip install`** 或修改用户的 Python 环境。
-- **不要在录制中途读 audio.wav 或 metadata.json** —— session.py 正在写。
+- **不要在录制中途改 audio/recording.wav** —— writer 线程正持有它。
+  （**读**是安全的：从 2026-08-04 起 WAV 头每批都回写，录制中的文件在
+  任何时刻都是合法可播的。metadata.json 同理，开录就写、原子替换，
+  中途读到的是 `recording_status: "recording"` 的那一版。）
 - **不要尝试加 AI 总结**（解读 / 摘要）—— P3.2 才做。本 SKILL.md
   的范围到 `postprocess` 产出 transcript.md + ai_input.json 为止。
 - **不要把 meeting_dir 路径泄漏到不该泄漏的地方**（如复制粘贴到外部

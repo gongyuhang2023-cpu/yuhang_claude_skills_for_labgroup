@@ -2,7 +2,7 @@
 name: humanizer
 version: 3.0.0
 description: |
-  Academic paper de-AI tool. Detects and removes signs of AI-generated writing
+  [WIP / 待优化] Academic paper de-AI tool. Detects and removes signs of AI-generated writing
   from scientific manuscripts while preserving academic rigor and terminology.
   Section-aware (IMRAD), three-tier word classification (ban/limit/allow),
   burstiness checking, and transition diversity scoring. Based on Wikipedia's
@@ -16,6 +16,10 @@ allowed-tools:
   - Glob
   - AskUserQuestion
 ---
+
+> ⚠️ **待优化（WIP）** —— 本 skill 仍在打磨：词表分级与 burstiness 阈值可能变动，
+> 对某些学科的正常表述存在误判。**产出请自行复核后再用，别直接投出去。**
+> 遇到误判/漏判欢迎反馈，会收进下一版。
 
 # Academic Paper Humanizer
 

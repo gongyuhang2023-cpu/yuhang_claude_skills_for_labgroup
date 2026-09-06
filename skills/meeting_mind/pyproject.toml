@@ -33,6 +33,11 @@ classifiers = [
 dependencies = [
     # Audio capture (volume-independent process loopback)
     "proc-tap>=1.0.3",
+    # Microphone capture (local input device, for two-stream 1:1 meetings)
+    "sounddevice>=0.4",
+    # System-audio loopback capture (default output mix) — the Teams-proof
+    # fallback when per-process WASAPI loopback records silence (SystemAudioRecorder).
+    "soundcard>=0.4",
     # Screen capture (Windows Graphics Capture API)
     "windows-capture>=1.4.0",
     # Image processing for change detection
@@ -63,6 +68,29 @@ transcribe = [
     "accelerate==1.12.0",
     "librosa==0.11.0",
     "soundfile==0.13.1",
+]
+
+# Speaker diarization — only the in-person path needs it (`record --mic-only`,
+# where one microphone holds several voices). Online meetings record one stream
+# per person and already know who is who.
+#
+# Optional on purpose: without it, `postprocess --diarize` says so and produces
+# an unlabelled transcript rather than failing. Someone who only records group
+# meetings should not have to pull this in.
+#
+#   pip install -e ".[diarize]"
+#
+# Also needs a Hugging Face token with access to the (free, CC-BY-4.0) gated
+# pipeline `pyannote/speaker-diarization-community-1` — accept the conditions on
+# the model page, then `huggingface-cli login`.
+#
+# ⚠ Do NOT add `speechbrain` here. `Pipeline.from_pretrained` imports it when
+# present, and Lightning's `inspect.stack()` then trips over SpeechBrain's lazy
+# modules (`speechbrain.integrations.k2_fsa`) and raises. Merely having it
+# installed is enough to break diarization; pyannote's own WeSpeakerResNet34
+# covers the embeddings anyway (see `voiceprint.py`).
+diarize = [
+    "pyannote.audio>=4.0",
 ]
 
 # Developer tooling
@@ -112,7 +140,11 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so tests can `from tests.helpers import ...`
+# without turning tests/ into an installed package.
+pythonpath = ["."]
 markers = [
     "gpu: requires CUDA GPU (skipped in CI)",
     "realtime: requires live audio/window capture (skipped in CI)",
+    "slow: takes more than a few seconds (memory-bound and hard-kill suites)",
 ]

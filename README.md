@@ -28,47 +28,32 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ---
 
-### `group_meeting_recorder` — 组会自动截图 + AI 总结（旧版，仍可用）
+### `meeting_mind` — 会议录制全流程（线上 + **面对面**）
 
-**用途**：Teams 线上组会时后台自动截图（检测 PPT 翻页），会后由 Claude 生成图文总结。
-
-**触发词**：`截屏组会`、`自动截PPT`、`/capture`
-
-**工作流**：
-1. 说"开始截图"→ 脚本后台运行，自动检测 PPT 翻页并截图
-2. 会议结束说"生成总结"→ Claude 读取截图，生成 `summary.md`
-
-**依赖**：`mss`, `PyGetWindow`, `Pillow`, `numpy`（首次运行自动安装到 `.venv`）
-
-**注意**：目前适配 Windows + Teams，截图保存到 `~/Desktop/meeting_captures/`
-
-> **推荐使用下方的 `meeting_mind`**，它是此工具的全面升级版。本工具保留供已有用户继续使用。
-
----
-
-### `meeting_mind` — MeetingMind 组会录制全流程（重写版，self-contained）
-
-**用途**：一键录制组会，自动完成：进程级音频抓取 + PPT 翻页截图 + 本地 ASR 转录 + Claude 分批并行解读 → `interpretation.md` + `summary.md` 两份产物。
+**用途**：一键录制会议，自动完成音频抓取 + PPT 翻页截图 + 本地 ASR 转录 + Claude 分批并行解读 → `interpretation.md` + `summary.md` 两份产物。
 
 **触发词**：`录会议`、`录个会议`、`开始录制`、`start recording a meeting`
 
-**相比上一版的关键变化**（本 skill 已**完全重写**，旧版的 PyAudioWPatch + virtual cable 方案被 ProcTap 替代，自动 LLM Wiki 导入被精简掉）：
+**本次更新相比库里的上一版，是一个代际的差距**：
 
-| 功能 | group_meeting_recorder | meeting_mind (新版) |
-|------|----------------------|--------------|
-| 截图 | mss 屏幕截图（窗口遮挡截不到） | Windows Graphics Capture API（遮挡/离屏/跨虚拟桌面均可） |
-| 录音 | 无 | **ProcTap 进程级 WASAPI Loopback** — 调系统音量/静音不影响录制 |
-| 语音转文字 | 无 | Qwen3-ASR-1.7B 本地 GPU 推理（~0.14× 实时） |
-| PPT 回翻去重 | 无 | 全历史像素差去重，revisit 元数据记录 |
-| 会议软件 | 仅 Teams | Teams / Zoom / 腾讯会议 / Edge 浏览器直播 |
-| AI 后处理 | 一次性读全部截图生成 summary | **5 张/批并行 sub-agent** → interpretation.md + summary.md（per-slide 视觉/转录/解读三段） |
-| 包结构 | 散装 scripts/ | **bundle 化**：`SKILL.md + install.py + src/meetingmind/ + pyproject.toml`，`cp -r` 即装 |
+| 能力 | 上一版 | 现在 |
+|------|--------|------|
+| 录音路径 | 只有 ProcTap 进程级抓取 | 三选一：进程级 / **`--system-audio` 系统混音**（修 Teams 整场录成静音）/ **`--mic-only` 单麦** |
+| **面对面会议** | ❌ 只能录线上 | ✅ **`--mic-only` + `--diarize` + `--voiceprint`** —— 一支麦克风录两个人，自动分离说话人并按声纹认名字 |
+| 自己的声音 | 不录 | `--mic` 录成第二路 `audio/mic.wav`（1:1 会议两路分开） |
+| 长会议音频 | 内存缓冲 —— **长会议曾整段丢失** | **边录边落盘**（新 `wavsink` 模块），录多久都不丢 |
+| 纯语音会议 | 必须有窗口可截 | `--no-slides` 音频-only |
+| 录制中断 | 无恢复路径 | 新 `recovery` 模块 |
+| 产物落点 | `~/meetings/` | `~/Report/Group_Meeting/`（`--output-root` 可改） |
+| ProcTap | 上游 PyPI 版 | 随包带 **`vendor/proctap` 补丁版**（修 WASAPI loopback 静音），`install.py` 第 5b 步自动覆盖 |
+
+新增模块：`wavsink.py`（边录边落盘）、`voiceprint.py`（声纹认人）、`diarize.py`（说话人分离）、`mic.py`（麦克风采集）、`recovery.py`（中断恢复）、`audioio.py`。
 
 **工作流**：
-1. 说"录会议" → AskUserQuestion 一次问 4 项（主题/软件/灵敏度/麦克风）
-2. 后台启动 `meetingmind record`（Bash run_in_background），停止信号靠写 `STOP` 文件
-3. 说"结束了" → 触发 STOP → 等录制进程退出 → 自动 `postprocess`（resample + Qwen3-ASR + 写 ai_input.json）
-4. **自动进入 AI 解读**：读 ai_input.json，过滤 revisit → spawn 并行 sub-agent（每批 5 张图 + 完整 transcript）→ 合并 interpretation.md → 1 个 summary sub-agent → summary.md
+1. 说"录会议" → 一次问清主题/软件/灵敏度/麦克风
+2. 后台启动 `meetingmind record`，停止信号靠写 `STOP` 文件
+3. 说"结束了" → 触发 STOP → 等录制进程退出 → 自动 `postprocess`（resample + Qwen3-ASR + 写 `ai_input.json`）
+4. **自动进入 AI 解读**：过滤 revisit → 并行 sub-agent（每批 5 张图 + 完整 transcript）→ 合并 `interpretation.md` → `summary.md`
 
 **安装**：
 ```bash
@@ -76,23 +61,25 @@ cp -r skills/meeting_mind ~/.claude/skills/
 cd ~/.claude/skills/meeting_mind
 python install.py
 ```
-6 步全自动（Python/Windows/CUDA 检测 → 建自己的 venv → pip install `[transcribe]` extras → skill 已就位）。首次跑会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`（HF cache，下次共享）。
+6 步全自动（Python/Windows/CUDA 检测 → 建自己的 venv → 装 `[transcribe]` extras → 覆盖为 `vendor/proctap` 补丁版）。首次跑会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`。
 
-**依赖**（installer 自动装到 skill 自带 venv，**不污染你其他项目**）：
+**依赖**（装进 skill 自带 venv，**不污染你其他项目**）：
 - 核心：`proc-tap`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`
-- 转录：`torch==2.11.0+cu128`、`transformers==4.57.6`、`qwen-asr==0.0.6`、`librosa`、`soundfile`、`accelerate`
+- 转录：`torch+cu128`、`transformers`、`qwen-asr`、`librosa`、`soundfile`、`accelerate`
 
-**系统要求**：Windows 10 build 19041+ / Windows 11 + Python 3.10+ + NVIDIA GPU（推荐 6 GB+ 显存；CPU 推理可跑但慢 5-10×）
+**系统要求**：Windows 10 build 19041+ / Windows 11 + Python 3.10+ + NVIDIA GPU（推荐 6 GB+ 显存；CPU 可跑但慢 5-10×）
 
 **注意**：
-- 录到的会议数据**默认存在** `meetings/<date>-<topic>/` 下，**不外发**。AI 解读步骤会把截图 + transcript 作为 prompt 发给 Anthropic（Claude API），受 [Anthropic Privacy Policy](https://www.anthropic.com/legal/privacy) 约束。会议特别敏感时考虑只跑到 transcript 阶段。
-- v1 不录用户麦克风（只录会议软件输出音频，即其他人讲话）。
-- 会议窗口不能最小化到任务栏（WGC 限制），可以拖到角落或换桌面。
-- **架构参考**：详见 skill 内 `SKILL.md`（Phase 1-4 完整指令）和 `README.md`（朋友圈安装与隐私说明）。
+- 会议数据默认存本地 `~/Report/Group_Meeting/<date>-<topic>/`，**不外发**。AI 解读会把截图 + transcript 发给 Claude API，受 [Anthropic Privacy Policy](https://www.anthropic.com/legal/privacy) 约束；会议特别敏感时只跑到 transcript 阶段。
+- 声纹认人是**辅助不是判决**：两个人的会永远给出两个名字，拿不准时以你自己的记忆为准。
+- 线上会议窗口不能最小化到任务栏（WGC 限制），可拖到角落或换虚拟桌面。
 
 ---
 
-### `humanizer` — 学术论文去 AI 痕迹工具
+### `humanizer` — 学术论文去 AI 痕迹工具（**待优化**）
+
+> ⚠️ **待优化**：本 skill 尚在打磨中，规则与阈值可能变动，产出请自行复核后再用。
+> 遇到误判/漏判欢迎反馈，会一并收进下一版。
 
 **用途**：检测并移除学术论文中的 AI 生成写作模式，使文本读起来像经验丰富的人类研究者所写。
 
@@ -110,24 +97,27 @@ python install.py
 
 ---
 
-### `meeting-ppt-vba` — VBA 宏方案组会 PPT 生成器
+### `ppt-master` — 科研 PPT 的「科研规范层」
 
-**用途**：生成完整 VBA 宏代码，在 PowerPoint 中一键执行即可生成专业科研组会 PPT。所有元素为原生 PowerPoint 对象，100% 可编辑。
+**用途**：**替代原来的 `meeting-ppt-vba` 与 `open-slide`。** 它是一层**薄壳**——不自己生成 PPT，美学/排版/出片全部交给第三方开源引擎 [hugohe3/ppt-master](https://github.com/hugohe3/ppt-master)，本 skill 只负责把**科研内容规范**注入进去，并在导出前逐条把关。
 
-**触发词**：`/ppt-vba`、`生成VBA PPT`、`可编辑PPT`
+**触发词**：`/ppt-master`、`科研 PPT`、`用 ppt-master 做组会 PPT`
 
-**核心特性**：
-- **莫兰迪配色**：低饱和高级感，7 色体系 + 双色分层原则，色盲友好
-- **ABT 叙事结构**：And（背景）→ But（问题）→ Therefore（方案），逻辑清晰
-- **AE 断言式标题**：标题即结论，非标签式（如"噬菌体 R1 裂解活性最强"而非"实验结果"）
-- **8 种幻灯片布局**：封面 / 章节 / 内容 / 双栏 / 图片 / 表格 / 结论 / 致谢
-- **自动图片插入**：从源文档提取 `![](path)` 引用，自动映射到幻灯片并插入
-- **GBK 编码自适应**：自动检测系统代码页，条件转换编码，中文不乱码
+**为什么换掉前两个**：`meeting-ppt-vba`（VBA 宏）和 `open-slide`（React 幻灯片）各自维护一套自己的排版引擎 —— 排版是别人已经做得更好的事，我们真正的增量在**科研正确性**。分层之后，引擎升级不用我们跟。
 
-**工作流**（五阶段）：
-1. 框架规划（含图片映射）→ 2. 规范审查 → 3. 图片验证 → 4. Gemini 审核 → 5. VBA 代码生成
+**注入的科研规范**：
+- 物种名/基因名斜体、单位与有效数字、统计标注（精确 P 值 + 效应量 + n）
+- **禁红绿配色**（色盲不友好）
+- ABT 叙事（And→But→Therefore）+ AE 断言式标题（标题即结论）
+- 缩写首次全称、图注自足
 
-**依赖**：无（纯 VBA，只需 PowerPoint）。可选 `win32com` 实现 COM 自动化一键出 .pptx。
+**需要先装引擎**（~1.3 GB，含独立 .git，故意不放进本仓库）：
+```bash
+git clone https://github.com/hugohe3/ppt-master.git "C:\Users\<你>\Tools\ppt-master"
+```
+然后把本 skill `SKILL.md` 里的引擎路径改成你自己的路径 —— 详见 [`skills/ppt-master/README.md`](skills/ppt-master/README.md)。
+
+**依赖**：ppt-master 引擎（自行 clone）+ 其自带 venv。
 
 ---
 
@@ -152,28 +142,6 @@ python install.py
 3. 自动生成 `launch_viewer.html` + `文件画像.url` 快捷方式
 
 **依赖**：Python 3.10+（标准库即可，无第三方依赖）
-
----
-
-### `open-slide` — 自管理 HTML 幻灯片生成器
-
-**用途**：对话中说"做个 slide"即可生成 React 幻灯片。基于 [open-slide](https://github.com/1weiho/open-slide) 开源框架（MIT），自管理 runtime，无需预装 Node 项目。
-
-**触发词**：`做个幻灯片`、`制作 slide`、`/slide`、`把 paper 做成演示`、`准备组会汇报`
-
-**核心特性**：
-- 首次自动 `npm install`（约 30-60 秒），后续秒开
-- 每次选择输出路径，不绑定固定目录
-- 1920×1080 固定画布，React 18 + Vite 5 热重载
-- 支持 CSS keyframe 动画，纯 React 无额外依赖
-- 内置 authoring guide：字号/间距/垂直预算/反模式检查
-
-**工作流**（6 个 Phase）：
-1. 选择输出路径 → 2. 提取内容（从项目或口述）→ 3. 风格决策 → 4. 编写 TSX → 5. 实时预览 → 6. 迭代修改
-
-**依赖**：[Node.js ≥ 18](https://nodejs.org/)（需预装；npm 包 `@open-slide/core`、`react`、`react-dom` 首次使用时自动安装到 skill 内部 `runtime/`，无需手动操作）
-
-**架构参考**：详见 [`skills/open-slide/README.md`](skills/open-slide/README.md)
 
 ---
 
@@ -260,57 +228,46 @@ skills/
 │   └── scripts/
 │       ├── sync.py
 │       └── update_directory.py
-├── group_meeting_recorder/        ← 旧版（保留，仍可用）
-│   ├── SKILL.md
-│   ├── requirements.txt
-│   └── scripts/
-│       ├── run.py
-│       ├── capture.py
-│       └── setup_environment.py
-├── meeting_mind/                  ← 重写版（self-contained bundle，推荐）
+├── meeting_mind/                  ← 会议录制引擎（线上 + 面对面，self-contained）
 │   ├── SKILL.md                   ← 完整工作流（Phase 1-4：参数确认 / 后台录制 / 转录 / AI 解读）
-│   ├── README.md                  ← 朋友圈安装 + 使用 + 隐私说明
-│   ├── install.py                 ← 6 步一键安装：Python/Win/CUDA 检测 → 建 venv → pip → SKILL.md 就位
-│   ├── pyproject.toml             ← Python 包元数据（[transcribe] extras pin 到 production 版本）
-│   ├── vocabulary.txt.example     ← ASR 热词示例（# 分类、## 注释）
-│   └── src/meetingmind/           ← 完整 Python 包（cli/audio/slides/session/transcribe/postprocess/...）
-│       ├── __main__.py            ← `python -m meetingmind` 入口
-│       ├── cli.py                 ← list-processes / record / transcribe / postprocess 子命令
+│   ├── README.md                  ← 安装 + 使用 + 隐私说明
+│   ├── install.py                 ← 6 步一键安装（含第 5b 步：覆盖为 vendor/proctap 补丁版）
+│   ├── pyproject.toml             ← Python 包元数据（[transcribe] extras）
+│   ├── vocabulary.txt.example     ← ASR 热词示例
+│   ├── vendor/proctap/            ← ★ ProcTap 补丁版（修 WASAPI loopback 静音），install 第 5b 步覆盖上游
+│   └── src/meetingmind/
+│       ├── cli.py                 ← record / transcribe / postprocess 等子命令
 │       ├── audio.py               ← ProcTap 进程级录音
+│       ├── audioio.py             ← ★ 音频 IO 抽象
+│       ├── wavsink.py             ← ★ 边录边落盘（修长会议音频整段丢失）
+│       ├── mic.py                 ← ★ 麦克风采集（--mic / --mic-only）
+│       ├── diarize.py             ← ★ 说话人分离
+│       ├── voiceprint.py          ← ★ 声纹认人（两个人的会永远给两个名字）
+│       ├── recovery.py            ← ★ 录制中断恢复
 │       ├── slides.py              ← WGC 截图 + 像素差去重
 │       ├── session.py             ← 录音 + 截图编排
 │       ├── transcribe.py          ← Qwen3-ASR wrapper（chunked + GPU/CPU 选择）
 │       ├── postprocess.py         ← transcript + ai_input.json 组装
 │       ├── process_finder.py      ← 进程探测（pycaw + psutil）
 │       └── vocabulary.py          ← 热词文件解析
+├── ppt-master/                    ← 科研规范层（薄壳，引擎另行 clone）
+│   ├── SKILL.md                   ← 注入规范 + 导出前 checklist
+│   ├── README.md                  ← 引擎安装（hugohe3/ppt-master）与路径改写说明
+│   └── references/
+│       ├── scientific-norms.md    ← 斜体/单位/统计/禁红绿
+│       ├── bio-structure.md       ← 生物领域结构惯例
+│       └── glossary.md            ← 术语表
+├── spark-advisor/                 ← 共享 GPU 服务器（Slurm）作业顾问
+│   ├── SKILL.md                   ← 判本地/服务器 → 定参数 → 提交；含交互式调试会话
+│   ├── config.example.json        ← 连接信息模板（真 config.json 不入库）
+│   ├── scripts/advise.py          ← 引擎（纯标准库，封装 SSH+slurm，只吐 JSON）
+│   └── references/                ← 推荐规则 / 服务器事实 / 执行地判据 / aarch64 装包
 ├── humanizer/
 │   ├── SKILL.md
 │   ├── README.md
 │   ├── LICENSE
 │   ├── WARP.md
 │   └── consultation-notes.md
-├── meeting-ppt-vba/
-│   ├── SKILL.md
-│   ├── requirements.txt
-│   ├── assets/
-│   │   └── logo.png
-│   ├── references/
-│   │   ├── design_guide.md        ← 莫兰迪配色 + 排版规范
-│   │   ├── vba_templates.md       ← 8 种幻灯片 VBA 模板
-│   │   ├── scientific_norms.md    ← 科研格式规范（斜体/单位/P值）
-│   │   └── outline_spec.md        ← JSON 大纲格式说明
-│   ├── scripts/
-│   │   ├── run.py
-│   │   └── setup_environment.py
-│   └── snapshots/                 ← 历史版本快照
-├── open-slide/
-│   ├── SKILL.md                   ← 完整工作流（Phase 0-6）
-│   ├── README.md                  ← 安装 / 使用 / 架构 / 上游说明
-│   ├── scripts/
-│   │   ├── bootstrap.py           ← 幂等 runtime 初始化（package.json → npm install → 动态配置）
-│   │   └── server.py              ← dev server 生命周期（start / stop / status / open + IPv6）
-│   └── references/
-│       └── slide-authoring-guide.md ← TSX 编写规范（画布/字号/动画/反模式 checklist）
 └── qproj-helper/
     ├── SKILL.md                   ← 决策树 + 引导问题（220 行）
     ├── templates/

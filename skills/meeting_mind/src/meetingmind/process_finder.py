@@ -162,3 +162,45 @@ def find_by_keyword(keyword: str) -> list[ProcessInfo]:
 
     results.sort(key=lambda p: (not p["has_active_session"], p["pid"]))
     return results
+
+
+def root_audio_pid(pid: int, *, _max_hops: int = 32) -> int:
+    """Climb to the top-most ancestor sharing `pid`'s executable name.
+
+    WASAPI process-loopback (proctap) captures the target PID *and its whole
+    descendant tree* (PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE). For
+    multi-process apps the OS/pycaw frequently attributes the audio session to
+    a *leaf* helper process whose own subtree renders nothing — the real audio
+    lives in a *sibling* subtree. Concretely, new Teams (`ms-teams.exe`) holds
+    the session on a leaf ms-teams.exe child, but renders meeting audio in
+    `msedgewebview2.exe` processes that hang off the *root* ms-teams.exe. The
+    leaf and the WebView2 host are siblings, so capturing the leaf's tree yields
+    pure silence (validated 2026-06-08 / 06-15: both Teams recordings all-zero).
+
+    Climbing to the top-most ancestor of the *same executable* and capturing
+    that makes the tree-include grab every descendant — including the real
+    audio renderer. The rooted target's tree is always a *superset* of the
+    leaf's, so this can never capture less audio than before (Edge, which
+    already worked at the leaf, still works rooted).
+
+    Best-effort: any psutil failure (process vanished, access denied, cycle)
+    returns the best PID found so far and never raises.
+    """
+    try:
+        proc = psutil.Process(pid)
+        target_name = proc.name().lower()
+    except Exception:  # noqa: BLE001 — process gone / access denied
+        return pid
+
+    best = pid
+    current = proc
+    for _ in range(_max_hops):  # bounded so a pathological parent cycle can't hang
+        try:
+            parent = current.parent()
+            if parent is None or parent.name().lower() != target_name:
+                break
+            best = parent.pid
+            current = parent
+        except Exception:  # noqa: BLE001 — race during the climb; keep best so far
+            break
+    return best

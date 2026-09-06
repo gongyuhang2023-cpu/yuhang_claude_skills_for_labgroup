@@ -9,6 +9,7 @@
     3. CUDA / GPU 探测（nvidia-smi）
     4. 创建 .venv（已存在则跳过）
     5. 装 [transcribe] extras（torch / qwen-asr / librosa 等）
+       5b. 覆盖为 vendor/proctap 的补丁版 proctap（修 WASAPI loopback 静音）
     6. 部署 Claude Code skill 到 ~/.claude/skills/meetingmind/
 
 整个流程跑在**系统 Python** 下（朋友的 Python，未激活 venv），
@@ -270,6 +271,105 @@ def pip_install_extras(has_cuda: bool) -> bool:
     return True
 
 
+def _quote_cmd(cmd: list[str]) -> str:
+    """把命令列表拼成可复制粘贴的字符串，含空格的参数加双引号（Windows 友好）。"""
+    return " ".join(f'"{a}"' if " " in a else a for a in cmd)
+
+
+def _matching_proctap_wheel(venv_py: Path, dist_dir: Path) -> Path | None:
+    """返回 dist/ 里匹配 venv 解释器 ABI 的 proctap wheel，无匹配则 None.
+
+    通过子进程问 venv 自己的 (cpXY, platform) 标签，再按 wheel 文件名匹配 ——
+    比在系统 Python 里 import packaging.tags 更可靠（install.py 跑在系统 Python 下）。
+    """
+    if not dist_dir.is_dir():
+        return None
+    wheels = sorted(dist_dir.glob("proc_tap-*.whl"))
+    if not wheels:
+        return None
+    code = (
+        "import sys, sysconfig; "
+        "print(f'cp{sys.version_info.major}{sys.version_info.minor}'); "
+        "print(sysconfig.get_platform().replace('-', '_').replace('.', '_'))"
+    )
+    try:
+        out = subprocess.run(
+            [str(venv_py), "-c", code],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    pytag, plat = lines[0], lines[1]
+    for whl in wheels:
+        if f"-{pytag}-" in whl.name and whl.name.endswith(f"-{plat}.whl"):
+            return whl
+    return None
+
+
+def install_patched_proctap() -> bool:
+    """用本地打过补丁的 proctap 覆盖 PyPI 原版（否则录音可能全静音）.
+
+    Step 5 的 `pip install -e ".[transcribe]"` 会从 PyPI 解析 `proc-tap>=1.0.3`
+    （原版，无补丁）。这里在其之后强制装 vendor/proctap 的补丁版。
+    补丁内容 + 原理见 vendor/proctap/PATCH-NOTES.md。
+
+    策略：优先装 dist/ 里匹配当前解释器的预编译 wheel（无需编译器）；找不到匹配
+    wheel 则从 vendor/proctap 源码现编（需 MSVC Build Tools + Windows SDK）。
+    best-effort —— 失败只警告不中止安装（skill 其余功能仍可用）。
+    """
+    venv_py = _venv_python()
+    vendor = REPO_ROOT / "vendor" / "proctap"
+    if not vendor.is_dir():
+        print(
+            "⚠️ 未找到 vendor/proctap，跳过补丁版 proctap 安装。\n"
+            "   录音将用 PyPI 原版 proc-tap，WASAPI process-loopback 可能录出静音。"
+        )
+        return False
+
+    wheel = _matching_proctap_wheel(venv_py, vendor / "dist")
+    from_wheel = wheel is not None
+    target = wheel if from_wheel else vendor
+    if from_wheel:
+        print(f"装本地补丁版 proctap（预编译 wheel）：{target.name}")
+    else:
+        print(
+            "未找到匹配当前 Python 的预编译 wheel → 从 vendor/proctap 源码现编"
+            "（需 MSVC Build Tools + Windows SDK）。"
+        )
+
+    cmd = [
+        str(venv_py),
+        "-m", "pip", "install",
+        "--force-reinstall", "--no-deps",
+        str(target),
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        # 失败兜底：录音会退回 PyPI 原版 → 可能静音。按"装 wheel"还是"源码现编"分流提示。
+        if from_wheel:
+            hint = f"   预编译 wheel 安装异常，手动重试：\n   {_quote_cmd(cmd)}"
+        else:
+            hint = (
+                "   源码现编失败几乎都是缺 C++ 工具链：装 MSVC Build Tools + Windows SDK 后\n"
+                "   重跑 `python install.py`；或换用与 vendor/proctap/dist 内预编译 wheel\n"
+                "   匹配的 Python 版本（见该 wheel 文件名上的 cpXY 标记）。"
+            )
+        print(
+            f"\n⚠️ 补丁版 proctap 安装失败（exit {exc.returncode}）。\n"
+            f"   skill 其余功能可用，但录音会用 PyPI 原版 proc-tap，\n"
+            f"   WASAPI process-loopback 可能录出静音。修复详见 vendor/proctap/PATCH-NOTES.md。\n"
+            f"{hint}"
+        )
+        return False
+
+    print("\n补丁版 proctap 安装成功 ✓（录音用打补丁的 WASAPI loopback）")
+    return True
+
+
 def deploy_skill() -> bool:
     """部署 Claude Code skill 到 ~/.claude/skills/meeting_mind/.
 
@@ -345,6 +445,10 @@ def main() -> int:
     if not pip_install_extras(has_cuda):
         return 1
 
+    # Step 5b: 用本地补丁版 proctap 覆盖 PyPI 原版（否则录音可能静音）
+    print("\n— 步骤 5b：覆盖为本地补丁版 proctap（vendor/proctap）—")
+    proctap_patched = install_patched_proctap()  # best-effort：失败只警告，不中止安装
+
     # Step 6: skill deploy
     print(_format_step_header(6, "部署 Claude Code skill"))
     if not deploy_skill():
@@ -361,6 +465,11 @@ def main() -> int:
         "\n出问题找 Yuhang。\n"
         + "═" * 60
     )
+    if not proctap_patched:
+        print(
+            "\n⚠️ 重要：录音补丁（proctap）未生效，会议音频可能录成静音 —— "
+            "按上方「步骤 5b」的提示修复后再录。"
+        )
     return 0
 
 

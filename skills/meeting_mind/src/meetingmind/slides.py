@@ -177,16 +177,28 @@ class SlideCapture:
     def __init__(
         self,
         output_dir: Path,
-        title_keyword: str,
+        title_keyword: str | None,
         interval: float = 5.0,
         threshold: float = 5.0,
         on_window_lost: Callable[[], None] | None = None,
+        monitor_index: int | None = None,
     ) -> None:
+        if monitor_index is not None and monitor_index < 1:
+            raise ValueError(
+                f"monitor_index is 1-based (1 = primary display); got {monitor_index}"
+                f" / 显示器序号从 1 开始(1=主屏),收到 {monitor_index}"
+            )
+        if title_keyword is None and monitor_index is None:
+            raise ValueError(
+                "SlideCapture needs either title_keyword (window mode) or "
+                "monitor_index (full-screen mode) / 需指定窗口关键词或显示器序号"
+            )
         self._output_dir = Path(output_dir)
         self._title_keyword = title_keyword
         self._interval = float(interval)
         self._threshold = float(threshold)
         self._on_window_lost = on_window_lost
+        self._monitor_index = monitor_index
 
         self._stop_event = threading.Event()
         self._frame_lock = threading.Lock()
@@ -205,24 +217,33 @@ class SlideCapture:
         if self._poll_thread is not None:
             raise RuntimeError("SlideCapture already started")
 
-        window = find_target_window(self._title_keyword)
-        if window is None:
-            raise RuntimeError(
-                f"No window matching '{self._title_keyword}'. "
-                f"未找到窗口 / open the meeting window first."
-            )
-
-        self._hwnd = int(window._hWnd)
-        if _is_minimized(self._hwnd):
+        if self._monitor_index is not None:
+            # Full-screen monitor capture (shared-screen 1:1 meetings): no
+            # target window, so skip window resolution. The poll loop's window
+            # watchdog is likewise disabled (a monitor never disappears).
             print(
-                "  [Capture] WARNING: window is minimized — WGC cannot capture iconic windows.",
+                f"  [Capture] Target: monitor #{self._monitor_index} (full screen)",
                 flush=True, file=sys.stderr,
             )
+        else:
+            window = find_target_window(self._title_keyword)
+            if window is None:
+                raise RuntimeError(
+                    f"No window matching '{self._title_keyword}'. "
+                    f"未找到窗口 / open the meeting window first."
+                )
 
-        print(
-            f"  [Capture] Target: '{window.title}' ({window.width}x{window.height})",
-            flush=True, file=sys.stderr,
-        )
+            self._hwnd = int(window._hWnd)
+            if _is_minimized(self._hwnd):
+                print(
+                    "  [Capture] WARNING: window is minimized — WGC cannot capture iconic windows.",
+                    flush=True, file=sys.stderr,
+                )
+
+            print(
+                f"  [Capture] Target: '{window.title}' ({window.width}x{window.height})",
+                flush=True, file=sys.stderr,
+            )
         self._start_wgc()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
@@ -248,11 +269,18 @@ class SlideCapture:
     # ------------------------------------------------------------------ wgc
 
     def _start_wgc(self) -> None:
-        capture = WindowsCapture(
-            window_hwnd=self._hwnd,
-            cursor_capture=False,
-            draw_border=None,
-        )
+        if self._monitor_index is not None:
+            capture = WindowsCapture(
+                monitor_index=self._monitor_index,
+                cursor_capture=False,
+                draw_border=None,
+            )
+        else:
+            capture = WindowsCapture(
+                window_hwnd=self._hwnd,
+                cursor_capture=False,
+                draw_border=None,
+            )
 
         @capture.event
         def on_frame_arrived(frame: Frame, _control: InternalCaptureControl) -> None:
@@ -337,27 +365,29 @@ class SlideCapture:
             if self._stop_event.is_set():
                 break
 
-            # Verify the target window is still around.
-            window = find_target_window(self._title_keyword)
-            if window is None:
-                miss_count += 1
-                remaining = (self._MAX_MISSES - miss_count) * self._interval
-                print(
-                    f"  [Capture] Window not found ({miss_count}/{self._MAX_MISSES}), "
-                    f"auto-stop in {remaining:.0f}s",
-                    flush=True, file=sys.stderr,
-                )
-                if miss_count >= self._MAX_MISSES:
-                    print("  [Capture] Window gone too long, stopping", flush=True, file=sys.stderr)
-                    if self._on_window_lost is not None:
-                        self._on_window_lost()
-                    return
-                continue
-            if miss_count > 0:
-                print("  [Capture] Window recovered", flush=True, file=sys.stderr)
-                miss_count = 0
-            if _is_minimized(int(window._hWnd)):
-                print("  [Capture] WARNING: window is minimized", flush=True, file=sys.stderr)
+            # Window mode only: verify the target window is still around. A
+            # monitor never disappears, so the watchdog is skipped in full-screen.
+            if self._monitor_index is None:
+                window = find_target_window(self._title_keyword)
+                if window is None:
+                    miss_count += 1
+                    remaining = (self._MAX_MISSES - miss_count) * self._interval
+                    print(
+                        f"  [Capture] Window not found ({miss_count}/{self._MAX_MISSES}), "
+                        f"auto-stop in {remaining:.0f}s",
+                        flush=True, file=sys.stderr,
+                    )
+                    if miss_count >= self._MAX_MISSES:
+                        print("  [Capture] Window gone too long, stopping", flush=True, file=sys.stderr)
+                        if self._on_window_lost is not None:
+                            self._on_window_lost()
+                        return
+                    continue
+                if miss_count > 0:
+                    print("  [Capture] Window recovered", flush=True, file=sys.stderr)
+                    miss_count = 0
+                if _is_minimized(int(window._hWnd)):
+                    print("  [Capture] WARNING: window is minimized", flush=True, file=sys.stderr)
 
             current = self._latest()
             if current is None:

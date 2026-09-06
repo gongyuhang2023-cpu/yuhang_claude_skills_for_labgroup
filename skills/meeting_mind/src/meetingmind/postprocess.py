@@ -31,6 +31,8 @@ Public API:
 from __future__ import annotations
 
 import json
+import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,18 @@ _METADATA_FILE = "metadata.json"
 _AI_INPUT_FILE = "ai_input.json"
 _TRANSCRIPT_PATH = Path("transcript") / "transcript.md"
 _AUDIO_PATH = Path("audio") / "recording.wav"
+_MIC_PATH = Path("audio") / "mic.wav"
 _SLIDES_DIRNAME = "slides"
+
+# Speaker labels for two-stream 1:1 transcripts. The engine stays generic
+# (loopback = the other party, mic = the user); the /cafe-meeting skill maps
+# "对方" onto the actual advisor/senior in its digest.
+_OTHER_LABEL = "对方"
+_SELF_LABEL = "我"
+
+
+def _warn(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
 
 
 def load_metadata(meeting_dir: str | Path) -> dict[str, Any]:
@@ -73,6 +86,37 @@ def load_metadata(meeting_dir: str | Path) -> dict[str, Any]:
             f" / 找不到元数据文件:{meta_path}"
         )
     return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+# Statuses that mean "this recording is finished and safe to process".
+_FINISHED_STATUSES: frozenset[str] = frozenset({"complete", "recovered"})
+
+
+def _require_finished_recording(
+    meeting_dir: Path, metadata: dict[str, Any]
+) -> None:
+    """Refuse to process a recording that never finished.
+
+    A session that dies before `stop()` leaves metadata marked ``recording``:
+    no end time, zero duration, an empty slide index. Transcribing that would
+    succeed and produce a permanently wrong ai_input.json — and because
+    transcript.md doubles as the done-marker, the bad result would then be
+    skipped over rather than rebuilt. Refusing is both cheaper and safer than
+    guessing; `recover` exists to fill the gaps deliberately.
+
+    The default is ``complete`` on purpose: every meeting recorded before this
+    field existed has no ``recording_status`` at all, and treating those as
+    unfinished would lock the entire back catalogue out of postprocessing.
+    """
+    status = metadata.get("recording_status", "complete")
+    if status in _FINISHED_STATUSES:
+        return
+    raise RuntimeError(
+        f"Recording did not finish cleanly (recording_status={status!r}). "
+        f"Run this first:\n"
+        f"    python -m meetingmind recover \"{meeting_dir}\"\n"
+        f" / 录制未正常结束，请先运行上面的 recover 命令补全元数据。"
+    )
 
 
 def _format_signed_offset(seconds: int) -> str:
@@ -149,6 +193,7 @@ def build_ai_input(
             "end_seconds": seg.end,
             "start": format_timestamp_plain(seg.start),
             "end": format_timestamp_plain(seg.end),
+            "speaker": seg.speaker,
             "text": seg.text,
         })
 
@@ -167,6 +212,79 @@ def build_ai_input(
     }
 
 
+def _plan_by_speaker(
+    audio_path: Path,
+    voiceprints: dict[str, str] | None,
+    primary: str | None,
+    other_name: str | None,
+    num_speakers: int | None,
+    device: str,
+    max_block_minutes: float,
+) -> tuple[list[tuple[float, float]], dict[float, str]] | None:
+    """Work out who speaks when, and hand back cut points for the recogniser.
+
+    Returns `(spans, speaker_by_start)`, or None when diarization is unavailable
+    or finds nothing — in which case the caller transcribes normally and the
+    transcript simply has no speaker labels. That degradation is deliberate: a
+    meeting without labels is still a meeting, whereas no transcript is nothing.
+
+    **The cut points have to come from here, not from a fixed chunk length.**
+    Labelling after the fact cannot work: the recogniser would hand back one
+    segment spanning several speakers, and a single label would then be stamped
+    across all of them (measured: a two-minute alternating conversation came
+    back as one segment credited entirely to one person).
+    """
+    from . import diarize as _diarize
+
+    if not _diarize.available():
+        _warn("[postprocess] pyannote 未安装，跳过说话人分离（转录不受影响）。")
+        return None
+
+    from .audioio import load_mono_16k, slice_waveform
+    from .voiceprint import Embedder, Voiceprint, resolve_speakers
+
+    dev = None if device == "auto" else device
+    wav = load_mono_16k(audio_path)
+    turns = _diarize.diarize(audio_path, num_speakers=num_speakers,
+                             device=dev, waveform=wav)
+    if not turns:
+        _warn("[postprocess] 分离没有得到任何片段，转录保持不带说话人标注。")
+        return None
+
+    talk = _diarize.speaking_time(turns)
+    print(f"[postprocess] diarize     : {len(turns)} turns / {len(talk)} speakers "
+          + " · ".join(f"{k}={v:.0f}s" for k, v in talk.items()), file=sys.stderr)
+
+    names: dict[str, str] = {}
+    if voiceprints:
+        embedder = Embedder(device=dev)
+        prints = {n: Voiceprint.load(Path(path)) for n, path in voiceprints.items()}
+        embeddings = {}
+        for spk in _diarize.speakers(turns):
+            chunks = [slice_waveform(wav, t.start, t.end)
+                      for t in turns if t.speaker == spk]
+            if chunks:
+                import torch
+                embeddings[spk] = embedder.embed(torch.cat(chunks, dim=1))
+        for call in resolve_speakers(embeddings, prints, primary=primary,
+                                     other_name=other_name):
+            # No name only happens when there was nothing to name it with —
+            # a third voice, or no `--other`. Then the diarizer's own label
+            # stands, which at least keeps the speakers apart.
+            names[call.label] = call.name or call.label
+            print(f"[postprocess] speaker     : {call.label} → {names[call.label]} "
+                  f"(confidence {call.confidence:+.2f})", file=sys.stderr)
+    else:
+        _warn("[postprocess] 没给声纹，说话人只能标成 SPEAKER_00/01。")
+
+    blocks = _diarize.speaker_blocks(turns, max_seconds=max_block_minutes * 60.0)
+    print(f"[postprocess] blocks      : {len(turns)} turns → {len(blocks)} "
+          f"speaker blocks to transcribe", file=sys.stderr)
+    spans = [(b.start, b.end) for b in blocks]
+    speaker_by_start = {b.start: names.get(b.speaker, b.speaker) for b in blocks}
+    return spans, speaker_by_start
+
+
 def run(
     meeting_dir: str | Path,
     *,
@@ -175,6 +293,11 @@ def run(
     vocab_path: str | Path | None = None,
     chunk_minutes: float = DEFAULT_CHUNK_MINUTES,
     force: bool = False,
+    diarize: bool = False,
+    voiceprints: dict[str, str] | None = None,
+    primary: str | None = None,
+    other_name: str | None = None,
+    num_speakers: int | None = None,
 ) -> Path:
     """Orchestrate transcribe + ai_input emission for one meeting.
 
@@ -183,6 +306,7 @@ def run(
     """
     meeting_dir = Path(meeting_dir)
     metadata = load_metadata(meeting_dir)
+    _require_finished_recording(meeting_dir, metadata)
 
     audio_path = meeting_dir / _AUDIO_PATH
     transcript_path = meeting_dir / _TRANSCRIPT_PATH
@@ -212,12 +336,53 @@ def run(
         parsed = load_vocabulary(resolved_vocab)
         vocab_context = to_context_string(parsed)
 
+    # Diarization runs *before* transcription so it can decide where the cuts
+    # go. Only for single-stream audio: with mic.wav present the speakers are
+    # already separated by construction, and re-deriving them could only be worse.
+    plan = None
+    if diarize:
+        if (meeting_dir / _MIC_PATH).is_file():
+            _warn("[postprocess] 这是两路录音，说话人本来就是分开的 —— 跳过分离。")
+        else:
+            plan = _plan_by_speaker(
+                audio_path, voiceprints, primary, other_name,
+                num_speakers, device, chunk_minutes,
+            )
+
     transcriber = Transcriber(model_id=model_id, device=device)
     segments = transcriber.transcribe(
         audio_path,
         vocab_context=vocab_context,
         chunk_minutes=chunk_minutes,
+        partial_path=transcript_path.parent / "_partial.md",
+        spans=(plan[0] if plan else None),
     )
+    if plan:
+        # Match on start time, not on position: spans that transcribe to nothing
+        # (a cough, a 0.4 s "嗯") are dropped, so the two lists drift apart.
+        speaker_by_start = plan[1]
+        segments = [replace(s, speaker=speaker_by_start.get(s.start)) for s in segments]
+
+    # Two-stream 1:1 recordings (`record --mic`) leave a second WAV with the
+    # user's own voice. Transcribe it too and merge by timestamp, labelling each
+    # stream by speaker — loopback = the other party, mic = the user. Group
+    # recordings have no mic.wav and skip this, leaving behaviour byte-identical.
+    mic_path = meeting_dir / _MIC_PATH
+    if mic_path.is_file():
+        segments = [replace(s, speaker=_OTHER_LABEL) for s in segments]
+        mic_segments = transcriber.transcribe(
+            mic_path,
+            vocab_context=vocab_context,
+            chunk_minutes=chunk_minutes,
+            partial_path=transcript_path.parent / "_partial_mic.md",
+        )
+        mic_segments = [replace(s, speaker=_SELF_LABEL) for s in mic_segments]
+        # Stable interleave by start time; at equal starts list the other party
+        # first so a question→answer in one chunk reads in a natural order.
+        segments = sorted(
+            [*segments, *mic_segments],
+            key=lambda s: (s.start, 0 if s.speaker == _OTHER_LABEL else 1),
+        )
 
     ai_input = build_ai_input(metadata, segments)
 

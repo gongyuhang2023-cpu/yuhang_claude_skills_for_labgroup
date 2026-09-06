@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, postprocess
+from . import __version__, postprocess, recovery
 from .audio import AudioRecorder
 from .process_finder import ProcessInfo, find_audio_sessions, find_by_keyword
 from .session import MeetingSession
@@ -124,8 +124,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_slide.add_argument(
         "--window",
         type=str,
-        required=True,
+        default=None,
         help="Window title substring or preset key (teams|zoom|tencent)",
+    )
+    p_slide.add_argument(
+        "--monitor",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Capture full screen of monitor N instead of a window (1-based: 1 = primary).",
     )
     p_slide.add_argument(
         "--duration",
@@ -167,8 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_record.add_argument(
         "--process",
         type=str,
-        required=True,
-        help="Process keyword: preset (teams|zoom|tencent) or substring",
+        default=None,
+        help=(
+            "Process keyword: preset (teams|zoom|tencent) or substring. "
+            "Required unless --mic-only or --system-audio is given."
+        ),
     )
     p_record.add_argument(
         "--topic",
@@ -205,6 +215,67 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Advanced: override the window title keyword used for slide capture",
+    )
+    p_record.add_argument(
+        "--monitor",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Capture the full screen of monitor N instead of a window "
+            "(for shared-screen 1:1 meetings). 1-based: 1 = primary display."
+        ),
+    )
+    p_record.add_argument(
+        "--mic",
+        action="store_true",
+        help=(
+            "Also record the local microphone (your own voice) as a second "
+            "stream audio/mic.wav, for two-stream 1:1 meetings. Off by default "
+            "(group-meeting recording stays single-stream)."
+        ),
+    )
+    p_record.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Stop automatically after SECONDS. For fixed-length captures such as "
+            "voiceprint enrollment, where Ctrl+C / the STOP file is one manual "
+            "step too many. Omit for a normal meeting (stop when you say so)."
+        ),
+    )
+    p_record.add_argument(
+        "--mic-only",
+        action="store_true",
+        dest="mic_only",
+        help=(
+            "Record ONLY the local microphone — for an in-person meeting where "
+            "everyone is in the same room and there is no remote party at all. "
+            "No process/PID needed. The mic stream lands in audio/recording.wav "
+            "(the single-stream slot), so transcription works unchanged; telling "
+            "the speakers apart is a separate step (postprocess --diarize)."
+        ),
+    )
+    p_record.add_argument(
+        "--no-slides",
+        action="store_true",
+        help=(
+            "Audio-only: skip screen/window capture entirely (for voice calls "
+            "with no shareable window). Overrides --monitor / --window."
+        ),
+    )
+    p_record.add_argument(
+        "--system-audio",
+        action="store_true",
+        help=(
+            "Capture system audio (the default output device's mix) instead of "
+            "per-process loopback. Use for apps where process capture records "
+            "silence — notably new Teams / WebView2. Records whatever plays on "
+            "the default speaker (other apps' sounds included). No PID needed. "
+            "Recommended for Teams."
+        ),
     )
     p_record.add_argument(
         "--quiet",
@@ -334,6 +405,114 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Suppress CLI summary lines. As with `transcribe`, chunk-by-chunk "
             "transcriber progress on stderr is always emitted."
+        ),
+    )
+
+    # ------------------------------------------------------------------ recover
+    p_postprocess.add_argument(
+        "--diarize",
+        action="store_true",
+        help=(
+            "Work out who is speaking when. For in-person recordings "
+            "(--mic-only), where one microphone holds several voices. Ignored "
+            "for two-stream recordings, which already know. Needs pyannote.audio "
+            "and a Hugging Face token; without them the transcript is still "
+            "produced, just without speaker labels."
+        ),
+    )
+    p_postprocess.add_argument(
+        "--voiceprint",
+        action="append",
+        default=None,
+        metavar="NAME=PATH",
+        help=(
+            "A voiceprint from `enroll` (repeatable). Turns SPEAKER_00 into a "
+            "name. Without any, speakers stay anonymous but still separated."
+        ),
+    )
+    p_postprocess.add_argument(
+        "--primary",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Which voiceprint was enrolled on THIS microphone — normally you. "
+            "It is matched first, on its own threshold, instead of taking the "
+            "best score overall: voiceprints recorded under different conditions "
+            "are not on a comparable scale, and the wrong name would be quietly "
+            "copied into the meeting notes."
+        ),
+    )
+    p_postprocess.add_argument(
+        "--other",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "In a two-person meeting, the name for whoever is not --primary. "
+            "Ruling you out identifies the other person without a voiceprint "
+            "of them."
+        ),
+    )
+    p_postprocess.add_argument(
+        "--speakers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="How many people are in the room. Say 2 for a 1:1 — knowing beats guessing.",
+    )
+
+    p_enroll = subparsers.add_parser(
+        "enroll",
+        help="Build a voiceprint from audio of one known person",
+        description=(
+            "Turn a recording of one person into a voiceprint, so postprocess "
+            "--diarize can put their name on a transcript.\n\n"
+            "The audio must be that person and only that person: nothing here "
+            "checks it, and a voiceprint built from the wrong voice does not "
+            "fail — it silently names the wrong person from then on. Use "
+            "--start/--end to cut out the part you are sure about."
+        ),
+    )
+    p_enroll.add_argument("--wav", type=Path, required=True,
+                          help="Audio containing one known speaker")
+    p_enroll.add_argument("--name", type=str, required=True,
+                          help="Who it is (used as the transcript label)")
+    p_enroll.add_argument("--out", type=Path, required=True,
+                          help="Where to write the voiceprint (.json)")
+    p_enroll.add_argument("--start", type=float, default=None, metavar="SECONDS")
+    p_enroll.add_argument("--end", type=float, default=None, metavar="SECONDS")
+    p_enroll.add_argument("--force", action="store_true",
+                          help="Overwrite an existing voiceprint")
+
+    p_recover = subparsers.add_parser(
+        "recover",
+        help="Finish a meeting directory whose recording was interrupted",
+        description=(
+            "Repair and complete a meeting directory left behind by a recording "
+            "that never reached a clean stop: fix the WAV header if its length "
+            "fields are stale, rebuild the slide index from the PNGs, and mark "
+            "metadata.json as recovered so `postprocess` will accept it.\n"
+            "补全被中断的录制目录：修 WAV 头、从截图重建幻灯片索引、"
+            "把 metadata.json 标记为 recovered，之后即可正常 postprocess。"
+        ),
+    )
+    p_recover.add_argument(
+        "meeting_dir",
+        type=Path,
+        help="Meeting directory to recover (the one `record` printed).",
+    )
+    p_recover.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing anything.",
+    )
+    p_recover.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Repair even if the WAV was written seconds ago. Only use this once "
+            "you are certain no recording is still running against it."
         ),
     )
 
@@ -475,9 +654,14 @@ def _resolve_window_keyword(raw: str) -> str:
 
 def _run_capture_slides(args: argparse.Namespace) -> int:
     output_dir: Path = args.output_dir if args.output_dir else _default_slides_test_dir()
-    title = _resolve_window_keyword(args.window)
+    monitor_index = args.monitor
+    if monitor_index is None and not args.window:
+        print("[slides] need --window OR --monitor N / 需指定窗口或显示器", file=sys.stderr)
+        return 2
+    title = _resolve_window_keyword(args.window) if args.window else None
 
-    print(f"[slides] Window      : {title}", file=sys.stderr)
+    target = f"monitor #{monitor_index}" if monitor_index is not None else title
+    print(f"[slides] Target      : {target}", file=sys.stderr)
     print(f"[slides] Output      : {output_dir}", file=sys.stderr)
     print(
         f"[slides] Duration    : {args.duration}s" if args.duration else
@@ -495,6 +679,7 @@ def _run_capture_slides(args: argparse.Namespace) -> int:
         title_keyword=title,
         interval=args.interval,
         threshold=args.threshold,
+        monitor_index=monitor_index,
     )
     interrupted = False
     try:
@@ -528,6 +713,29 @@ def _run_capture_slides(args: argparse.Namespace) -> int:
 
 
 def _run_record(args: argparse.Namespace) -> int:
+    # Exactly one audio source. Catching this here (rather than letting
+    # MeetingSession fail later) keeps the error next to the flag that caused it.
+    if args.mic_only and args.system_audio:
+        print("[record] --mic-only and --system-audio are mutually exclusive: "
+              "one records the room, the other records what the speakers play.",
+              file=sys.stderr)
+        return 2
+    if not (args.mic_only or args.system_audio) and not args.process:
+        print("[record] --process is required unless you pass --mic-only "
+              "(in-person, room microphone) or --system-audio.", file=sys.stderr)
+        return 2
+    # Slide capture needs *something* to point at. With --mic-only there is no
+    # process to derive a window from, so only whole-monitor capture makes sense.
+    if (args.mic_only and not args.no_slides
+            and args.monitor is None and not args.window):
+        print("[record] --mic-only has no process to find a window from. "
+              "Add --monitor N to record a screen, or --no-slides for audio only.",
+              file=sys.stderr)
+        return 2
+
+    from .audioio import resolve as _resolve_path
+
+    args.output_root = _resolve_path(args.output_root)
     sess = MeetingSession(
         process_keyword=args.process,
         topic=args.topic,
@@ -536,6 +744,11 @@ def _run_record(args: argparse.Namespace) -> int:
         threshold=args.threshold,
         pid=args.pid,
         window_keyword=args.window,
+        monitor_index=args.monitor,
+        mic=args.mic,
+        capture_slides=not args.no_slides,
+        system_audio=args.system_audio,
+        mic_only=args.mic_only,
     )
 
     try:
@@ -560,9 +773,17 @@ def _run_record(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    if args.duration is not None and args.duration <= 0:
+        print("[record] --duration must be positive.", file=sys.stderr)
+        sess.stop()
+        return 2
+
+    if not args.quiet and args.duration:
+        print(f"[record] Auto-stop  : after {args.duration:g}s", file=sys.stderr)
+
     interrupted = False
     try:
-        sess.wait()
+        sess.wait(max_seconds=args.duration)
     except KeyboardInterrupt:
         interrupted = True
         if not args.quiet:
@@ -648,9 +869,74 @@ def _run_transcribe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_voiceprints(specs: list[str] | None) -> dict[str, str]:
+    """`--voiceprint 我=path` → {"我": "/abs/path"}, checked to exist.
+
+    Checked **here**, before anything heavy starts. Diarization takes about a
+    minute on a half-hour meeting; discovering a typo in a path after that has
+    already run wastes the whole minute and reads as a failure of the feature
+    rather than of the argument.
+    """
+    from .audioio import resolve
+
+    out: dict[str, str] = {}
+    for spec in specs or []:
+        if "=" not in spec:
+            raise SystemExit(f"--voiceprint expects NAME=PATH, got: {spec}")
+        name, path = spec.split("=", 1)
+        resolved = resolve(path.strip())
+        if not resolved.is_file():
+            raise SystemExit(
+                f"--voiceprint {name.strip()}: no such file: {resolved}\n"
+                f"  (given as {path.strip()!r})"
+            )
+        out[name.strip()] = str(resolved)
+    return out
+
+
+def _run_enroll(args: argparse.Namespace) -> int:
+    from .audioio import resolve
+    from .voiceprint import enroll
+
+    args.wav = resolve(args.wav)
+    args.out = resolve(args.out)
+    if args.out.exists() and not args.force:
+        print(f"[enroll] {args.out} already exists — pass --force to replace it.",
+              file=sys.stderr)
+        return 2
+    if not args.wav.is_file():
+        print(f"[enroll] no such audio: {args.wav}", file=sys.stderr)
+        return 2
+    try:
+        vp = enroll(args.wav, args.name, start=args.start, end=args.end)
+    except ValueError as exc:
+        print(f"[enroll] {exc}", file=sys.stderr)
+        return 2
+    vp.save(args.out)
+    print(f"[enroll] {vp.name}: {vp.seconds:.0f}s of audio → {args.out}")
+    print(f"[enroll] source     : {vp.source}")
+    print(f"[enroll] model      : {vp.model}")
+    print("[enroll] Nothing checked that this is really them — if the label is "
+          "wrong, every transcript from here on is wrong the same way.",
+          file=sys.stderr)
+    return 0
+
+
 def _run_postprocess(args: argparse.Namespace) -> int:
     meeting_dir: Path = args.meeting_dir.resolve()
     try:
+        prints = _parse_voiceprints(args.voiceprint)
+        if args.primary and args.primary not in prints:
+            print(f"[postprocess] --primary {args.primary} has no matching "
+                  f"--voiceprint (have: {', '.join(prints) or 'none'})",
+                  file=sys.stderr)
+            return 2
+        if prints and not args.primary and len(prints) > 1:
+            print("[postprocess] several voiceprints but no --primary: say which "
+                  "one was enrolled on this microphone, so scores recorded under "
+                  "different conditions are not compared as if they were equal.",
+                  file=sys.stderr)
+            return 2
         ai_input_path = postprocess.run(
             meeting_dir,
             model_id=args.model,
@@ -658,6 +944,11 @@ def _run_postprocess(args: argparse.Namespace) -> int:
             vocab_path=args.vocab,
             chunk_minutes=args.chunk_minutes,
             force=args.force,
+            diarize=args.diarize,
+            voiceprints=prints or None,
+            primary=args.primary,
+            other_name=args.other,
+            num_speakers=args.speakers,
         )
     except (RuntimeError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -679,6 +970,48 @@ def _run_postprocess(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_recover(args: argparse.Namespace) -> int:
+    meeting_dir: Path = args.meeting_dir.resolve()
+    try:
+        report = recovery.recover_incomplete(
+            meeting_dir, force=args.force, dry_run=args.dry_run
+        )
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # stdout = the metadata path, matching the other subcommands' contract.
+    print(report["metadata_path"])
+
+    wav = report["wav"]
+    prefix = "[recover] (dry run) " if report["dry_run"] else "[recover] "
+    print(f"{prefix}wav status   : {wav['status']} — {wav['detail']}", file=sys.stderr)
+    print(f"{prefix}wav repaired : {report['wav_repaired']}", file=sys.stderr)
+    if report["metadata_synthesized"]:
+        print(
+            f"{prefix}metadata.json was missing and had to be reconstructed "
+            f"from the directory name and file timestamps",
+            file=sys.stderr,
+        )
+    print(
+        f"{prefix}slides       : {report['slides_count']}"
+        f"{' (rebuilt from PNGs)' if report['slides_rebuilt'] else ''}",
+        file=sys.stderr,
+    )
+    print(
+        f"{prefix}audio        : {report['audio_duration_seconds']}s",
+        file=sys.stderr,
+    )
+    print(f"{prefix}status       : {report['recording_status']}", file=sys.stderr)
+    if not report["dry_run"]:
+        print(
+            f"{prefix}now run      : python -m meetingmind postprocess "
+            f'"{meeting_dir}"',
+            file=sys.stderr,
+        )
+    return 0
+
+
 _DISPATCH = {
     "list-processes": _run_list_processes,
     "_record-audio": _run_record_audio,
@@ -686,6 +1019,8 @@ _DISPATCH = {
     "record": _run_record,
     "transcribe": _run_transcribe,
     "postprocess": _run_postprocess,
+    "enroll": _run_enroll,
+    "recover": _run_recover,
 }
 
 
