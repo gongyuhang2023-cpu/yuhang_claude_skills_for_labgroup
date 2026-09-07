@@ -1437,18 +1437,30 @@ nohup setsid sh "$w" </dev/null >/dev/null 2>&1 &
 echo "RUN=$n"
 """
 
-# 在服务器上轮询（一次 ssh 往返，不是 N 次），到点就如实回报状态。
+# 在服务器上轮询（一次 ssh 往返，不是 N 次）。四种终态之外才叫「还在跑」。
+#
+# ★ 必须显式查冻结：被 memguard 冻结的作业在 squeue 里**状态仍是 RUNNING**，
+#   .rc 文件也永远不会出现 —— 不查的话我会把它一直报成"还在跑"，等到天荒地老。
+#   两个来源都认（memguard 清单 + 直接读 cgroup.freeze），理由同 cmd_wait：
+#   只认清单的话，memguard 没跑 / 刚重启 / 文件还没生成时会漏判。
 _DEBUG_POLL = r"""
 d="$HOME/.spark-debug/%(jid)s"; n=%(run)s
-i=0
+out() { echo "STATE=$1"; echo "RC=$2"; echo "---OUT---"; cat "$d/run-$n.out" 2>/dev/null; exit 0; }
+i=0; k=0
 while [ $i -lt %(wait)s ]; do
-  [ -f "$d/run-$n.rc" ] && break
+  [ -f "$d/run-$n.rc" ] && out done "$(cat "$d/run-$n.rc")"
+  k=$((k+1))
+  if [ $((k %% 10)) -eq 0 ]; then
+    CG=$(ls -d /sys/fs/cgroup/system.slice/*slurmstepd.scope/job_%(jid)s 2>/dev/null | head -1)
+    [ -n "$CG" ] && [ "$(cat "$CG/cgroup.freeze" 2>/dev/null)" = "1" ] && out frozen ""
+    grep -q '"job_id"[[:space:]]*:[[:space:]]*%(jid)s\b' \
+         /run/spark-usage/frozen-jobs.json 2>/dev/null && out frozen ""
+    squeue -h -j %(jid)s -o '%%T' 2>/dev/null | grep -q . || out session_gone ""
+  fi
   sleep 1; i=$((i+1))
 done
-if [ -f "$d/run-$n.rc" ]; then echo "STATE=done"; echo "RC=$(cat "$d/run-$n.rc")"
-else echo "STATE=running"; echo "RC="; fi
-echo "---OUT---"
-cat "$d/run-$n.out" 2>/dev/null
+[ -f "$d/run-$n.rc" ] && out done "$(cat "$d/run-$n.rc")"
+out running ""
 """
 
 
@@ -1495,32 +1507,56 @@ def cmd_debug_run(cfg, jobid, command, wait):
     elapsed = round(time.time() - t0, 2)
     after = _debug_session_info(cfg, jobid)
 
-    result = {"jobid": jid, "run": run_no, "wall_seconds": elapsed,
-              "state": state or "unknown", "rc": exit_rc,
-              "stdout": output,
-              "log_on_server": "~/.spark-debug/%s/run-%s.out" % (jid, run_no),
-              "time_left": (after or {}).get("time_left"),
-              "warn": _debug_time_warning(after)}
-
-    if state == "running":
-        # 关键：**不谎报失败**。活还在跑，只是还没跑完。
-        result["still_running"] = True
-        result["follow_with"] = ("advise.py debug-log --jobid %s --run %s --wait <秒>"
-                                 % (jid, run_no))
-        result["note"] = ("等了 %ss 还没跑完 —— **活没有中断，还在服务器上跑**（它是 detach 的，"
-                          "SSH 断了也不影响）。上面 stdout 是目前为止的输出。"
-                          "用 follow_with 继续等或再看一眼。" % int(wait))
-    elif state is None:
-        result["note"] = ("轮询没拿到状态（本地 ssh 可能超时了）。**但活是 detach 的，没丢** —— "
-                          "用 `advise.py debug-log --jobid %s --run %s` 捞输出。" % (jid, run_no))
-        if perr:
-            result["poll_error"] = perr[:200]
-
-    if after is None:
-        result["session_gone"] = True
-        result["warn"] = ("⚠️ 会话在这次运行期间消失了。若输出里有 'DUE TO TIME LIMIT'，"
-                          "就是撞上时限被掐 —— 这次的活没跑完，也不会自动重跑。开个新会话重来。")
+    result = _debug_outcome(jid, run_no, state, exit_rc, output, after, wait, perr)
+    result["wall_seconds"] = elapsed
     return result
+
+
+# 终态收口：调用方只看 outcome 一个字段就够，不用自己拼 state/rc/session_gone。
+# 用户该被打扰的只有两件事 —— 活到了终态、会话过了 3/4 时限。其余都是实现细节。
+def _debug_outcome(jid, run_no, state, exit_rc, output, after, wait, perr=None):
+    r = {"jobid": jid, "run": str(run_no), "rc": exit_rc, "stdout": output,
+         "log_on_server": "~/.spark-debug/%s/run-%s.out" % (jid, run_no),
+         "time_left": (after or {}).get("time_left"),
+         "warn": _debug_time_warning(after)}       # ← 提醒②：3/4 时限
+    # ★ 先判「是不是被外力掐的」，再判程序自己的退出码。顺序反了就会把
+    #   「会话被收走」误报成「你的程序失败了」—— 2026-09-07 实测踩过：scancel 会话后
+    #   srun 收 SIGTERM 退出 143，.rc 照样写出来，于是被判成 done+failed。
+    killed = (exit_rc is not None and exit_rc > 128) or "CANCELLED AT" in (output or "")
+    if state == "done" and killed and after is None:
+        r["outcome"] = "session_gone"; r["done"] = True
+        r["note"] = ("⚠️ 会话没了，这次运行是**被掐断的**（退出码 %s），"
+                     "不是你的程序自己报错。已跑出来的部分在 stdout 里，"
+                     "但活没做完、也不会自动重跑 —— 开个新会话重来。" % exit_rc)
+    elif state == "done":
+        r["outcome"] = "ok" if exit_rc == 0 else "failed"
+        r["done"] = True
+        if exit_rc != 0:
+            r["note"] = "程序退出码 %s —— 它跑完了但报错了，看 stdout。" % exit_rc
+        if after is None:
+            r["note"] = ((r.get("note") or "") +
+                         "（另：会话已经结束了，要再跑得先开一个新的。）")
+    elif state == "frozen":
+        r["outcome"] = "frozen"; r["done"] = True
+        r["note"] = ("⚠️ 这次运行被 memguard **冻结**了：实际用量超出会话申报量。"
+                     "它没有死，已算完的部分都在 stdout 里。**别直接 scancel** —— "
+                     "对冻结的作业发信号会让它永久卡在 COMPLETING 且不还内存，"
+                     "用 `advise.py cancel-frozen %s`。下次开会话把 --mem 报大些。" % jid)
+    elif state == "session_gone" or after is None:
+        r["outcome"] = "session_gone"; r["done"] = True
+        r["note"] = ("⚠️ 会话没了（多半是撞上 --time 被掐）。这次的活没跑完，"
+                     "也不会自动重跑 —— 开个新会话重来。")
+    else:
+        # 还没到终态。**这不是结果，不该报给用户** —— 调用方应当自己接着轮询。
+        r["outcome"] = "pending"; r["done"] = False
+        r["resume_with"] = ("advise.py debug-log --jobid %s --run %s --wait 570"
+                            % (jid, run_no))
+        r["note"] = ("还没到终态（已等 %ss）。活是 detach 的、没有中断。"
+                     "**别把这个当结果告诉用户** —— 用 resume_with 接着等，"
+                     "直到 done=true。" % int(wait))
+        if perr:
+            r["poll_error"] = perr[:200]
+    return r
 
 
 def cmd_debug_log(cfg, jobid, run, wait):
@@ -1536,15 +1572,8 @@ def cmd_debug_log(cfg, jobid, run, wait):
                                                   "wait": int(wait)},
                               timeout=int(wait) + 30)
     state, exit_rc, output = _parse_poll(pout or "")
-    if state is None:
-        die("读不到运行 %s/%s 的状态：%s" % (jid, run, (perr or "")[:200]))
     after = _debug_session_info(cfg, jobid)
-    return {"jobid": jid, "run": str(run), "state": state, "rc": exit_rc,
-            "stdout": output,
-            "log_on_server": "~/.spark-debug/%s/run-%s.out" % (jid, run),
-            "time_left": (after or {}).get("time_left"),
-            "warn": _debug_time_warning(after),
-            "still_running": state == "running"}
+    return _debug_outcome(jid, run, state, exit_rc, output, after, wait)
 
 
 def cmd_debug_list(cfg):
@@ -1672,9 +1701,9 @@ def main():
     dr = sub.add_parser("debug-run")
     dr.add_argument("--jobid", required=True)
     dr.add_argument("--command", required=True)
-    dr.add_argument("--wait", type=int, default=120,
-                    help="最多等它跑完多少秒（默认 120）。等不到不是失败——活是 detach 的，"
-                         "继续在服务器上跑，用 debug-log 捞")
+    dr.add_argument("--wait", type=int, default=570,
+                    help="单次最多等多少秒（默认 570，压在调用方 10 分钟的工具上限内）。"
+                         "等不到不是失败：outcome=pending，调用方自己接着轮询即可")
     dr.add_argument("--timeout", type=int, default=None,
                     help="旧名，等同 --wait（保留兼容）")
 
