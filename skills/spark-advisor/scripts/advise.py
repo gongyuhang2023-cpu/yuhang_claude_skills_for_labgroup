@@ -136,7 +136,7 @@ def ssh_run(cfg, remote_cmd, timeout=30, stdin_data=None):
     return stdout
 
 
-def ssh_try(cfg, remote_cmd, timeout=30):
+def ssh_try(cfg, remote_cmd, timeout=30, stdin_data=None):
     """ssh_run 的不致命版本：返回 (rc, stdout, stderr)，绝不 die()。
 
     ssh_run 在命令失败时直接退出整个进程 —— 对 status/recommend 这种一次性查询没问题，
@@ -149,8 +149,10 @@ def ssh_try(cfg, remote_cmd, timeout=30):
     if cfg.get("ssh_key"):
         cmd += ["-i", cfg["ssh_key"]]
     cmd += [target, remote_cmd]
+    # 走字节 I/O，理由同 ssh_run：Windows 文本模式会把 \n 翻成 \r\n。
+    payload = stdin_data.encode("utf-8") if stdin_data is not None else None
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, input=payload)
     except FileNotFoundError:
         return 255, "", "ssh not found on PATH"
     except subprocess.TimeoutExpired:
@@ -1420,33 +1422,129 @@ def cmd_debug_start(cfg, time_str, cpus, mem_gb, gpu, name, wait_secs):
                     "名字 '%s' —— 有名有姓有上限，不会被当成卡死的作业。" % name}
 
 
-def cmd_debug_run(cfg, jobid, command, timeout):
+DEBUG_RUN_DIR = "$HOME/.spark-debug"      # 每个会话一个子目录，存 cmd/out/rc
+
+# 启动一次运行。用户命令走 stdin 落成 run-N.cmd，再生成一个 run-N.sh 包装脚本，
+# 最后 nohup setsid 起飞 —— 三层都不带嵌套引号，命令里有啥字符都不会炸。
+_DEBUG_LAUNCH = r"""
+d="$HOME/.spark-debug/%(jid)s"; mkdir -p "$d" || exit 1
+n=$(ls "$d"/run-*.cmd 2>/dev/null | wc -l); n=$((n+1))
+cat > "$d/run-$n.cmd"
+w="$d/run-$n.sh"
+{ echo "srun --jobid=%(jid)s bash -l \"$d/run-$n.cmd\" > \"$d/run-$n.out\" 2>&1"
+  echo "echo \$? > \"$d/run-$n.rc\""; } > "$w"
+nohup setsid sh "$w" </dev/null >/dev/null 2>&1 &
+echo "RUN=$n"
+"""
+
+# 在服务器上轮询（一次 ssh 往返，不是 N 次），到点就如实回报状态。
+_DEBUG_POLL = r"""
+d="$HOME/.spark-debug/%(jid)s"; n=%(run)s
+i=0
+while [ $i -lt %(wait)s ]; do
+  [ -f "$d/run-$n.rc" ] && break
+  sleep 1; i=$((i+1))
+done
+if [ -f "$d/run-$n.rc" ]; then echo "STATE=done"; echo "RC=$(cat "$d/run-$n.rc")"
+else echo "STATE=running"; echo "RC="; fi
+echo "---OUT---"
+cat "$d/run-$n.out" 2>/dev/null
+"""
+
+
+def _parse_poll(text):
+    """轮询输出 -> (state, rc, output)。拿不到 state 说明远端脚本没跑起来。"""
+    state, rc, out = None, None, ""
+    head, sep, body = text.partition("---OUT---\n")
+    if not sep:
+        head, body = text, ""
+    for line in head.splitlines():
+        if line.startswith("STATE="):
+            state = line[6:].strip()
+        elif line.startswith("RC="):
+            v = line[3:].strip()
+            rc = int(v) if v.isdigit() else None
+    return state, rc, body
+
+
+def cmd_debug_run(cfg, jobid, command, wait):
     info = _debug_session_info(cfg, jobid)
     if not info:
         die("会话 %s 不在队列里 —— 已经到期或被取消了。"
             "用 `advise.py debug-list` 看还有哪些活着的会话。" % jobid)
     if info["state"] != "RUNNING":
         die("会话 %s 现在是 %s，还不能往里塞活。" % (jobid, info["state"]))
-    # 用 login shell：非交互 shell 的 PATH 里没有 conda（probe-env 早就发现过这点），
-    # 直接 srun 用户的命令会报 "conda: command not found"。
-    remote = "srun --jobid=%s bash -lc %s" % (shlex.quote(str(jobid)),
-                                              shlex.quote(command))
+
+    jid = str(int(jobid))          # 只允许纯数字，杜绝拼进 shell 的注入面
     t0 = time.time()
-    rc, out, err = ssh_try(cfg, remote, timeout=timeout)
+    rc, out, err = ssh_try(cfg, _DEBUG_LAUNCH % {"jid": jid},
+                           timeout=45, stdin_data=command)
+    run_no = None
+    for line in (out or "").splitlines():
+        if line.startswith("RUN="):
+            run_no = line[4:].strip()
+    if not run_no:
+        die("没能在会话 %s 里起活：%s" % (jid, ((err or out) or "")[:300]))
+
+    # 轮询。本地 ssh 超时留足余量 —— 但**即便本地这条 ssh 再次超时，活也不会丢**，
+    # 它是 detach 的、输出在文件里，用 `debug-log` 随时捞得回来。这正是这次改动的意义。
+    prc, pout, perr = ssh_try(cfg, _DEBUG_POLL % {"jid": jid, "run": run_no,
+                                                  "wait": int(wait)},
+                              timeout=int(wait) + 30)
+    state, exit_rc, output = _parse_poll(pout or "")
     elapsed = round(time.time() - t0, 2)
     after = _debug_session_info(cfg, jobid)
-    result = {"jobid": str(jobid), "rc": rc, "wall_seconds": elapsed,
-              "stdout": out, "stderr": err,
+
+    result = {"jobid": jid, "run": run_no, "wall_seconds": elapsed,
+              "state": state or "unknown", "rc": exit_rc,
+              "stdout": output,
+              "log_on_server": "~/.spark-debug/%s/run-%s.out" % (jid, run_no),
               "time_left": (after or {}).get("time_left"),
               "warn": _debug_time_warning(after)}
+
+    if state == "running":
+        # 关键：**不谎报失败**。活还在跑，只是还没跑完。
+        result["still_running"] = True
+        result["follow_with"] = ("advise.py debug-log --jobid %s --run %s --wait <秒>"
+                                 % (jid, run_no))
+        result["note"] = ("等了 %ss 还没跑完 —— **活没有中断，还在服务器上跑**（它是 detach 的，"
+                          "SSH 断了也不影响）。上面 stdout 是目前为止的输出。"
+                          "用 follow_with 继续等或再看一眼。" % int(wait))
+    elif state is None:
+        result["note"] = ("轮询没拿到状态（本地 ssh 可能超时了）。**但活是 detach 的，没丢** —— "
+                          "用 `advise.py debug-log --jobid %s --run %s` 捞输出。" % (jid, run_no))
+        if perr:
+            result["poll_error"] = perr[:200]
+
     if after is None:
-        # 会话在这次运行期间没了 —— 最可能就是撞上了时限。说清楚，
-        # 别让调用方把「被掐死」读成「程序自己失败了」。
         result["session_gone"] = True
-        result["warn"] = ("⚠️ 会话在这次运行期间消失了。若 stderr 里有 "
-                          "'DUE TO TIME LIMIT'，就是撞上时限被掐 —— 这次的活没跑完，"
-                          "而且不会自动重跑。开个新会话重来。")
+        result["warn"] = ("⚠️ 会话在这次运行期间消失了。若输出里有 'DUE TO TIME LIMIT'，"
+                          "就是撞上时限被掐 —— 这次的活没跑完，也不会自动重跑。开个新会话重来。")
     return result
+
+
+def cmd_debug_log(cfg, jobid, run, wait):
+    """捞某次运行的输出。不给 --run 就取最新一次。--wait 可继续等它跑完。"""
+    jid = str(int(jobid))
+    if run is None:
+        rc, out, _ = ssh_try(
+            cfg, 'ls "$HOME/.spark-debug/%s"/run-*.cmd 2>/dev/null | wc -l' % jid)
+        run = (out or "").strip().splitlines()[-1] if (out or "").strip() else "0"
+        if run == "0":
+            die("会话 %s 名下还没有任何运行记录。" % jid)
+    prc, pout, perr = ssh_try(cfg, _DEBUG_POLL % {"jid": jid, "run": run,
+                                                  "wait": int(wait)},
+                              timeout=int(wait) + 30)
+    state, exit_rc, output = _parse_poll(pout or "")
+    if state is None:
+        die("读不到运行 %s/%s 的状态：%s" % (jid, run, (perr or "")[:200]))
+    after = _debug_session_info(cfg, jobid)
+    return {"jobid": jid, "run": str(run), "state": state, "rc": exit_rc,
+            "stdout": output,
+            "log_on_server": "~/.spark-debug/%s/run-%s.out" % (jid, run),
+            "time_left": (after or {}).get("time_left"),
+            "warn": _debug_time_warning(after),
+            "still_running": state == "running"}
 
 
 def cmd_debug_list(cfg):
@@ -1574,7 +1672,17 @@ def main():
     dr = sub.add_parser("debug-run")
     dr.add_argument("--jobid", required=True)
     dr.add_argument("--command", required=True)
-    dr.add_argument("--timeout", type=int, default=900)
+    dr.add_argument("--wait", type=int, default=120,
+                    help="最多等它跑完多少秒（默认 120）。等不到不是失败——活是 detach 的，"
+                         "继续在服务器上跑，用 debug-log 捞")
+    dr.add_argument("--timeout", type=int, default=None,
+                    help="旧名，等同 --wait（保留兼容）")
+
+    dl = sub.add_parser("debug-log")
+    dl.add_argument("--jobid", required=True)
+    dl.add_argument("--run", default=None, help="第几次运行，默认最新一次")
+    dl.add_argument("--wait", type=int, default=0,
+                    help="再等它跑完多少秒（默认 0 = 只看一眼就返回）")
 
     sub.add_parser("debug-list")
 
@@ -1633,7 +1741,10 @@ def main():
         emit(cmd_debug_start(cfg, args.time, args.cpus, args.mem_gb,
                              args.gpu, args.name, args.wait))
     elif args.cmd == "debug-run":
-        emit(cmd_debug_run(cfg, args.jobid, args.command, args.timeout))
+        emit(cmd_debug_run(cfg, args.jobid, args.command,
+                           args.wait if args.timeout is None else args.timeout))
+    elif args.cmd == "debug-log":
+        emit(cmd_debug_log(cfg, args.jobid, args.run, args.wait))
     elif args.cmd == "debug-list":
         emit(cmd_debug_list(cfg))
     elif args.cmd == "debug-end":

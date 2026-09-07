@@ -22,6 +22,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 |--------|------|------|
 | （默认，无参数） | `/spark-advisor` | 判本地还是服务器 → 定 `--mem/--gres/--cpus` → 生成并提交 sbatch（见下方「核心流程」） |
 | **`debug`** | `/spark-advisor debug` | **开交互式调试会话** —— 排一次队，之后每次运行零等待。见 §「调试循环」 |
+| `debug log` | `/spark-advisor debug log` | 捞某次运行的输出（默认最新一次），可继续等它跑完 |
 | `debug list` | `/spark-advisor debug list` | 列出还活着的调试会话（含剩余时间、是否该续） |
 | `debug end` | `/spark-advisor debug end` | 结束会话、把资源还回去 |
 | `status` | `/spark-advisor status` | 只看服务器现状，**不提交任何东西** |
@@ -170,14 +171,30 @@ python scripts/advise.py wait <JobID>
 原理：`salloc` 把**壳**和**内容**拆开 —— 壳（分配）按申请的时长活着，内容（每次
 `srun`）想跑几次跑几次。跨 ssh 连接照样进得去，所以**用户不必自己开终端、不必挂 tmux**。
 
-**四条命令**：
+**五条命令**：
 
 ```
 python scripts/advise.py debug-start [--time 6:00:00] [--cpus N] [--mem-gb N] [--gpu]
-python scripts/advise.py debug-run --jobid <id> --command "<要跑的命令>"
+python scripts/advise.py debug-run  --jobid <id> --command "<要跑的命令>" [--wait 120]
+python scripts/advise.py debug-log  --jobid <id> [--run N] [--wait <秒>]
 python scripts/advise.py debug-list
-python scripts/advise.py debug-end --jobid <id>
+python scripts/advise.py debug-end  --jobid <id>
 ```
+
+**★ 跑和等是分开的（2026-09-07 起）。** 每次 `debug-run` 的活都在服务器上 **detach 运行**，
+stdout/stderr 直接落到 `~/.spark-debug/<jobid>/run-<N>.out`。`--wait`（默认 120 秒）
+只是**本地最多等它多久**，不是"超过就杀"：
+
+| 返回 | 含义 | 你该怎么说 |
+|---|---|---|
+| `state: "done"` | 跑完了，`rc` 是退出码 | 正常报告结果 |
+| `state: "running"` + `still_running: true` | **没跑完，但活好好的还在跑** | **绝不能说"失败"或"超时"**。转达 `note`，把已有的 `stdout` 给他看，并说可以用 `follow_with` 继续等 |
+| `state: "unknown"` | 连轮询都没回来（本地 ssh 断了） | 同上——**活是 detach 的，没丢**，用 `debug-log` 捞 |
+
+**为什么这么改**：旧版是 `srun` 直连 + 900 秒 SSH 超时。2026-09-07 实测发现超时后
+**远端的活并不会死**（60 秒的循环在 15 秒超时后照样跑到 DONE）——所以丢的不是工作，
+是**输出和状态**：拿不到 stdout、不知道跑完没有，而它还在后台占着会话。
+现在无论本地怎么断，输出都在服务器的文件里，`debug-log` 随时捞得回来。
 
 `debug-start` 拿不到资源时返回 `ok:false` + `server_now`。**别自动重试、别自动缩小**——
 把现状告诉用户，让他选（缩小 / 去掉 GPU / 等正在跑的结束）。
@@ -191,6 +208,10 @@ python scripts/advise.py debug-end --jobid <id>
 3. **活干完主动提议 `debug-end`。** 会话不会自己早退，只会一直耗到时限。
 4. **看到 `session_gone: true`** → 会话在那次运行期间没了，多半是撞时限被掐。
    **说清楚"这次的活没跑完且不会自动重跑"**，别让用户读成"程序自己失败了"。
+5. **看到 `still_running: true` 或 `state: "unknown"` —— 这不是失败。**
+   活在服务器上 detach 跑着，输出在 `log_on_server` 指的文件里。**别报"超时/失败"**，
+   把已有输出给用户看，并问他要不要 `debug-log --wait <秒>` 接着等。
+   预计要跑很久的活，`--wait` 给大一点（或者干脆——**那种活本来就该 sbatch，不该占着调试会话**）。
 5. **开完会话顺手挂一个后台计时器**，睡到剩 1/4 时自动退出 —— 它一退出会唤醒你，
    你就能**主动**去提醒用户，不必等他先开口。睡多久 = `session.time_limit_seconds` × 0.75
    （6 小时的会话 → `sleep 16200`）。用 Bash 工具的 `run_in_background` 跑：
