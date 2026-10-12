@@ -766,6 +766,8 @@ def cmd_rules(cfg):
 # 数据来自面板 /api/software。申请按来源设备的 Tailscale 账号认人，所以只能从你自己的电脑发；
 # 提交和 +1 都是全组看得见的动作 —— 不带 --yes 只出草稿，用户同意后才真的发。
 
+REQ_STATUS_CN = {"pending": "待处理", "accepted": "已接受，安装中", "installed": "已安装", "rejected": "未采纳"}  # 同面板
+
 def _http_json(url, body=None, timeout=20):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
@@ -796,32 +798,31 @@ def _rank(q, names, cmds):
 
 
 def _vkey(v):
-    return [int(x) if x.isdigit() else x for x in re.split(r"[.\-_]", str(v or ""))]
+    """数字段和字母段混在一起也能比（0.5.0 对 0.5.0a 不会抛 TypeError）；字母段排在数字段前面。"""
+    return [(1, int(x), "") if x.isdigit() else (0, 0, x) for x in re.split(r"[.\-_]", str(v or ""))]
 
 
 def _conda_arch(name):
     """anaconda.org 上 bioconda / conda-forge 有没有 linux-aarch64 或 noarch 的构建 —— 服务器是 ARM，
-    只有 x86 构建的包装不上（roary、iPHoP 就是这样）。"""
+    只有 x86 构建的包装不上（roary、iPHoP 就是这样）。出错只记在那个 channel 上，不连累面板的查询结果。"""
     out = {}
     for ch in ("bioconda", "conda-forge"):
         url = f"https://api.anaconda.org/package/{ch}/{urllib.parse.quote(name)}"
         try:
             with urllib.request.urlopen(url, timeout=15) as r:
                 d = json.loads(r.read().decode("utf-8"))
+            best = {}
+            for f in d.get("files", []):
+                sub = (f.get("attrs") or {}).get("subdir")
+                v = f.get("version")
+                if sub in ("linux-aarch64", "noarch") and (sub not in best or _vkey(v) > _vkey(best[sub])):
+                    best[sub] = v
+            out[ch] = {"exists": True, "latest": d.get("latest_version"),
+                       "linux-aarch64": best.get("linux-aarch64"), "noarch": best.get("noarch")}
         except urllib.error.HTTPError as e:
             out[ch] = {"exists": False} if e.code == 404 else {"error": f"HTTP {e.code}"}
-            continue
         except Exception as e:
             out[ch] = {"error": str(e)[:120]}
-            continue
-        best = {}
-        for f in d.get("files", []):
-            sub = (f.get("attrs") or {}).get("subdir")
-            v = f.get("version")
-            if sub in ("linux-aarch64", "noarch") and (sub not in best or _vkey(v) > _vkey(best[sub])):
-                best[sub] = v
-        out[ch] = {"exists": True, "latest": d.get("latest_version"),
-                   "linux-aarch64": best.get("linux-aarch64"), "noarch": best.get("noarch")}
     return out
 
 
@@ -855,16 +856,18 @@ def cmd_software_find(cfg, name, check_arch=False):
                                                   "path": x.get("path"), "current": bool(x.get("current")),
                                                   "size": x.get("size")}))
     reqs = [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
-             "status": r.get("status"), "user": r.get("user"), "votes": len(r.get("votes") or []),
-             "note": r.get("note")}
+             "status": r.get("status"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
+             "user": r.get("user"), "votes": len(r.get("votes") or []),
+             "voted_by_me": d.get("me") in (r.get("votes") or []), "note": r.get("note")}
             for r in d.get("requests", []) if q in str(r.get("name") or "").lower()]
     out = {"query": name, "me": d.get("me"),
            "tools": [x[2] for x in sorted(tools, key=lambda x: (x[0], x[1]))][:10],
            "dbs": [x[2] for x in sorted(dbs, key=lambda x: (x[0], x[1]))][:10],
            "requests": reqs[:10], "page": panel_url(cfg, "/software")}
     if out["tools"] or out["dbs"]:
-        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；sbatch / cron 里写绝对路径 /opt/bio/bin/<命令>"
-                        "（那里拿不到登录 shell 的 PATH）。数据库写带版本号的路径（结果才可复现）。")
+        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名和"
+                        "数据库变量。cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。"
+                        "数据库写带版本号的路径（结果才可复现）。")
     if check_arch or not (out["tools"] or out["dbs"]):
         out["arch"] = _conda_arch(name.strip())
     if d.get("me") is None:
@@ -889,13 +892,32 @@ def cmd_software_request(cfg, kind, name, version, source, reason, yes):
 
 
 def cmd_software_vote(cfg, rid, yes):
-    if not yes:
-        return 0, {"request": rid, "submitted": False,
-                   "note": "给第 %d 条申请 +1。投票是开关：已经投过再投一次会取消。用户同意后加 --yes。" % rid}
+    """只加票、不撤票：面板的 +1 是开关，已经投过再发一次就撤掉了，所以先查一次。撤票让用户在网页上点。"""
     if _on_server(cfg):
-        return 3, {"error": "现在是在服务器上运行，面板会认错人。请让用户在网页上点「我也需要」。"}
+        return 3, {"error": "现在是在服务器上运行，面板会认错人。请让用户在网页上点「我也需要」。",
+                   "page": panel_url(cfg, "/software#request")}
+    try:
+        d = _http_json(panel_url(cfg, "/api/software"))
+    except Exception as e:
+        return 1, {"error": f"面板连不上（{panel_url(cfg)}）：{e}", "hint": "确认这台电脑连着 Tailscale"}
+    r = next((x for x in d.get("requests", []) if x.get("id") == rid), None)
+    if not r:
+        return 2, {"error": "没有第 %d 条申请" % rid}
+    me, voters = d.get("me"), r.get("votes") or []
+    info = {"request": rid, "name": r.get("name"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
+            "user": r.get("user"), "votes": len(voters)}
+    if me is None:
+        return 3, {**info, "error": "面板没认出这台电脑（没登记或不在 Tailscale 上），不能 +1。"}
+    if r.get("user") == me:
+        return 2, {**info, "error": "这是你自己的申请，不能 +1。"}
+    if me in voters:
+        return 0, {**info, "submitted": False, "already_voted": True,
+                   "note": "你已经 +1 过了，不用再投（再发一次会撤销，所以没发）。"}
+    if not yes:
+        return 0, {**info, "submitted": False, "note": "给第 %d 条申请 +1。用户同意后加 --yes。" % rid}
     res = _http_json(panel_url(cfg, "/api/software/vote"), {"id": rid})
-    return (0 if res.get("ok") else 1), {"request": rid, "submitted": res.get("ok", False), "result": res}
+    ok = bool(res.get("ok"))
+    return (0 if ok else 1), {**info, "votes": len(voters) + ok, "submitted": ok, "result": res}
 
 
 # ----------------------------- cleanup: 清理和公共区重复的个人安装 -----------------------------
@@ -1119,6 +1141,15 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             rec["basis"].append("CPU job: no history or estimate -> default 16G. "
                                 "cgroup hard-caps this safely -- underestimate only kills your own job.")
 
+    # 超过整机可申请的上限，sbatch 当场拒收（"Requested node configuration is not available"，
+    # 2026-10-12 实测），不是排队。估计 × 余量很容易冲过去（80G × 1.5 = 120G）—— 压到上限并说清楚。
+    if rec["mem_gb"] and pool and rec["mem_gb"] > pool:
+        rec["warnings"].append(
+            f"{rec['mem_gb']}G is more than any job can request here ({pool}G): sbatch would reject it "
+            f"outright, it would not queue. Capped to {int(pool)}G. If the job really needs more, "
+            f"it cannot run on this server.")
+        rec["mem_gb"] = int(pool)
+
     # ── 时间（--time）—— ★2026-07-22 策略：默认不设限 ──────────────────────
     # 不再替用户估一个"紧"的 --time：谁也估不准运行时长，估短了作业撞墙钟被 TIMEOUT
     # 杀掉、整段白跑（TIMEOUT 是终态、不触发 --requeue、不自动续），比不设限更浪费。
@@ -1137,8 +1168,9 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
         rec["basis"].append(
             "No --time on purpose -> partition default (14 days = the max). We do NOT guess a tight "
             "limit: underestimating kills the job (TIMEOUT, no auto-requeue) and wastes the whole "
-            "run -- worse than not capping. Stuck jobs are reclaimed by the idle-watchdog (idleguard: "
-            "GPU+CPU both quiet ~1h -> auto scancel), not by wall-clock. So pass NOTHING for --time to "
+            "run -- worse than not capping. Stuck GPU jobs are reclaimed by the idle-watchdog (idleguard: "
+            "GPU+CPU both quiet ~1h -> auto scancel), not by wall-clock; CPU-only jobs are NOT watched, "
+            "a hung one keeps its cores and memory until the 14-day limit. So pass NOTHING for --time to "
             "gen-sbatch. Only warn about time if this job plausibly needs MORE than 14 days to finish "
             "(then it needs checkpointing + splitting). Pass --time only if the user gives a safe "
             "upper bound and wants a forgotten job to release sooner.")
@@ -1290,7 +1322,10 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
         die("CPU 作业必须指定 --mem-gb：服务器的 job_submit.lua 会拒绝没写 --mem 的 CPU 作业。"
             "先用 recommend 拿一个推荐值，或让用户给个估计。")
-    L = ["#!/bin/bash",
+    # 登录 shell（-l）：submit 经 ssh 提交，作业继承的是非登录环境 —— 没有 /opt/bio/bin，也没有
+    # $GTDBTK_DATA_PATH 这类数据库变量（2026-10-12 实测）。/ai.md 的写法（裸命令 + 变量）靠它才成立；
+    # 调试会话用 bash -l 也是这个原因。
+    L = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --partition={cfg.get('partition', 'main')}"]
     if gres:

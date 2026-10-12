@@ -9,7 +9,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 
 ## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
 
-出任何推荐、写 sbatch 之前，先跑 `python3 scripts/advise.py rules`。它读取服务器面板的
+出任何推荐、写 sbatch、查软件或清理之前，先跑 `python scripts/advise.py rules`。它读取服务器面板的
 `http://<server>:3001/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库
 （`/opt/bio/db`）、sbatch 模板（`/opt/bio/share/templates`）和**此刻**的空闲资源。
 
@@ -25,7 +25,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 - aarch64 某包能不能装 → `references/env-notes.md`
 - 查公共软件 / 数据库、申请安装 → `references/software.md`（用户要用某个工具或数据库、或者要申请时读）
 - 清理和公共区重复的个人安装 → `references/cleanup.md`（**删任何东西之前读**）
-- 往 spark 传数据 / 百度网盘（官方客户端只有 amd64，arm64 装不上） → `references/data-transfer.md`
+- 往 spark 传数据 / 百度网盘（官方客户端只有 amd64，arm64 装不上） → `references/data-transfer.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）
 - 本机踩过的坑（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/spark-pitfalls.md`
 - 目录约定 / 产物落在哪（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/workspace-layout.local.md`（生成 sbatch 前读；**文件不存在就问用户**，别自己编一个路径）
 - **管理员：新用户开通全流程**（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/onboard-user.local.md`（backrest 备份实例 / Tailscale 共享 / 密码保管 / 两个已付学费的坑。⚠️ 新用户的 `TasksMax` 会话封顶是**模板 drop-in 自动继承**的，注册流程里不用加步骤）
@@ -71,7 +71,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 
 读 `env-profile.local.json`（gitignore，缓存本机 CUDA/Python + 你的 venv/项目路径）决定 sbatch 要不要 `source xxx/activate`。缺了先 `advise.py probe-env` 生成；`probed_at` >14 天、某 env 命令失败、或刚装新环境就重跑。某包能不能在 aarch64 装 → `references/env-notes.md`。
 
-⚠ **`command -v` 查不到不等于没装。** 非交互 ssh 不初始化 conda，所以 `conda` / `Rscript` 必然 not found —— 而 **R 恰恰只装在 conda env 里**（系统无 R）。以 profile 的 `system.conda` / `system.r` 字段为准，调用走绝对路径（`~/miniforge3/envs/<env>/bin/Rscript`）。判据与落点表 → `references/env-notes.md`。
+⚠ **`command -v` 查不到不等于没装。** 非交互 ssh 不初始化 conda，也不加载公共区的 PATH，所以 `conda` / `Rscript` 必然 not found；conda 装没装以 profile 的 `system.conda` 字段为准。R 是公共的（R 4.5，2026-10-08 起学生 conda 环境里的 R 已移除），调用走绝对路径 `/opt/bio/bin/Rscript`，别再引用个人环境里的 R。判据与落点表 → `references/env-notes.md`。
 
 ## 核心流程
 
@@ -94,7 +94,7 @@ python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--c
 
 | 参数 | 默认动作 | 为什么 |
 |---|---|---|
-| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟） | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
+| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟）。`rules` 里写了这个工具要多少内存（如 GTDB-Tk `classify_wf` 80–100 GB）就直接用那个数，别用无历史时的 16G 默认，也别再当 `--mem-guess` 加 50% | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
 | `--cpus` | 用 `recommendation.cpus`，**别漏传** | 不写落 Slurm 默认 1 核，把输入特征化 / MSA / BLAS 串行掉——**静默降级、无告警** |
 | `--time` | **默认不传** | 估短了作业被 TIMEOUT 杀、整段白跑；不写 = 拿满 14 天默认（正规路径）。防"卡死作业空占卡"的是服务器端 idleguard 闲置看门狗，不是墙钟 |
 
@@ -227,7 +227,7 @@ python scripts/advise.py debug-end  --jobid <id>
 `debug-log` 随时捞得回来。旧版直连 + 900 秒硬超时会把「我没等到」显示成
 「你的活失败了」—— 那是假失败。
 
-### 你（AI）在这个模式里的五个职责
+### 你（AI）在这个模式里的六个职责
 
 1. **开会话前问一句。** 它占着资源，跟提交作业一样不自动开。
 2. **每次 `debug-run` 后看 `warn` 字段，非空就原样转达，别吞掉。** 它的含义是
@@ -240,7 +240,7 @@ python scripts/advise.py debug-end  --jobid <id>
    `debug-log`，循环到 `done: true` 为止。用户说了"跑"，你就该给他一个结论 ——
    「要不要接着等」不是他该操心的事。
    （真的要跑很久的活，顺带提一句**那种活本来就该 sbatch**，关电脑走人还不占着会话。）
-5. **开完会话顺手挂一个后台计时器**，睡到剩 1/4 时自动退出 —— 它一退出会唤醒你，
+6. **开完会话顺手挂一个后台计时器**，睡到剩 1/4 时自动退出 —— 它一退出会唤醒你，
    你就能**主动**去提醒用户，不必等他先开口。睡多久 = `session.time_limit_seconds` × 0.75
    （6 小时的会话 → `sleep 16200`）。用 Bash 工具的 `run_in_background` 跑：
 
@@ -332,7 +332,7 @@ python scripts/advise.py cancel-frozen <id> --yes    # 确认后执行
 
 它按「解冻 → 取消 → 四项确认」走完，返回 0 才算真的退干净；返回 30
 （`cleanup-stuck`）表示请求发出去了但**资源没确认释放** —— 那正是事故当天的状态，
-别当成成功。
+别当成成功。返回 32（`need-privilege`）表示这个账号没有 sudo：照 `/ai.md`，让用户找管理员取消，自己仍然别 `scancel`。
 
 **然后改申报重交。** 注意：**不要拿任何观测到的数字当作它的真实需求** —— 作业是在
 越线那一刻被打断的，观测值只是"被打断时用到哪"，真实峰值只会更高，照着填还会再被冻。
@@ -356,5 +356,5 @@ python scripts/advise.py cancel-frozen <id> --yes    # 确认后执行
 ## 清理重复安装
 
 用户想腾空间、或者面板「我的重复安装」里有东西 → 先读 `references/cleanup.md`，再 `advise.py cleanup scan`。
-删除不可撤销（NAS 也不备份环境）：讲清两档和差异、列出计划，**用户确认后**逐项 `cleanup apply … --yes`；
-脚本里的引用改成 `/opt/bio/bin/<命令>` 的绝对路径。
+删除不可撤销（NAS 也不备份环境）：讲清两档和差异、列出计划，**用户确认后**先把脚本里的引用改成
+`/opt/bio/bin/<命令>` 的绝对路径，再逐项 `cleanup apply … --yes`。

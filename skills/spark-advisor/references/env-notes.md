@@ -20,8 +20,8 @@
 | 想找什么 | 实际在哪 | 怎么调 |
 |---|---|---|
 | conda | `~/miniforge3/bin/conda` | `source ~/miniforge3/etc/profile.d/conda.sh` 后再用 |
-| **R / Rscript** | **只在 conda env 里**（`/usr/bin/R` 不存在），如 `~/miniforge3/envs/<env>/bin/Rscript` | 绝对路径直接调，非交互可用 |
-| 各类生信工具 | 常在项目内 `<project>/_data/envs/<name>/bin/` | 同上，绝对路径 |
+| **R / Rscript** | **公共区**：`/opt/bio/bin/Rscript`（R 4.5；2026-10-08 起学生 conda 环境里的 R 已移除，`/usr/bin/R` 不存在） | 绝对路径直接调，非交互可用 |
+| 各类生信工具 | 公共区 `/opt/bio/bin/<命令>`（非交互 ssh 的 PATH 里没有它）；个人装的常在项目内 `<project>/_data/envs/<name>/bin/` | 同上，绝对路径 |
 
 **先查 `env-profile.local.json` 的 `system.conda` / `system.r` 字段**（`probe-env` 会连
 conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下结论。
