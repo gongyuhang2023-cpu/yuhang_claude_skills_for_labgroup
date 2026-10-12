@@ -1,17 +1,31 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该本地还是上服务器跑，上服务器的再定 --mem/--gres/--time 并可提交，避免统一内存 OOM；要盯着结果改代码、反复跑的**调试循环**改走交互式会话（`/spark-advisor debug`），排一次队之后每次运行零等待。触发：/spark-advisor、/spark-advisor debug、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、要反复跑反复改、开个调试会话、每跑一次都要重新排队。
+description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该本地还是上服务器跑，上服务器的再定 --mem/--gres/--time 并可提交，避免统一内存 OOM；要盯着结果改代码、反复跑的**调试循环**改走交互式会话（`/spark-advisor debug`），排一次队之后每次运行零等待。触发：/spark-advisor、/spark-advisor debug、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、要反复跑反复改、开个调试会话、每跑一次都要重新排队。也管公共软件：查服务器上有没有装某个工具 / 数据库、帮用户申请安装（/spark-advisor software），清理和公共区重复的个人环境、省磁盘空间（/spark-advisor cleanup）。触发还有：服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了。
 ---
 
 # spark-advisor — Slurm 作业顾问
 
 > 在共享 GPU 服务器（Slurm/ARM64）上正确跑活：先判**本地还是上服务器**，上服务器的再把 `--mem/--gres/--time` 定对。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON——**别自己现攒 ssh/slurm 命令**）。
 
+## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
+
+出任何推荐、写 sbatch 之前，先跑 `python3 scripts/advise.py rules`。它读取服务器面板的
+`http://<server>:3001/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库
+（`/opt/bio/db`）、sbatch 模板（`/opt/bio/share/templates`）和**此刻**的空闲资源。
+
+- 它与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
+- 生成 sbatch 时**优先用共享软件和共享数据库**（如 `$CHECKVDB`、`$GENOMAD_DB`、`$BAKTA_DB`），
+  不要让用户自建 conda 环境或另下一份数据库。公共区没有的，走 `software` 查和申请（见下）。
+- 一次会话读一次即可；要看最新的空闲资源用 `status`。
+
 **references 导航（按需读，别预载）**：
 - 推荐判断规则 + 诚实纪律 → `references/recommend-rules.md`（出推荐前读）
 - 硬约束 / `--mem` 语义 / 提交规则 / cgroup 兜底 → `references/server-facts.md`
 - 本地 vs 服务器怎么判（带 benchmark） → `references/execution-strategy.md`
 - aarch64 某包能不能装 → `references/env-notes.md`
+- 查公共软件 / 数据库、申请安装 → `references/software.md`（用户要用某个工具或数据库、或者要申请时读）
+- 清理和公共区重复的个人安装 → `references/cleanup.md`（**删任何东西之前读**）
+- 往 spark 传数据 / 百度网盘（官方客户端只有 amd64，arm64 装不上） → `references/data-transfer.md`
 - 本机踩过的坑（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/spark-pitfalls.md`
 - 目录约定 / 产物落在哪（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/workspace-layout.local.md`（生成 sbatch 前读；**文件不存在就问用户**，别自己编一个路径）
 - **管理员：新用户开通全流程**（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/onboard-user.local.md`（backrest 备份实例 / Tailscale 共享 / 密码保管 / 两个已付学费的坑。⚠️ 新用户的 `TasksMax` 会话封顶是**模板 drop-in 自动继承**的，注册流程里不用加步骤）
@@ -26,6 +40,9 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 | `debug list` | `/spark-advisor debug list` | 列出还活着的调试会话（含剩余时间、是否该续） |
 | `debug end` | `/spark-advisor debug end` | 结束会话、把资源还回去 |
 | `status` | `/spark-advisor status` | 只看服务器现状，**不提交任何东西** |
+| `rules` | `/spark-advisor rules` | 读服务器规则 + 共享软件/数据库 + 实时资源（`/ai.md`，权威来源） |
+| `software` | `/spark-advisor software <名字>` | 查公共区有没有这个工具 / 数据库 / 已有申请；没有就起草申请，**用户确认后**才提交。见 `references/software.md` |
+| `cleanup` | `/spark-advisor cleanup` | 列出和公共区重复的个人环境 / 数据库副本，讲清差异、引用和真正能腾出的空间；**用户确认后**才删。见 `references/cleanup.md` |
 
 > **不打子命令也照常工作。** 用户说人话（"这活要反复调"、"帮我交到服务器上"）时，
 > 按下面「何时使用哪个」自行判断即可 —— 子命令只是让意图更确定，不是唯一入口。
@@ -39,6 +56,8 @@ description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该
 | 只想知道机器忙不忙 | `status` |
 | 忘了自己开着没 / 想知道还剩多久 | `debug list` |
 | 调完了 | `debug end`（**会话不会自己早退，只会耗到时限**） |
+| 要用某个工具 / 数据库，或者说缺什么 | `software` |
+| 磁盘紧张、面板「我的重复安装」里有东西、想清理环境 | `cleanup` |
 
 ## ⛔ 红线：GPU / 重活只能走 Slurm，绝不 ssh 裸跑
 
@@ -327,3 +346,15 @@ python scripts/advise.py cancel-frozen <id> --yes    # 确认后执行
 ## 只是查状态？
 
 用户只问"服务器现在什么情况" → `advise.py status`，人话汇总（GPU 空/忙、可调度 X G、CPU `cpu_free`/`cpu_total` 核空闲、队列 N 个），**不提交任何东西**。
+
+## 找软件 / 申请安装
+
+用户要用某个工具或数据库 → 先 `advise.py software find <名字>`。公共区有就直接告诉他怎么用。
+没有就查 ARM 上能不能装、起草申请，**给用户看过、同意后**才 `--yes` 提交；必须在用户自己的电脑上跑。
+细节读 `references/software.md`。
+
+## 清理重复安装
+
+用户想腾空间、或者面板「我的重复安装」里有东西 → 先读 `references/cleanup.md`，再 `advise.py cleanup scan`。
+删除不可撤销（NAS 也不备份环境）：讲清两档和差异、列出计划，**用户确认后**逐项 `cleanup apply … --yes`；
+脚本里的引用改成 `/opt/bio/bin/<命令>` 的绝对路径。

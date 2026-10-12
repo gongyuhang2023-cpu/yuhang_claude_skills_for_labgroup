@@ -31,6 +31,15 @@ Subcommands:
                     denied) and expiry SIGTERMs whatever is running, so it defaults
                     generous; idleguard exempts interactive jobs, so --time is the
                     only safety net there is.
+  rules             the server's own rules + shared software/databases + live free
+                    resources (the panel's /ai.md) -- the single source of truth
+  software find/    look up a shared tool / database / existing install request on the
+  request/vote      panel; draft a request and submit it (or +1 one) only with --yes.
+                    Must run from the user's own computer: the panel identifies people
+                    by the Tailscale account of the device that sends the request.
+  cleanup scan/     relay to the server command `spark-cleanup` (runs as the user, dry
+  refs/apply        by default): personal envs / database copies that duplicate the
+                    shared ones, with tier, references, in-use checks and real space
 
 Facts vs judgment: this script produces FACTS + a rule-based baseline. The final
 recommendation phrasing / confidence framing is the AI's job -- see
@@ -48,6 +57,9 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_CANDIDATES = [
@@ -716,6 +728,205 @@ def rss_to_gb(s):
 
 
 # ----------------------------- subcommands -----------------------------
+
+PANEL_PORT = 3001
+
+
+def panel_url(cfg, path=""):
+    """面板地址。用 config 里的 `host`（Tailscale 地址），不用 resolve_host()：LAN 地址可能是 IPv6
+    （拼进 URL 要加方括号，不加就必定连不上），而且面板按来源的 Tailscale 账号认人，
+    走 LAN 它认不出你是谁、申请就提交不了。环境变量 SPARK_PANEL_URL 只给测试用。"""
+    base = os.environ.get("SPARK_PANEL_URL") or cfg.get("panel_url")
+    if not base:
+        h = cfg["host"]
+        base = "http://%s:%d" % ("[%s]" % h if ":" in h else h, int(cfg.get("panel_port", PANEL_PORT)))
+    return base.rstrip("/") + path
+
+
+def cmd_rules(cfg):
+    """服务器规则 + 共享软件/数据库 + 实时空闲资源 —— 管理员维护的唯一权威来源。
+
+    内容就是服务器面板的 /ai.md（源文件 /opt/bio/AI_GUIDE.md，管理员改动后立即生效），
+    所以本 skill 不再自带一份会过时的服务器事实。直接输出 Markdown（不是 JSON）：
+    它是给模型读的说明文字。面板连不上时退回 ssh 读同一份文件 + spark-status。
+    """
+    url = cfg.get("rules_url") or panel_url(cfg, "/ai.md")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            text = r.read().decode("utf-8")
+        print(f"<!-- source: {url} -->")
+    except Exception as e:
+        text = ssh_run(cfg, "cat /opt/bio/AI_GUIDE.md; echo; echo '---'; spark-status", timeout=40)
+        print(f"<!-- {url} unreachable ({e}); read over ssh -->")
+    print(text)
+    return 0
+
+
+# ----------------------------- software: 查公共软件 / 数据库，申请安装 -----------------------------
+# 数据来自面板 /api/software。申请按来源设备的 Tailscale 账号认人，所以只能从你自己的电脑发；
+# 提交和 +1 都是全组看得见的动作 —— 不带 --yes 只出草稿，用户同意后才真的发。
+
+def _http_json(url, body=None, timeout=20):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
+                                 headers={"Content-Type": "application/json"} if data else {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:          # 面板的拒绝（比如设备没登记）也是 JSON，原样带回
+        try:
+            return json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return {"ok": False, "error": f"HTTP {e.code}"}
+
+
+def _rank(q, names, cmds):
+    """同面板的排序：名称完全一致 0 > 命令完全一致 1 > 名称开头 2 > 命令开头 3 > 名称包含 4 > 命令包含 5。"""
+    best = 9
+    for k, words in ((0, names), (1, cmds)):
+        for w in words:
+            v = str(w or "").lower()
+            if v == q:
+                best = min(best, k)
+            elif v.startswith(q):
+                best = min(best, k + 2)
+            elif q in v:
+                best = min(best, k + 4)
+    return best
+
+
+def _vkey(v):
+    return [int(x) if x.isdigit() else x for x in re.split(r"[.\-_]", str(v or ""))]
+
+
+def _conda_arch(name):
+    """anaconda.org 上 bioconda / conda-forge 有没有 linux-aarch64 或 noarch 的构建 —— 服务器是 ARM，
+    只有 x86 构建的包装不上（roary、iPHoP 就是这样）。"""
+    out = {}
+    for ch in ("bioconda", "conda-forge"):
+        url = f"https://api.anaconda.org/package/{ch}/{urllib.parse.quote(name)}"
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            out[ch] = {"exists": False} if e.code == 404 else {"error": f"HTTP {e.code}"}
+            continue
+        except Exception as e:
+            out[ch] = {"error": str(e)[:120]}
+            continue
+        best = {}
+        for f in d.get("files", []):
+            sub = (f.get("attrs") or {}).get("subdir")
+            v = f.get("version")
+            if sub in ("linux-aarch64", "noarch") and (sub not in best or _vkey(v) > _vkey(best[sub])):
+                best[sub] = v
+        out[ch] = {"exists": True, "latest": d.get("latest_version"),
+                   "linux-aarch64": best.get("linux-aarch64"), "noarch": best.get("noarch")}
+    return out
+
+
+def _on_server(cfg):
+    host = socket.gethostname().split(".")[0]
+    return host == cfg.get("node") or os.path.isdir("/opt/bio/sbin")
+
+
+def cmd_software_find(cfg, name, check_arch=False):
+    q = name.strip().lower()
+    if not q:
+        return {"error": "名字不能为空"}
+    try:
+        d = _http_json(panel_url(cfg, "/api/software"))
+    except Exception as e:
+        return {"error": f"面板连不上（{panel_url(cfg)}）：{e}", "hint": "确认这台电脑连着 Tailscale"}
+    inv = d.get("inventory") or {}
+    tools = []
+    for t in inv.get("tools", []):
+        r = _rank(q, [t.get("package"), t.get("env")], t.get("exposed") or [])
+        if r < 9:
+            cmds = sorted(t.get("exposed") or [], key=lambda c: _rank(q, [], [c]))
+            tools.append((r, t.get("package") or "", {
+                "package": t.get("package"), "version": t.get("version"), "env": t.get("env"),
+                "commands": cmds[:10], "n_commands": len(t.get("exposed") or [])}))
+    dbs = []
+    for x in inv.get("dbs", []):
+        r = _rank(q, [x.get("name")], [x.get("version")])
+        if r < 9:
+            dbs.append((r, x.get("name") or "", {"name": x.get("name"), "version": x.get("version"),
+                                                  "path": x.get("path"), "current": bool(x.get("current")),
+                                                  "size": x.get("size")}))
+    reqs = [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
+             "status": r.get("status"), "user": r.get("user"), "votes": len(r.get("votes") or []),
+             "note": r.get("note")}
+            for r in d.get("requests", []) if q in str(r.get("name") or "").lower()]
+    out = {"query": name, "me": d.get("me"),
+           "tools": [x[2] for x in sorted(tools, key=lambda x: (x[0], x[1]))][:10],
+           "dbs": [x[2] for x in sorted(dbs, key=lambda x: (x[0], x[1]))][:10],
+           "requests": reqs[:10], "page": panel_url(cfg, "/software")}
+    if out["tools"] or out["dbs"]:
+        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；sbatch / cron 里写绝对路径 /opt/bio/bin/<命令>"
+                        "（那里拿不到登录 shell 的 PATH）。数据库写带版本号的路径（结果才可复现）。")
+    if check_arch or not (out["tools"] or out["dbs"]):
+        out["arch"] = _conda_arch(name.strip())
+    if d.get("me") is None:
+        out["warning"] = "面板没认出这台电脑（没登记或不在 Tailscale 上）：能查，但不能提交申请。"
+    return out
+
+
+def cmd_software_request(cfg, kind, name, version, source, reason, yes):
+    draft = {"kind": kind, "name": (name or "").strip()[:80], "version": (version or "").strip()[:40],
+             "source": (source or "").strip()[:200], "reason": (reason or "").strip()[:600]}
+    if not draft["name"]:
+        return 2, {"error": "名称不能为空"}
+    if not yes:
+        return 0, {"draft": draft, "submitted": False,
+                   "note": "这是草稿，还没提交。给用户看过、用户同意后加 --yes 再跑一次（申请全组可见）。"}
+    if _on_server(cfg):
+        return 3, {"error": "现在是在服务器上运行：面板按来源设备认人，从服务器发出去会认错人。"
+                            "请让用户在网页上提交：" + panel_url(cfg, "/software#request")}
+    res = _http_json(panel_url(cfg, "/api/software/request"), draft)
+    return (0 if res.get("ok") else 1), {"submitted": res.get("ok", False), "draft": draft, "result": res,
+                                         "page": panel_url(cfg, "/software#request")}
+
+
+def cmd_software_vote(cfg, rid, yes):
+    if not yes:
+        return 0, {"request": rid, "submitted": False,
+                   "note": "给第 %d 条申请 +1。投票是开关：已经投过再投一次会取消。用户同意后加 --yes。" % rid}
+    if _on_server(cfg):
+        return 3, {"error": "现在是在服务器上运行，面板会认错人。请让用户在网页上点「我也需要」。"}
+    res = _http_json(panel_url(cfg, "/api/software/vote"), {"id": rid})
+    return (0 if res.get("ok") else 1), {"request": rid, "submitted": res.get("ok", False), "result": res}
+
+
+# ----------------------------- cleanup: 清理和公共区重复的个人安装 -----------------------------
+# 逻辑都在服务器命令 spark-cleanup 里（以用户身份运行，默认只看不动）；这里只转一手、原样返回 JSON。
+
+def server_path(p):
+    """Windows 上的 Git Bash（MSYS）会把传给 Windows 程序的 /home/... 参数悄悄改成
+    C:/Program Files/Git/home/...，服务器就收到一个不存在的路径。服务器上的路径不可能长成
+    Windows 路径，认出来就还原。也可以直接传带引号的 '~/…'，它不会被改写。"""
+    q = p.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", q):
+        m = re.search(r"/(home|opt|mnt|tmp|data|scratch)/", q)
+        if m:
+            return q[m.start():]
+    return p
+
+
+def cmd_cleanup(cfg, argv, timeout):
+    remote = "spark-cleanup " + " ".join(shlex.quote(a) for a in argv) + " --json"
+    rc, out, err = ssh_try(cfg, remote, timeout=timeout)
+    if rc == 255 and not out.strip():
+        return 255, {"error": "ssh 没成功：" + err.strip()[-300:],
+                     "hint": "apply 在服务器上是忽略断线继续跑的；先 cleanup scan 看看它是不是已经做完了"}
+    if rc == 127 or "command not found" in err:
+        return 4, {"error": "服务器上还没有 spark-cleanup（需要管理员部署）"}
+    try:
+        payload = json.loads(out.strip() or "{}")
+    except ValueError:
+        return 1, {"error": "spark-cleanup 的输出不是 JSON", "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]}
+    return rc, payload
+
 
 def cmd_status(cfg):
     node = cfg["node"]
@@ -1635,6 +1846,36 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")
+    sub.add_parser("rules")
+
+    # 公共软件 / 数据库：查、申请、+1。提交类动作不带 --yes 只出草稿
+    sw = sub.add_parser("software")
+    swsub = sw.add_subparsers(dest="swcmd", required=True)
+    swf = swsub.add_parser("find")
+    swf.add_argument("name")
+    swf.add_argument("--arch", action="store_true", help="同时查 bioconda / conda-forge 有没有 ARM 构建")
+    swr = swsub.add_parser("request")
+    swr.add_argument("--kind", choices=["tool", "db"], required=True)
+    swr.add_argument("--name", required=True)
+    swr.add_argument("--version", default="")
+    swr.add_argument("--source", default="")
+    swr.add_argument("--reason", default="")
+    swr.add_argument("--yes", action="store_true", help="真的提交（全组可见）。不带只出草稿")
+    swv = swsub.add_parser("vote")
+    swv.add_argument("id", type=int)
+    swv.add_argument("--yes", action="store_true")
+
+    # 清理和公共区重复的个人安装：转给服务器上的 spark-cleanup
+    cl = sub.add_parser("cleanup")
+    clsub = cl.add_subparsers(dest="clcmd", required=True)
+    cls = clsub.add_parser("scan")
+    cls.add_argument("--path", action="append", default=[])
+    clr = clsub.add_parser("refs")
+    clr.add_argument("path")
+    cla = clsub.add_parser("apply")
+    cla.add_argument("path")
+    cla.add_argument("--action", choices=["remove", "link"], required=True)
+    cla.add_argument("--yes", action="store_true", help="真的执行。不带只预演")
 
     h = sub.add_parser("history")
     h.add_argument("--user", default=None)
@@ -1741,6 +1982,30 @@ def main():
         return
 
     cfg = load_config()
+    if args.cmd == "rules":
+        return cmd_rules(cfg)
+    if args.cmd == "software":
+        if args.swcmd == "find":
+            emit(cmd_software_find(cfg, args.name, args.arch))
+            return
+        if args.swcmd == "request":
+            rc, payload = cmd_software_request(cfg, args.kind, args.name, args.version, args.source,
+                                               args.reason, args.yes)
+        else:
+            rc, payload = cmd_software_vote(cfg, args.id, args.yes)
+        emit(payload)
+        sys.exit(rc)
+    if args.cmd == "cleanup":
+        if args.clcmd == "scan":
+            argv = ["scan"] + [x for p in args.path for x in ("--path", server_path(p))]
+            rc, payload = cmd_cleanup(cfg, argv, timeout=600)
+        elif args.clcmd == "refs":
+            rc, payload = cmd_cleanup(cfg, ["refs", server_path(args.path)], timeout=300)
+        else:
+            argv = ["apply", server_path(args.path), "--action", args.action] + (["--yes"] if args.yes else [])
+            rc, payload = cmd_cleanup(cfg, argv, timeout=1800)
+        emit(payload)
+        sys.exit(rc)
     if args.cmd == "status":
         emit(cmd_status(cfg))
     elif args.cmd == "history":
