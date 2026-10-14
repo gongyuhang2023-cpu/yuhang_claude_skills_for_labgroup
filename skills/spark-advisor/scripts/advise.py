@@ -943,11 +943,162 @@ def cmd_cleanup(cfg, argv, timeout):
                      "hint": "apply 在服务器上是忽略断线继续跑的；先 cleanup scan 看看它是不是已经做完了"}
     if rc == 127 or "command not found" in err:
         return 4, {"error": "服务器上还没有 spark-cleanup（需要管理员部署）"}
+    if not out.strip():      # 服务器那边直接退出（比如另一个 spark-cleanup 正在执行），原因在 stderr 里
+        return (rc or 1), {"error": (err.strip() or "spark-cleanup 没有输出")[-400:]}
     try:
-        payload = json.loads(out.strip() or "{}")
+        payload = json.loads(out.strip())
     except ValueError:
         return 1, {"error": "spark-cleanup 的输出不是 JSON", "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]}
     return rc, payload
+
+
+# 版本差距在本机算（scan 结果里已有每个同名包的 version / shared_version），不用改服务器
+_GAP_ORDER = {"same": 0, "patch": 1, "minor": 2, "major": 3, "unknown": 4}
+
+
+def _vparts(v):
+    """'2.13.0' -> [2, 13, 0]；带字母的段（'10.941cd33'）只取开头的数字，后面不再看。"""
+    parts = []
+    for seg in re.split(r"[.\-_+]", v or ""):
+        m = re.match(r"\d+", seg)
+        if not m:
+            break
+        parts.append(int(m.group()))
+    return parts
+
+
+def version_gap(mine, public):
+    """-> (gap, direction)。gap 看第一个不同的数字段：major / minor / patch；对不上的一律 unknown。
+    direction：newer = 公共版更新；older = 公共版更旧（换过去等于降级）。判断规则在 references/cleanup.md。"""
+    if not mine or not public:
+        return "unknown", "unknown"
+    if mine == public:
+        return "same", "same"
+    a, b = _vparts(mine), _vparts(public)
+    if not a or not b:                   # 读不出数字（不是版本号的写法）
+        return "unknown", "unknown"
+    n = max(len(a), len(b))
+    a, b = a + [0] * (n - len(a)), b + [0] * (n - len(b))
+    if a == b:                           # 数字一样、字符串不同（构建号 / 后缀）：判断不了
+        return "unknown", "unknown"
+    i = next(k for k in range(n) if a[k] != b[k])
+    return ("major" if i == 0 else "minor" if i == 1 else "patch"), ("newer" if b > a else "older")
+
+
+def annotate_gaps(payload):
+    """给 scan 结果里每个同名包补 gap / direction；每项补 max_gap 和 public_older（公共版更旧的包）。"""
+    for it in payload.get("items") or []:
+        if it.get("type") == "conda-prefix":     # 项目里的环境：脚本多用相对路径或变量拼路径，服务器的 refs 认不出
+            it["refs_note"] = ("refs 只认绝对路径和按名字激活；这个环境不在 conda 的 envs/ 下，脚本常写成 "
+                               "./_data/envs/<名> 或 $D/_data/envs/<名>，查不到。refs 为空不算数，自己在项目脚本里搜 envs/<名>")
+        ov = it.get("overlap") or []
+        for o in ov:
+            o["gap"], o["direction"] = version_gap(o.get("version"), o.get("shared_version"))
+        if ov:
+            it["max_gap"] = max((o["gap"] for o in ov), key=_GAP_ORDER.get)
+            it["public_older"] = sorted(o["pkg"] for o in ov if o["direction"] == "older")
+    return payload
+
+
+# 个人搬运清单：服务器上原处的 *.ON_NAS.txt 才是准的，这份每次 archived 都重写；备注只在本机
+ARCHIVE_LIST = os.path.join(HERE, "..", "references", "nas-archive.local.md")
+ARCHIVE_NOTES = os.path.join(HERE, "..", "references", "nas-archive.local.json")
+
+
+def _note_key(cfg, path):
+    """备注以 ~/… 为键：服务器绝对路径、Git Bash 改写过的路径、说明文件路径都换成这一种。"""
+    p = server_path(path).replace("\\", "/").rstrip("/")
+    if p.endswith(".ON_NAS.txt"):
+        p = p[:-len(".ON_NAS.txt")]
+    home = "/home/%s" % cfg["user"]
+    if p == home or p.startswith(home + "/"):
+        p = "~" + p[len(home):]
+    return p
+
+
+def _load_notes():
+    try:
+        with open(ARCHIVE_NOTES, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_cleanup_note(cfg, path, text):
+    notes = _load_notes()
+    key = _note_key(cfg, path)
+    notes[key] = {"note": text, "at": time.strftime("%Y-%m-%d")}
+    with open(ARCHIVE_NOTES, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(notes, f, ensure_ascii=False, indent=1)
+        f.write("\n")
+    return {"path": key, "note": text, "saved_to": os.path.abspath(ARCHIVE_NOTES)}
+
+
+def write_archive_list(cfg, payload):
+    notes = _load_notes()
+    rows = []
+    for it in payload.get("items") or []:
+        key = _note_key(cfg, it.get("path_display") or it.get("path", ""))
+        it["note"] = (notes.get(key) or {}).get("note")
+        size = it.get("bytes")          # 旧格式的说明文件（nas-archive 写的）不记原始大小，只好写压缩包的
+        size_txt = "%.1f GB" % (size / 1e9) if size else \
+            "压缩后 %.1f GB" % (it["archive_bytes"] / 1e9) if it.get("archive_bytes") else "?"
+        state = "在" if it.get("on_nas") else "**找不到**"
+        if it.get("back_in_place"):
+            state += "（原处又有东西了）"
+        rows.append("| `%s` | %s | %s | %s | `%s` %s | %s |" % (
+            key, it.get("date") or "?", size_txt, it.get("by") or "?",
+            os.path.basename(it.get("archive") or "?"), state, it.get("note") or ""))
+    lines = ["# 搬到 NAS 的东西（个人清单）", "",
+             "> 由 `advise.py cleanup archived` 生成于 %s。以服务器上原处的 `*.ON_NAS.txt` 为准，这份只是方便查；"
+             "备注只存在本机 `nas-archive.local.json`，用 `cleanup note <路径> \"<备注>\"` 写。" % time.strftime("%Y-%m-%d %H:%M"),
+             "", "| 原路径 | 搬走日期 | 大小 | 谁搬的 | NAS 上的包 | 备注 |", "|---|---|---|---|---|---|"]
+    lines += rows or ["| （没有） | | | | | |"]
+    for title, xs in (("中途留下的目录（确认没用了可以删）", payload.get("leftovers")),
+                      ("NAS 上写到一半的包（确认没在跑可以删）", payload.get("orphan_parts"))):
+        if xs:
+            lines += ["", "## " + title, ""] + ["- `%s`" % x for x in xs]
+    with open(ARCHIVE_LIST, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    payload["personal_list"] = os.path.abspath(ARCHIVE_LIST)
+    return payload
+
+
+# 服务器上的项目：代码推了没、推 Gitea。逻辑在 remote_project.py，经 ssh 交给服务器上的 python3 -I - 执行
+PROJECT_SCRIPT = os.path.join(HERE, "remote_project.py")
+
+
+def cmd_project(cfg, argv, timeout=180):
+    with open(PROJECT_SCRIPT, encoding="utf-8") as f:
+        script = f.read()
+    remote = "GIT_TERMINAL_PROMPT=0 python3 -I - " + " ".join(shlex.quote(a) for a in argv)
+    rc, out, err = ssh_try(cfg, remote, timeout=timeout, stdin_data=script)
+    if rc == 255 and not out.strip():
+        return 255, {"error": "ssh 没成功：" + err.strip()[-300:],
+                     "hint": "推送可能已经在服务器上做完了：先 project check 看看，别直接重推"}
+    if not out.strip():
+        return (rc or 1), {"error": (err.strip() or "remote_project 没有输出")[-400:]}
+    try:
+        return rc, json.loads(out)
+    except ValueError:
+        return 1, {"error": "remote_project 的输出不是 JSON", "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]}
+
+
+def disk_hint(cfg):
+    """本地盘还剩多少、你的 home 多大（spark-status --json）；剩余低于 /ai.md 的 300 GB 线就提示可以 cleanup。
+    只给 status 子命令用：cmd_status 还被 recommend / gen-sbatch / debug-start 调用，别拖慢它们。"""
+    rc, out, err = ssh_try(cfg, "spark-status --json", timeout=40)
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return {"error": "spark-status 读不到：" + (err or out).strip()[-200:]}
+    nv = (d.get("disks") or {}).get("local_nvme") or {}
+    res = {"local_free_gb": nv.get("free_gb"), "local_used_pct": nv.get("used_pct"),
+           "my_home_gb": (d.get("my_storage") or {}).get("home_used_gb")}
+    if isinstance(res["local_free_gb"], (int, float)) and res["local_free_gb"] < 300:
+        res["hint"] = ("本地盘只剩 %d GB，低于 /ai.md 的 300 GB 线：可以 /spark-advisor cleanup 腾空间"
+                       "（你的 home 占 %s GB）" % (res["local_free_gb"], res["my_home_gb"]))
+    return res
 
 
 def cmd_status(cfg):
@@ -1909,8 +2060,44 @@ def main():
     clr.add_argument("path")
     cla = clsub.add_parser("apply")
     cla.add_argument("path")
-    cla.add_argument("--action", choices=["remove", "link"], required=True)
+    cla.add_argument("--action", choices=["remove", "link", "archive"], required=True)
+    cla.add_argument("--env", action="store_true", help="和 --action archive 一起用：删环境前先原样打包到 NAS")
     cla.add_argument("--yes", action="store_true", help="真的执行。不带只预演")
+    clc = clsub.add_parser("cold", help="大、而且很久没改过的目录")
+    clc.add_argument("--min-gb", type=float, default=None)
+    clc.add_argument("--days", type=int, default=None)
+    clsub.add_parser("archived", help="搬到 NAS 的东西；顺手重写个人清单 references/nas-archive.local.md")
+    clrs = clsub.add_parser("restore", help="从 NAS 搬回原处（不带 --yes 只预演）")
+    clrs.add_argument("path")
+    clrs.add_argument("--yes", action="store_true")
+    clj = clsub.add_parser("job", help="搬运 / 搬回作业的进度和结果")
+    clj.add_argument("id")
+    clv = clsub.add_parser("verify", help="公共版的这些命令能不能启动（只看不动）")
+    clv.add_argument("path", nargs="?")
+    clv.add_argument("--cmd", dest="cmds", nargs="+", required=True)
+    cln = clsub.add_parser("note", help="给搬走的东西写备注（只存在本机）")
+    cln.add_argument("path")
+    cln.add_argument("text")
+
+    # 服务器上的项目：代码推了没、推 Gitea（remote_project.py 经 ssh 在服务器上执行）
+    pj = sub.add_parser("project")
+    pjsub = pj.add_subparsers(dest="pjcmd", required=True)
+    pjc = pjsub.add_parser("check")
+    pjc.add_argument("path")
+    pji = pjsub.add_parser("ignore")
+    pji.add_argument("path")
+    pji.add_argument("--add", nargs="+", required=True)
+    pji.add_argument("--yes", action="store_true")
+    pjp = pjsub.add_parser("push")
+    pjp.add_argument("path")
+    pjp.add_argument("-m", "--message", required=True)
+    pjp.add_argument("--set-upstream", action="store_true")
+    pjp.add_argument("--yes", action="store_true")
+    pjp.add_argument("--plan-id", default=None)
+    pjn = pjsub.add_parser("init")
+    pjn.add_argument("path")
+    pjn.add_argument("--remote", required=True)
+    pjn.add_argument("--yes", action="store_true")
 
     h = sub.add_parser("history")
     h.add_argument("--user", default=None)
@@ -2007,6 +2194,12 @@ def main():
 
     args = ap.parse_args()
 
+    # 验收测试的保险：子 agent 拿着真的 ssh 跑，光靠嘱咐不够，这里直接拒绝一切真动手。
+    # 开关是环境变量，或 skill 目录里的 .no-yes 文件（子 agent 的命令拿不到我们设的环境变量）
+    testing = os.environ.get("SPARK_ADVISOR_NO_YES") or os.path.exists(os.path.join(HERE, "..", ".no-yes"))
+    if testing and (getattr(args, "yes", False) or args.cmd in ("submit", "debug-start", "debug-run")):
+        die("测试模式（SPARK_ADVISOR_NO_YES / .no-yes）：不执行 --yes、提交作业或调试会话")
+
     # these bootstrap first-run config, so they must NOT require an existing config
     if args.cmd == "detect-server":
         emit(cmd_detect_server(args.pattern))
@@ -2031,18 +2224,55 @@ def main():
         emit(payload)
         sys.exit(rc)
     if args.cmd == "cleanup":
+        yes = ["--yes"] if getattr(args, "yes", False) else []
+        if args.clcmd == "note":
+            emit(cmd_cleanup_note(cfg, args.path, args.text))
+            return
         if args.clcmd == "scan":
             argv = ["scan"] + [x for p in args.path for x in ("--path", server_path(p))]
             rc, payload = cmd_cleanup(cfg, argv, timeout=600)
+            annotate_gaps(payload)
         elif args.clcmd == "refs":
             rc, payload = cmd_cleanup(cfg, ["refs", server_path(args.path)], timeout=300)
+        elif args.clcmd == "cold":
+            argv = ["cold"] + (["--min-gb", str(args.min_gb)] if args.min_gb is not None else []) + \
+                   (["--days", str(args.days)] if args.days is not None else [])
+            rc, payload = cmd_cleanup(cfg, argv, timeout=900)
+        elif args.clcmd == "archived":          # 不透传 --verify：逐个重算 NAS 上的包要几个小时
+            rc, payload = cmd_cleanup(cfg, ["archived"], timeout=700)
+            if rc == 0 and "items" in payload:
+                write_archive_list(cfg, payload)
+        elif args.clcmd == "restore":
+            rc, payload = cmd_cleanup(cfg, ["restore", server_path(args.path)] + yes, timeout=300)
+        elif args.clcmd == "job":
+            rc, payload = cmd_cleanup(cfg, ["job", args.id], timeout=60)
+        elif args.clcmd == "verify":
+            argv = ["verify"] + ([server_path(args.path)] if args.path else []) + ["--cmd"] + args.cmds
+            rc, payload = cmd_cleanup(cfg, argv, timeout=120 * len(args.cmds) + 60)
         else:
-            argv = ["apply", server_path(args.path), "--action", args.action] + (["--yes"] if args.yes else [])
+            argv = ["apply", server_path(args.path), "--action", args.action] + \
+                   (["--env"] if args.env else []) + yes
             rc, payload = cmd_cleanup(cfg, argv, timeout=1800)
         emit(payload)
         sys.exit(rc)
+    if args.cmd == "project":
+        p = server_path(args.path)
+        if args.pjcmd == "check":
+            rc, payload = cmd_project(cfg, ["check", p])
+        elif args.pjcmd == "ignore":
+            rc, payload = cmd_project(cfg, ["ignore", p, "--add"] + args.add + (["--yes"] if args.yes else []))
+        elif args.pjcmd == "init":
+            rc, payload = cmd_project(cfg, ["init", p, "--remote", args.remote] + (["--yes"] if args.yes else []))
+        else:
+            argv = ["push", p, "-m", args.message] + (["--set-upstream"] if args.set_upstream else []) + \
+                   (["--yes"] if args.yes else []) + (["--plan-id", args.plan_id] if args.plan_id else [])
+            rc, payload = cmd_project(cfg, argv, timeout=660 if args.yes else 180)
+        emit(payload)
+        sys.exit(rc)
     if args.cmd == "status":
-        emit(cmd_status(cfg))
+        out = cmd_status(cfg)
+        out["disk"] = disk_hint(cfg)
+        emit(out)
     elif args.cmd == "history":
         emit(cmd_history(cfg, args.user, args.tool, args.days))
     elif args.cmd == "recommend":

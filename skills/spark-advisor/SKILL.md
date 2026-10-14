@@ -1,360 +1,76 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）作业顾问：先判任务该本地还是上服务器跑，上服务器的再定 --mem/--gres/--time 并可提交，避免统一内存 OOM；要盯着结果改代码、反复跑的**调试循环**改走交互式会话（`/spark-advisor debug`），排一次队之后每次运行零等待。触发：/spark-advisor、/spark-advisor debug、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、要反复跑反复改、开个调试会话、每跑一次都要重新排队。也管公共软件：查服务器上有没有装某个工具 / 数据库、帮用户申请安装（/spark-advisor software），清理和公共区重复的个人环境、省磁盘空间（/spark-advisor cleanup）。触发还有：服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea、用的数据库是哪个版本。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本。
 ---
 
-# spark-advisor — Slurm 作业顾问
+# spark-advisor — 共享 GPU 服务器顾问
 
-> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活：先判**本地还是上服务器**，上服务器的再把 `--mem/--gres/--time` 定对。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON——**别自己现攒 ssh/slurm 命令**）。
+> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。
 
 ## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
 
-出任何推荐、写 sbatch、查软件或清理之前，先跑 `python scripts/advise.py rules`。它读取服务器面板的
-`http://<server>:3001/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库
-（`/opt/bio/db`）、sbatch 模板（`/opt/bio/share/templates`）和**此刻**的空闲资源。
+出任何推荐、写 sbatch、查软件、清理或搬数据之前，先跑 `python scripts/advise.py rules`（只查、只推服务器上的代码不用）。它读服务器面板的 `/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库（`/opt/bio/db`）、sbatch 模板和**此刻**的空闲资源。
 
-- 它与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
-- 生成 sbatch 时**优先用共享软件和共享数据库**（如 `$CHECKVDB`、`$GENOMAD_DB`、`$BAKTA_DB`），
-  不要让用户自建 conda 环境或另下一份数据库。公共区没有的，走 `software` 查和申请（见下）。
+- 与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
+- 生成 sbatch 时**优先用共享软件和共享数据库**（如 `$CHECKVDB`），不要让用户自建环境或另下一份数据库。
 - 一次会话读一次即可；要看最新的空闲资源用 `status`。
 
-**references 导航（按需读，别预载）**：
-- 推荐判断规则 + 诚实纪律 → `references/recommend-rules.md`（出推荐前读）
-- 硬约束 / `--mem` 语义 / 提交规则 / cgroup 兜底 → `references/server-facts.md`
-- 本地 vs 服务器怎么判（带 benchmark） → `references/execution-strategy.md`
-- aarch64 某包能不能装 → `references/env-notes.md`
-- 查公共软件 / 数据库、申请安装 → `references/software.md`（用户要用某个工具或数据库、或者要申请时读）
-- 清理和公共区重复的个人安装 → `references/cleanup.md`（**删任何东西之前读**）
-- 往 spark 传数据 / 百度网盘（官方客户端只有 amd64，arm64 装不上） → `references/data-transfer.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）
-- 本机踩过的坑（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/spark-pitfalls.md`
-- 目录约定 / 产物落在哪（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/workspace-layout.local.md`（生成 sbatch 前读；**文件不存在就问用户**，别自己编一个路径）
-- **管理员：新用户开通全流程**（**你自己积累的**，不随本仓库分发、升级时不会被覆盖） → `references/onboard-user.local.md`（backrest 备份实例 / Tailscale 共享 / 密码保管 / 两个已付学费的坑。⚠️ 新用户的 `TasksMax` 会话封顶是**模板 drop-in 自动继承**的，注册流程里不用加步骤）
+## ⛔ 红线与总闸（动手前必看）
 
-## 子命令
+- **GPU / 重活只走 Slurm**（`gen-sbatch → submit` 或调试会话），**绝不** `ssh <server> 'python xxx.py'` 裸跑，哪怕用户说"就跑一下"：裸跑不留痕、逃过 memguard、抢显存（详见 `references/server-facts.md`）。轻活（改代码、几秒的小脚本、`squeue`/`nvidia-smi`）可以直接跑；拿不准就走队列。
+- **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。「能删的都删」这类笼统的话不算同意，要逐项点名。
+- **作业在跑但没进度，禁止直接 `scancel`**：对冻结的作业 scancel 会让它永久卡住、不还内存。先 `wait <id>` 或 `status` 判断；冻结的用 `cancel-frozen <id>`（先不带 `--yes` 看计划）：返回 0 = 退干净；30 = 请求发了但资源没确认释放（**不算成功**）；32 = 这个账号没权限，请用户找管理员。细节读 `references/frozen-jobs.md`。没冻结、确认是用户自己的作业，用户点头后可以直接 `scancel <id>`。
+- **`wait` 返回码**：0 正常结束；10 跑完但退出码非零；**11 被冻结（别 scancel）**；12 / 13 被取消 / 失败；20 监控自己超时（作业状态未知）；21 / 255 查询失败（**别当成完成**）。作业从 `squeue` 消失不等于成功。
+- **备份不是归档**：NAS 备份只能找回 1–2 个月内删掉的东西。要长期留，代码推 Gitea、数据搬进 NAS 归档（`references/storage.md`）。
+- **动手前先读下面路由表指向的那个文件。**
 
-| 子命令 | 用法 | 功能 |
-|--------|------|------|
-| （默认，无参数） | `/spark-advisor` | 判本地还是服务器 → 定 `--mem/--gres/--cpus` → 生成并提交 sbatch（见下方「核心流程」） |
-| **`debug`** | `/spark-advisor debug` | **开交互式调试会话** —— 排一次队，之后每次运行零等待。见 §「调试循环」 |
-| `debug log` | `/spark-advisor debug log` | 捞某次运行的输出（默认最新一次），可继续等它跑完 |
-| `debug list` | `/spark-advisor debug list` | 列出还活着的调试会话（含剩余时间、是否该续） |
-| `debug end` | `/spark-advisor debug end` | 结束会话、把资源还回去 |
-| `status` | `/spark-advisor status` | 只看服务器现状，**不提交任何东西** |
-| `rules` | `/spark-advisor rules` | 读服务器规则 + 共享软件/数据库 + 实时资源（`/ai.md`，权威来源） |
-| `software` | `/spark-advisor software <名字>` | 查公共区有没有这个工具 / 数据库 / 已有申请；没有就起草申请，**用户确认后**才提交。见 `references/software.md` |
-| `cleanup` | `/spark-advisor cleanup` | 列出和公共区重复的个人环境 / 数据库副本，讲清差异、引用和真正能腾出的空间；**用户确认后**才删。见 `references/cleanup.md` |
+## 路由：用户怎么说 → 做什么 → 先读什么
 
-> **不打子命令也照常工作。** 用户说人话（"这活要反复调"、"帮我交到服务器上"）时，
-> 按下面「何时使用哪个」自行判断即可 —— 子命令只是让意图更确定，不是唯一入口。
-
-## 何时使用哪个
-
-| 情况 | 走哪个 |
-|---|---|
-| 提交完就关电脑走人的活 | **默认**（核心流程） |
-| **要盯着结果改代码、反复跑** | **`debug`** |
-| 只想知道机器忙不忙 | `status` |
-| 忘了自己开着没 / 想知道还剩多久 | `debug list` |
-| 调完了 | `debug end`（**会话不会自己早退，只会耗到时限**） |
-| 要用某个工具 / 数据库，或者说缺什么 | `software` |
-| 磁盘紧张、面板「我的重复安装」里有东西、想清理环境 | `cleanup` |
-
-## ⛔ 红线：GPU / 重活只能走 Slurm，绝不 ssh 裸跑
-
-**IMPORTANT — YOU MUST**：任何 **GPU 活 / 重活**只能经 `gen-sbatch → submit`（或 `srun` 调试）走队列，**绝不** `ssh <server> 'python xxx.py'` 裸跑——哪怕用户说"就跑一下"。裸跑 = 不留痕（`sacct` 记不到 → 用量/采购/公平调度全失真）+ 逃过 memguard 反连累守规矩的人 + 抢显存撞崩别人的卡 + 不受 fairshare（四条详见 `references/server-facts.md`）。**轻活**（改代码、跑几秒的小脚本、`squeue`/`nvidia-smi` 查看类）可直接跑；拿不准就走队列（留痕 + 受保护，无坏处）。
-
-## 首次配置（仅当 config.json 缺失；有就跳过）
-
-`config.json`（gitignore）存服务器连接信息。缺了才走：① `advise.py detect-server` 扫 tailnet 得 IP+名 → ② 问"你在服务器上的用户名？（通常是姓名拼音小写）" → ③ `advise.py init --user <名> --host <IP> --node <名>`。**绝不硬编码服务器地址**，IP 只落进 gitignore 的 `config.json`。
-
-## 环境感知（在服务器上跑程序前）
-
-读 `env-profile.local.json`（gitignore，缓存本机 CUDA/Python + 你的 venv/项目路径）决定 sbatch 要不要 `source xxx/activate`。缺了先 `advise.py probe-env` 生成；`probed_at` >14 天、某 env 命令失败、或刚装新环境就重跑。某包能不能在 aarch64 装 → `references/env-notes.md`。
-
-⚠ **`command -v` 查不到不等于没装。** 非交互 ssh 不初始化 conda，也不加载公共区的 PATH，所以 `conda` / `Rscript` 必然 not found；conda 装没装以 profile 的 `system.conda` 字段为准。R 是公共的（R 4.5，2026-10-08 起学生 conda 环境里的 R 已移除），调用走绝对路径 `/opt/bio/bin/Rscript`，别再引用个人环境里的 R。判据与落点表 → `references/env-notes.md`。
-
-## 核心流程
-
-**0 · 执行地判定**（先做）——这活该本地跑还是上服务器？
-- 快速判据：**GPU / 峰值内存 >19G / 带宽·BLAS 密集 → 服务器**；**sklearn 树模型（RF/GBM）等分支密集 CPU 活 → 本地更快**；单线程指纹类两边打平。
-- 拿不准 / 要对新任务判 → 读 `references/execution-strategy.md`（带 benchmark 与判据）。
-- **判为本地 → 给本地建议，到此为止、不碰服务器。** 判为服务器 → 往下走（并守红线：走队列）。
-- **判为服务器后还要再分一次叉**：这活是**要盯着看、拿结果改代码、再跑**的调试循环？
-  → 走 §「调试循环」用交互式会话，**别一轮一轮排队**。提交完就关电脑走人 → 继续下面的流程。
-
-**1 · 抽输入特征**（你做）→ 决定规模：Boltz token ≈ 蛋白残基 + 配体原子；Uni-Dock 盒子 × 并行配体数；纯 CPU 用 `--mem-guess <GB>`。
-
-**2 · 查现状 + 历史 + baseline**（引擎一条命令）：
-```
-python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]
-```
-→ 返回 `recommendation` + `server_now` + `history_summary`。
-
-**3 · 定三个参数、出推荐**（依 `references/recommend-rules.md`）——人话讲清，**务必带置信度 + 依据**：
-
-| 参数 | 默认动作 | 为什么 |
+| 用户说 | 子命令 / 流程 | 先读 |
 |---|---|---|
-| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟）。`rules` 里写了这个工具要多少内存（如 GTDB-Tk `classify_wf` 80–100 GB）就直接用那个数，别用无历史时的 16G 默认，也别再当 `--mem-guess` 加 50% | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
-| `--cpus` | 用 `recommendation.cpus`，**别漏传** | 不写落 Slurm 默认 1 核，把输入特征化 / MSA / BLAS 串行掉——**静默降级、无告警** |
-| `--time` | **默认不传** | 估短了作业被 TIMEOUT 杀、整段白跑；不写 = 拿满 14 天默认（正规路径）。防"卡死作业空占卡"的是服务器端 idleguard 闲置看门狗，不是墙钟 |
+| 这活本地还是服务器跑 | 执行地判定 | `references/execution-strategy.md` |
+| 帮我交到服务器、要多少内存 / 显存 | 默认：下面「提交作业」 | `references/recommend-rules.md` → `references/submit-flow.md` |
+| 要盯着结果改代码、反复跑；开个调试会话 | `debug-start` / `debug-log` / `debug-list` / `debug-end` | `references/debug-session.md` |
+| 作业不动了、卡住了、帮我 scancel | `wait` / `status` → `cancel-frozen` | `references/frozen-jobs.md` |
+| 服务器忙不忙 | `status`：人话汇总 GPU 空/忙、可调度内存、空闲核、队列；`disk.hint` 有内容就转达 | — |
+| 服务器上有没有装 X、缺数据库、申请安装 | `software find` / `request` / `vote` | `references/software.md` |
+| 磁盘不够、服务器上腾空间 | 按顺序：`project check` → `cleanup scan` → `cleanup cold` | `references/storage.md` |
+| 这几个环境和公共区重复，能删吗 | `cleanup scan` + 智能判断 | `references/cleanup.md` |
+| 把 X 搬到 NAS、从 NAS 搬回来、我搬过什么 | `cleanup apply --action archive` / `restore` / `archived` | `references/cold-data.md` |
+| 服务器上的代码推了没、推到 Gitea | `project check` / `push` / `init` | `references/code-check.md` |
+| 这个项目还要不要留在服务器上 | `project check` → `cleanup scan`（项目专用的环境）→ 搬到 NAS | `references/storage.md` |
+| 论文里要写用的数据库版本 | `project check`（把 `current` 解析成实际版本） | `references/code-check.md` |
+| 删掉的文件还能找回吗 | — | `references/storage.md` |
+| 某个包能不能在 aarch64 装 | — | `references/env-notes.md` |
 
-**跑过一次之后，用 `gpu-peak` 收紧下一次的 `--mem`**：
+子命令只是让意图更确定，不是唯一入口：用户说人话时按上表判断即可。
 
-```
-python scripts/advise.py gpu-peak <上次的 JobID>
-```
+## 提交作业（骨架；每步细节在 `references/submit-flow.md`）
 
-它给三样东西：**观测下界**（采样，可能漏掉尖峰）、**当时的机器水位**、**Slurm 终态**，
-并直接判定「这次的申报值算不算有效上界」。
+0. **执行地判定**：GPU / 峰值内存 >19G / 带宽·BLAS 密集 → 服务器；sklearn 树模型等分支密集的 CPU 活 → 本地更快。判为本地就给本地建议，到此为止。判为服务器后再问一句：要盯着看、反复改吗？是 → `debug`。
+1. **抽输入特征**（你做）：Boltz token、Uni-Dock 盒子 × 并行配体数；纯 CPU 用 `--mem-guess <GB>`。
+2. **查现状 + 历史**：`advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]`。
+3. **定参数**（读 `references/recommend-rules.md`）：`--mem` 用推荐值（CPU 作业必填）；`--cpus` 别漏传；`--time` 默认不传。人话讲清，**带置信度和依据**。
+4. **判排队还是能跑**：看 `run_now` / `warnings`。
+5. **生成脚本**：`gen-sbatch … --workdir <项目在服务器上的绝对路径>`。`--workdir` 别省；Git Bash 下带 `MSYS_NO_PATHCONV=1`；GPU 作业要处理显存自限；引擎回的 `warnings` 别忽略。
+6. **提交前确认（总闸）** → 用户点头 → `submit --script …` → JobID。
+7. **GPU 作业提交后**：后台跑 `advise.py wait <JobID>`，按返回码处理。提交前看 `status` 的 `gpu_physical`：Slurm 说空闲不等于卡上没人。
 
-判据：作业正常完成 **且** 期间水位到过 88%（查账线）→ 申报值是有效上界，
-真值夹在 `[下界, 上界]` 里。**水位没到 88% 就不算** —— memguard 当时压根没查账，
-"没被冻"只说明没人来查你，不说明你没超申报。细节与迭代收敛法见
-`references/recommend-rules.md` §「标定的正确姿势」。
+跑过一次后，用 `gpu-peak <JobID>` 收紧下一次的 `--mem`（`references/recommend-rules.md`「标定的正确姿势」）。
 
-- 仅当用户主动给安全上限时才传 `--time`；预计 >14 天才跑得完 → 提醒必须 checkpoint 分段。
-- 每个参数具体怎么算、置信度怎么标 → `references/recommend-rules.md`。
+## 首次配置 / 环境感知
 
-**4 · 判排队还是能跑**——看 `run_now` / `warnings`：GPU 忙就明说排队、前面几个、按正在跑那个的 `time_left` 估等多久；内存或核数不够也明说会排队。
+- `config.json`（gitignore）缺了才走：① `advise.py detect-server` 扫 tailnet 得 IP+名 → ② 问"你在服务器上的用户名？（通常是姓名拼音小写）" → ③ `advise.py init --user <名> --host <IP> --node <名>`。**绝不硬编码服务器地址**，IP 只落进 gitignore 的 `config.json`。
+- 在服务器上跑程序前读 `env-profile.local.json`（缺了、超过 14 天、或刚装新环境就跑 `advise.py probe-env`）。**`command -v` 查不到不等于没装**：非交互 ssh 不初始化 conda、不加载公共区 PATH。R 是公共的，走 `/opt/bio/bin/Rscript`。判据 → `references/env-notes.md`。
 
-**5 · 生成脚本**：
-```
-gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" \
-           --workdir <项目在服务器上的绝对路径> --out /tmp/job.sh
-```
-- **`--workdir` 决定产物落在哪，别省。** 作业会在该目录里跑、日志进 `<workdir>/logs/`（`submit` 会自动建这个目录）。
-  **不传的下场**：Slurm 的 `--output` 是相对路径，而作业经 SSH 提交时相对的是**登录目录**——
-  于是每跑一次就往 home 根扔一个 `<作业名>-<ID>.log`，攒几十个之后没人分得清哪个对应哪次分析
-  （本机就是这么攒出来的）。**产物落在项目目录里还顺带进了备份，落 home 根则不在任何备份范围内。**
-- 落点从哪来：本机约定读 `references/workspace-layout.local.md`；**该文件不存在（比如刚装到别人机器上）
-  就问用户"这个项目在服务器上的目录是哪个"**——不要自己编一个，也不要默认落 home 根。
-- ⚠ 在 Git Bash / MSYS 下调用要带 `MSYS_NO_PATHCONV=1`，否则 `/home/...` 会被自动改写成
-  `C:/Program Files/Git/home/...`；这种脚本照样能提交，但作业一 chdir 就失败、且失败信息没地方写。
-  引擎已会拦下并提示，但不如一开始就带上。
-- **GPU 作业必查显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成时直接带上；不支持的（Boltz）**明说拦不住**，靠控制输入规模 + 让程序结尾自己打印峰值。写法与机制 → `references/recommend-rules.md`「GPU 显存自限」。
-- 引擎会回 `warnings`（漏 `--cpus` / 无显存自限 / Boltz `num_workers` 死锁）——**别忽略**。
+## 个人资料
 
-**6 · 提交前确认门（强制）**：**IMPORTANT — YOU MUST** 先把资源给用户看、问一句"要现在提交吗？"、明确同意才提交。**绝不自动提交 GPU 作业。**
-→ 用户点头 → `submit --script /tmp/job.sh` → 返回 JobID。
-
-**6b · 提交后立刻起监控（GPU 作业必做）**
-
-```
-python scripts/advise.py wait <JobID>
-```
-
-**用后台方式跑它**，然后该干嘛干嘛。它正常运行期间一声不吭、不花 token；作业
-**结束 / 失败 / 被冻结 / 被取消** 时立刻返回，你自然就收到了。
-
-固定返回码（认这几个数即可，不必解析文本）：
-
-| 码 | 含义 | 该做什么 |
-|---|---|---|
-| 0 | 正常结束 | 收结果 |
-| 10 | 跑完但退出码非零 | 看日志 |
-| **11** | **被冻结** | **别 scancel**，见下方 §「作业没进度」 |
-| 12 / 13 | 被取消 / 失败 | 看原因 |
-| 20 | 监控自身超时 | **不是**作业失败，状态未知 |
-| 21 / 255 | 查询失败 / 连不上 | 状态未知，别当成完成 |
-
-> ⚠️ **作业从 `squeue` 消失不等于成功** —— 可能是失败、被取消，或只是那次查询失败了。
-> `wait` 已经处理了这个（终态一律以 `sacct` 为准，并给 accounting 留收敛时间）；
-> 你自己写轮询的话别踩这个坑。
-
-**7 · GPU 提交前看一眼卡上的物理真相**
-
-`status` 现在同时给两个视角：`gpu_free` 是 **Slurm 的记账**，`gpu_physical` 才是
-`nvidia-smi` 看到的真相。**没走队列的进程 Slurm 完全不知道**，它照旧报告"空闲"
-（2026-08-27 实测如此）。看 `gpu_conflict_risk` 与 `warnings`，有冲突就别交。
-
-`gpu_physical.state` 四档：`free` / `system-use`（只有桌面服务这类常驻服务，
-用户计算意义上是空的）/ `slurm-job` / `unattributed`（**有人没走队列在用卡**）/
-`unknown`（**查不到 ≠ 空闲**）。
-
-⚠️ 这只保证如实展示，**挡不住所有撞卡**：检查完到作业真正被调度之间，别人可能
-才开始裸跑，或排队作业才被派上。
-
-## 调试循环 → 交互式会话，别一轮一轮排队
-
-**判据一句话：要不要盯着看？**
-
-| 问自己 | 走哪条 |
-|---|---|
-| 要**盯着结果改代码、然后再跑** | **交互式会话**（本节） |
-| 提交完就关电脑走人 | **照常 sbatch**（上面的核心流程） |
-
-**为什么值得单开一档**：调试是「跑 2 分钟 → 想 20 分钟 → 再跑」的循环。每轮走 sbatch
-就要重排一次队 —— 2026-09-02 实测同一个只跑 **51 秒**的作业排了 **2h51m**；同一天
-用户排了至少 4 次。会话里每次启动 **33–61ms**（2026-09-06 实测），排队只付一次。
-
-原理：`salloc` 把**壳**和**内容**拆开 —— 壳（分配）按申请的时长活着，内容（每次
-`srun`）想跑几次跑几次。跨 ssh 连接照样进得去，所以**用户不必自己开终端、不必挂 tmux**。
-
-**五条命令**：
-
-```
-python scripts/advise.py debug-start [--time 6:00:00] [--cpus N] [--mem-gb N] [--gpu]
-python scripts/advise.py debug-run  --jobid <id> --command "<要跑的命令>" [--wait 120]
-python scripts/advise.py debug-log  --jobid <id> [--run N] [--wait <秒>]
-python scripts/advise.py debug-list
-python scripts/advise.py debug-end  --jobid <id>
-```
-
-**★ 只有两种情况该打扰用户**（2026-09-07 定的规格，别自己加第三种）：
-
-1. **调试期间跑的那个活到了终态** —— 跑完 / 报错 / 被冻结 / 会话没了
-2. **会话过了 3/4 时限**（`warn` 字段，见职责 2）
-
-其余全是实现细节，**你自己消化掉，别冒到用户面前**。
-
-`debug-run` / `debug-log` 都返回一个 `outcome` + `done`，看这两个字段就够：
-
-| `outcome` | `done` | 含义 | 你该做什么 |
-|---|---|---|---|
-| `ok` | true | 跑完了，退出码 0 | 报结果 |
-| `failed` | true | 跑完了但程序退出码非 0 | 报结果 + 退出码，让用户看 stdout |
-| `frozen` | true | 被 memguard 冻结（用量超申报） | 转达 `note`：**别 scancel**，用 `cancel-frozen`；下次 `--mem` 报大些 |
-| `session_gone` | true | 会话没了，活是**被掐断的**（不是程序自己失败） | 说清楚"活没做完、不会自动重跑"，问要不要开新会话 |
-| `pending` | **false** | 还没到终态 | **别当结果报给用户。** 拿 `resume_with` 自己接着轮询，直到 `done=true` |
-
-> **`pending` 不是一种结果，是"我还没等到"。** 用户说了"跑"，就该一直等到有结论为止 ——
-> 别把「要不要接着等」这个选择丢回给用户。（`--wait` 默认 570 秒是压在调用方单次工具
-> 调用 10 分钟上限内的数，跟用户无关，**不要跟他解释这个数**。）
-
-**跑和等为什么是分开的**：每次运行都在服务器上 detach，stdout/stderr 落到
-`~/.spark-debug/<jobid>/run-<N>.out`。2026-09-07 实测：SSH 断了**远端的活并不会死**
-（60 秒的循环在 15 秒 ssh 超时后照样跑到 DONE）。所以本地怎么断都不丢结果，
-`debug-log` 随时捞得回来。旧版直连 + 900 秒硬超时会把「我没等到」显示成
-「你的活失败了」—— 那是假失败。
-
-### 你（AI）在这个模式里的六个职责
-
-1. **开会话前问一句。** 它占着资源，跟提交作业一样不自动开。
-2. **每次 `debug-run` 后看 `warn` 字段，非空就原样转达，别吞掉。** 它的含义是
-   「剩余不足 1/4，现在就该去排下一个会话了」——因为时限不能延长，只能重开，
-   而重开要重新排队。
-3. **活干完主动提议 `debug-end`。** 会话不会自己早退，只会一直耗到时限。
-4. **看到 `session_gone: true`** → 会话在那次运行期间没了，多半是撞时限被掐。
-   **说清楚"这次的活没跑完且不会自动重跑"**，别让用户读成"程序自己失败了"。
-5. **`outcome: "pending"` 时自己接着等，别问用户。** 拿 `resume_with` 再调一次
-   `debug-log`，循环到 `done: true` 为止。用户说了"跑"，你就该给他一个结论 ——
-   「要不要接着等」不是他该操心的事。
-   （真的要跑很久的活，顺带提一句**那种活本来就该 sbatch**，关电脑走人还不占着会话。）
-6. **开完会话顺手挂一个后台计时器**，睡到剩 1/4 时自动退出 —— 它一退出会唤醒你，
-   你就能**主动**去提醒用户，不必等他先开口。睡多久 = `session.time_limit_seconds` × 0.75
-   （6 小时的会话 → `sleep 16200`）。用 Bash 工具的 `run_in_background` 跑：
-
-   ```
-   sleep <秒数>; echo "调试会话 <jobid> 剩余不足 1/4，该去排下一个会话了"
-   ```
-
-   ⚠️ **这一层是加分项，不是保障**：它只在当前 Claude Code 会话活着时有效，用户关掉窗口
-   就没了。真正的保障是第 2 条那个 `warn` 字段（每次 `debug-run` 都带，跑不掉）
-   和 `--time` 本身。**别因为挂了计时器就不转达 `warn`。**
-
-### 三条硬事实（2026-09-06 实测，别凭直觉推翻）
-
-| 事实 | 后果 |
-|---|---|
-| idleguard **豁免**交互式作业（`BatchFlag=0`，见 `idleguard.py:35`） | 好处：你想多久都不会被回收。代价：**忘了收工没有任何东西会来收** —— `--time` 是唯一那道网 |
-| 时限**只能调小、不能调大**（调大直接 `Access/permission denied`） | 「先开短的、不够再延长」**走不通**，必须一开始就报够 |
-| 到点**真掐**：SIGTERM（rc=143）、`DUE TO TIME LIMIT`、终态 TIMEOUT、**不重排** | 跑到一半的活直接没，只能重开会话从头来 |
-
-⇒ 风险是**不对称**的：报少了修不了，报多了随时能 `debug-end` 释放。
-所以默认 **6 小时** —— 够长到不会在干活途中被掐，又短到**不能拿会话当批处理使**
-（正经长活该走 sbatch，那样能关电脑走人、还不占着这 6 小时）。
-用户要更长**不拦**，但把上面第一条的代价说清楚。
-
-### 别人看得见 —— 这是这套做法正当的前提
-
-会话在 `squeue` 里就是**一个正常作业**，跟别人的作业同一张表、同样的列：
-
-```
-JOBID   USER      NAME            STATE    TIME     CPUS  MIN_MEMORY  TIME_LIMIT
-  651  <user>    debug-<user>    RUNNING  1:23:40      2         8G     6:00:00
-```
-
-名字默认 `debug-<user>`，别人一眼知道是**有人在交互调试**、占多少、最多占到什么时候。
-**别改成看不懂的名字** —— 不起名的话默认可能显示成 `bash`，会被当成卡死的僵尸作业。
-
-面板（3001）分两种视角，**别搞混**：
-
-| 视角 | 看得到调试会话吗 |
-|---|---|
-| **实时**「谁正占着机器」 | ❌ 面板**没有**这个视图（无 `/api/jobs`、无 `/api/queue`）。要看实时只有 `squeue` |
-| **历史**按程序名累计 | ✅ 有。会话按 `debug-<user>` 累计进 `totals.programs`（含 wall_hours / cpu_core_hours / 次数） |
-
-### ⚠️ `--gpu` 要额外克制 —— 面板会公开点名
-
-`usage_stats.py:620` 有一条 `gpu_held_idle` 规则，同时满足这四条就把作业**列进面板的
-findings 公开点名**：
-
-1. 占着 GPU  2. 跑了 **>1 小时**  3. GPU 利用率 **P90 < 1%**  4. **同期有别人在排队等卡**
-
-第 4 条是这条规则的良心 —— 没人等卡时占着不点名。但**带 `--gpu` 的长调试会话正好容易
-四条全中**（你在想事情，卡是闲着的）。规则自带的建议原话就是：
-「交互调试用完 exit 释放；长任务改用 sbatch 提交」。
-
-⇒ **给用户的默认**：
-- **调试循环每轮真的用到 GPU** → 带 `--gpu`，利用率不会是 0，不会中招
-- **只是偶尔用一下 GPU** → **别带 `--gpu`**，要用的时候单独提一个小作业
-- 带 GPU 的会话**把时长压短**（1–2 小时），别用 6 小时默认值
-- 实证：一个**只为占位、并不计算**的作业已经被这条规则点名过 ——
-  「占用 GPU 1.0 小时，利用率 P90=0.0%，同期有其他 GPU 作业在排队」。
-  想靠占位作业卡住队头的做法**从来不是隐形的**，面板会自己把它列出来。
-
-## ⛔ 作业"在跑但没进度" —— 禁止直接 scancel
-
-**IMPORTANT — YOU MUST**：看到作业状态是运行中、日志却半天不动时，**不要直接
-`scancel`**。先判断属于哪一种，五种里只有一种以"取消"为正确处置：
-
-| 现象 | 可能是 | 正确处置 |
-|---|---|---|
-| 状态 `PD` | 还在排队没轮到 | 等 |
-| 状态 `R`，日志不动 | **被 memguard 冻结** | **`cancel-frozen`，绝不 `scancel`** |
-| 状态 `R`，日志不动 | 程序自己卡死 / 等 IO | 可以取消 |
-| 状态 `R`，日志不动 | 输出缓冲还没刷出来 | 正常，继续等 |
-| 状态 `CG` 很久 | 清理卡住了 | 查是不是被冻着 |
-
-**怎么分辨**：`advise.py wait <id>` 返回 11 就是被冻了；或看 `status` 的
-`gpu_physical.frozen_jobs`。
-
-**为什么这条是硬规则**：对一个**已冻结**的作业 `scancel`，信号送不进去（冻结的
-进程处理不了信号），作业会永远卡在 `COMPLETING`、内存一直不还、`squeue` 里赖着
-不走。2026-08-27 就是这么把整台机器堵了三小时、全组作业全部排不进去。
-
-**被冻了怎么办**（顺序不能换）：
-
-```
-python scripts/advise.py cancel-frozen <id>          # 先看它要做什么（dry-run）
-python scripts/advise.py cancel-frozen <id> --yes    # 确认后执行
-```
-
-它按「解冻 → 取消 → 四项确认」走完，返回 0 才算真的退干净；返回 30
-（`cleanup-stuck`）表示请求发出去了但**资源没确认释放** —— 那正是事故当天的状态，
-别当成成功。返回 32（`need-privilege`）表示这个账号没有 sudo：照 `/ai.md`，让用户找管理员取消，自己仍然别 `scancel`。
-
-**然后改申报重交。** 注意：**不要拿任何观测到的数字当作它的真实需求** —— 作业是在
-越线那一刻被打断的，观测值只是"被打断时用到哪"，真实峰值只会更高，照着填还会再被冻。
-要测真值，在程序里加显存监测、用**小规模完整跑完**一次；且该数字只对当前这个输入
-有效，换蛋白或换规模就得重测。
+- 往 spark 传数据 / 百度网盘 → `references/data-transfer.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）
+- 本机踩过的坑 → `references/spark-pitfalls.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）
+- 目录约定、产物落在哪 → `references/workspace-layout.local.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）。要用服务器上的项目路径时（生成 sbatch、`project`、`cleanup`）先读；**文件不存在就问用户"这个项目在服务器上的目录是哪个"**，别自己编一个路径。
+- 搬到 NAS 的个人清单 → `references/nas-archive.local.md`（`cleanup archived` 自动生成，备注在 `nas-archive.local.json`）
+- 管理员：新用户开通 → `references/onboard-user.local.md`（**你自己积累的**，不随本仓库分发、升级时不会被覆盖）
 
 ## 踩坑即记（服务器相关坑，个人积累）
 
 跑活时若撞到**和服务器（ARM / 统一内存 / slurm / 工具在本机的默认值）相关**的坑、且排出了根因或绕法 → **先问用户一句"要记进 `references/spark-pitfalls.md` 吗？下次不再踩"**，同意才追加（症状 → 根因 → 绕法 → 日期 + 置信度）。跑某类活前若可能撞已知坑，先扫 `spark-pitfalls.md`。该文件是**你自己的**，不在本仓库里、升级 skill 时也不会被覆盖；够通用且验证充分的坑，值得手动挪进 `env-notes.md`。
-
-## 只是查状态？
-
-用户只问"服务器现在什么情况" → `advise.py status`，人话汇总（GPU 空/忙、可调度 X G、CPU `cpu_free`/`cpu_total` 核空闲、队列 N 个），**不提交任何东西**。
-
-## 找软件 / 申请安装
-
-用户要用某个工具或数据库 → 先 `advise.py software find <名字>`。公共区有就直接告诉他怎么用。
-没有就查 ARM 上能不能装、起草申请，**给用户看过、同意后**才 `--yes` 提交；必须在用户自己的电脑上跑。
-细节读 `references/software.md`。
-
-## 清理重复安装
-
-用户想腾空间、或者面板「我的重复安装」里有东西 → 先读 `references/cleanup.md`，再 `advise.py cleanup scan`。
-删除不可撤销（NAS 也不备份环境）：讲清两档和差异、列出计划，**用户确认后**先把脚本里的引用改成
-`/opt/bio/bin/<命令>` 的绝对路径，再逐项 `cleanup apply … --yes`。
