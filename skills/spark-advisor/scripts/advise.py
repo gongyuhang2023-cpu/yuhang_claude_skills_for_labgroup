@@ -2079,6 +2079,10 @@ def main():
     cln.add_argument("path")
     cln.add_argument("text")
 
+    # 查明脚本里用的公共数据库是哪个版本（current 和数据库变量解析成实际版本）；只读、不跑 git
+    vs = sub.add_parser("versions")
+    vs.add_argument("path")
+
     # 服务器上的项目：代码推了没、推 Gitea（remote_project.py 经 ssh 在服务器上执行）
     pj = sub.add_parser("project")
     pjsub = pj.add_subparsers(dest="pjcmd", required=True)
@@ -2253,6 +2257,10 @@ def main():
             argv = ["apply", server_path(args.path), "--action", args.action] + \
                    (["--env"] if args.env else []) + yes
             rc, payload = cmd_cleanup(cfg, argv, timeout=1800)
+        emit(payload)
+        sys.exit(rc)
+    if args.cmd == "versions":
+        rc, payload = cmd_project(cfg, ["versions", server_path(args.path)])
         emit(payload)
         sys.exit(rc)
     if args.cmd == "project":

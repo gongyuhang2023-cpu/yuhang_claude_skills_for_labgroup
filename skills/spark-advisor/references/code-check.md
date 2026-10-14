@@ -1,10 +1,11 @@
 # 服务器上的项目：代码推了没、推到 Gitea
 
-> 什么时候读：用户问「服务器上的代码推了没」「这个项目还要不要留在服务器上」「写论文要写数据库版本」「把服务器上的项目推到 Gitea」时。
+> 什么时候读：用户问「服务器上的代码推了没」「这个项目还要不要留在服务器上」「我的脚本用的数据库是哪个版本」「把服务器上的项目推到 Gitea」时。
 > 本机上的项目用 git-auto-sync；这里只管**服务器上**的项目。
 
 逻辑在 `scripts/remote_project.py`，引擎经 ssh 交给服务器上的 `python3` 执行。它以用户自己的身份运行，从不 `--force`，令牌不经过它：
 
+    python scripts/advise.py versions <项目目录>                                        # 只查脚本用的公共数据库是哪个版本（不跑 git，快）
     python scripts/advise.py project check <项目目录>                                   # 只看不动
     python scripts/advise.py project ignore <项目目录> --add data/ results/ [--yes]     # 把数据目录写进 .gitignore
     python scripts/advise.py project push <项目目录> -m "<说明>"                         # 预演：要提交的文件、大小、plan_id

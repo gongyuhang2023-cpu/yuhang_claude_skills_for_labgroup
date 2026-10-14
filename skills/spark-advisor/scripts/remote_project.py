@@ -324,6 +324,13 @@ def cmd_check(p):
     out(res)
 
 
+def cmd_versions(p):
+    """只查脚本里用到的公共数据库是哪个版本：不跑 git、不联网，比 check 快。"""
+    top = project_dir(p)
+    refs, note = scan_db_refs(top)
+    out({"path": tilde(top), "db_refs": refs, "db_note": note})
+
+
 def cmd_ignore(p, patterns, yes):
     top = project_dir(p)
     gi = os.path.join(top, ".gitignore")
@@ -440,6 +447,8 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check")
     c.add_argument("path")
+    v = sub.add_parser("versions")
+    v.add_argument("path")
     ig = sub.add_parser("ignore")
     ig.add_argument("path")
     ig.add_argument("--add", nargs="+", required=True)
@@ -459,6 +468,8 @@ def main():
         out({"error": "不要用 root 跑"}, 2)
     if a.cmd == "check":
         cmd_check(a.path)
+    elif a.cmd == "versions":
+        cmd_versions(a.path)
     elif a.cmd == "ignore":
         cmd_ignore(a.path, a.add, a.yes)
     elif a.cmd == "push":
