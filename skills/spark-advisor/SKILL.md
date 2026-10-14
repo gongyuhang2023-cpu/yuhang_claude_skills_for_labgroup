@@ -5,7 +5,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 
 # spark-advisor — 共享 GPU 服务器顾问
 
-> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。
+> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON（`rules` 例外：原样返回 `/ai.md` 的 Markdown）——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。
 
 ## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
 
@@ -18,9 +18,9 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 ## ⛔ 红线与总闸（动手前必看）
 
 - **GPU / 重活只走 Slurm**（`gen-sbatch → submit` 或调试会话），**绝不** `ssh <server> 'python xxx.py'` 裸跑，哪怕用户说"就跑一下"：裸跑不留痕、逃过 memguard、抢显存（详见 `references/server-facts.md`）。轻活（改代码、几秒的小脚本、`squeue`/`nvidia-smi`）可以直接跑；拿不准就走队列。
-- **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。「能删的都删」这类笼统的话不算同意，要逐项点名。
-- **作业在跑但没进度，禁止直接 `scancel`**：对冻结的作业 scancel 会让它永久卡住、不还内存。先 `wait <id>` 或 `status` 判断；冻结的用 `cancel-frozen <id>`（先不带 `--yes` 看计划）：返回 0 = 退干净；30 = 请求发了但资源没确认释放（**不算成功**）；32 = 这个账号没权限，请用户找管理员。细节读 `references/frozen-jobs.md`。没冻结、确认是用户自己的作业，用户点头后可以直接 `scancel <id>`。
-- **`wait` 返回码**：0 正常结束；10 跑完但退出码非零；**11 被冻结（别 scancel）**；12 / 13 被取消 / 失败；20 监控自己超时（作业状态未知）；21 / 255 查询失败（**别当成完成**）。作业从 `squeue` 消失不等于成功。
+- **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。叫出这个 skill、说「帮我清理 / 腾空间」只是开始商量，不算同意；「能删的都删」这类笼统的话也不算，要逐项点名。
+- **作业在跑但没进度，禁止直接 `scancel`**：对冻结的作业 scancel 会让它永久卡住、不还内存。先 `wait <id>` 或 `status` 判断；冻结的用 `cancel-frozen <id>`（先不带 `--yes` 看计划）：返回 0 = 退干净；30 = 请求发了但资源没确认释放（**不算成功**）；31 = 这条命令不适用（没有这个作业、已结束、在排队、没冻结或暂时判断不了），照 `note` 做；32 = 这个账号没权限，请用户找管理员；33 = 只检查了、没执行（没带 `--yes`）。细节读 `references/frozen-jobs.md`。没冻结、确认是用户自己的作业，用户点头后可以直接 `scancel <id>`。
+- **`wait` 返回码**：0 正常结束；10 跑完但退出码非零；**11 被冻结（别 scancel）**；12 / 13 被取消 / 失败；20 监控自己超时（作业状态未知）；21 / 255 查询失败（**别当成完成**）；22 没有这个作业号（多半写错了）。作业从 `squeue` 消失不等于成功。调用时带 `--max-wait`（按预计时长给）：不带就一直等，程序自己卡死、没被冻结的作业会把它挂到作业时限。
 - **备份不是归档**：NAS 备份只能找回 1–2 个月内删掉的东西。要长期留，代码推 Gitea、数据搬进 NAS 归档（`references/storage.md`）。
 - **动手前先读下面路由表指向的那个文件。**
 
@@ -54,7 +54,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 4. **判排队还是能跑**：看 `run_now` / `warnings`。
 5. **生成脚本**：`gen-sbatch … --workdir <项目在服务器上的绝对路径>`。`--workdir` 别省；Git Bash 下带 `MSYS_NO_PATHCONV=1`；GPU 作业要处理显存自限；引擎回的 `warnings` 别忽略。
 6. **提交前确认（总闸）** → 用户点头 → `submit --script …` → JobID。
-7. **GPU 作业提交后**：后台跑 `advise.py wait <JobID>`，按返回码处理。提交前看 `status` 的 `gpu_physical`：Slurm 说空闲不等于卡上没人。
+7. **GPU 作业提交后**：后台跑 `advise.py wait <JobID> --max-wait <秒>`，按返回码处理。提交前看 `gpu_physical`（`recommend` 的 `server_now` 里就有，刚跑过就不用再跑 `status`）：Slurm 说空闲不等于卡上没人。
 
 跑过一次后，用 `gpu-peak <JobID>` 收紧下一次的 `--mem`（`references/recommend-rules.md`「标定的正确姿势」）。
 

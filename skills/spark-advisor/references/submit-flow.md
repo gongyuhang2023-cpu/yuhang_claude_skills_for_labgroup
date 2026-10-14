@@ -17,12 +17,14 @@
 python scripts/advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]
 ```
 → 返回 `recommendation` + `server_now` + `history_summary`。
+用户没说是什么工具就不传 `--tool`。这时 `history_summary` 混着这个账号的所有作业，GPU 作业别拿它当依据
+（MaxRSS 本来就不含显存）；用户有同类作业的旧作业号，就用 `gpu-peak <作业号>` 拿实测下界。
 
 **3 · 定三个参数、出推荐**（依 `references/recommend-rules.md`）——人话讲清，**务必带置信度 + 依据**：
 
 | 参数 | 默认动作 | 为什么 |
 |---|---|---|
-| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟）。`rules` 里写了这个工具要多少内存（如 GTDB-Tk `classify_wf` 80–100 GB）就直接用那个数，别用无历史时的 16G 默认，也别再当 `--mem-guess` 加 50% | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
+| `--mem` | 用 `recommendation.mem_gb`；GPU 侧宁可多报；**没测过就别写**（走 96G 兜底跑一趟）——但可调度内存不到 96G 时不写就得排队，先看 `run_now`。`rules` 里写了这个工具要多少内存（如 GTDB-Tk `classify_wf` 80–100 GB）就直接用那个数，别用无历史时的 16G 默认，也别再当 `--mem-guess` 加 50% | 它管不住显存，是被 memguard 对账的**申报**——报低 = 排在第一个被冻。CPU 作业**必填**，不写会被 lua 直接拒收 |
 | `--cpus` | 用 `recommendation.cpus`，**别漏传** | 不写落 Slurm 默认 1 核，把输入特征化 / MSA / BLAS 串行掉——**静默降级、无告警** |
 | `--time` | **默认不传** | 估短了作业被 TIMEOUT 杀、整段白跑；不写 = 拿满 14 天默认（正规路径）。防"卡死作业空占卡"的是服务器端 idleguard 闲置看门狗，不是墙钟 |
 
@@ -58,7 +60,14 @@ gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" \
   就问用户"这个项目在服务器上的目录是哪个"**——不要自己编一个，也不要默认落 home 根。
 - ⚠ 在 Git Bash / MSYS 下调用要带 `MSYS_NO_PATHCONV=1`，否则 `/home/...` 会被自动改写成
   `C:/Program Files/Git/home/...`；这种脚本照样能提交，但作业一 chdir 就失败、且失败信息没地方写。
-  引擎已会拦下并提示，但不如一开始就带上。
+  引擎已会拦下并提示，但不如一开始就带上。本机的 `--out` / `--script` 路径（`/c/...`、`/tmp/...`）引擎会自己还原，不受这个变量影响。
+- **和 `/ai.md` 的模板是什么关系**：`/ai.md` 让大家从 `/opt/bio/share/templates/` 的模板起步写 sbatch；
+  `gen-sbatch` 生成的是同一个结构（`#!/bin/bash -l`、`#SBATCH` 资源行、`logs/` 日志、出错就停）。
+  结构上只差一处：模板写 `set -euo pipefail`，`gen-sbatch` 写 `set -eo pipefail`，不带 `-u`——
+  命令里常有 `conda activate`，它的激活脚本在 `-u` 下会报 unbound variable。
+  模板里的资源数值（`-c 8`、`--mem=48G`、`-t 1-00:00:00`）只是示例。用户手里已经有从模板改出来的脚本，
+  可以直接 `submit`，不必重新生成，但提交前照样核对资源行：`--mem`、`--cpus` 照 `recommend` 改；
+  `--time` 照本 skill 的时间策略，默认不写，估短了会被 TIMEOUT，整段白跑。
 - **GPU 作业必查显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成时直接带上；不支持的（Boltz）**明说拦不住**，靠控制输入规模 + 让程序结尾自己打印峰值。写法与机制 → `references/recommend-rules.md`「GPU 显存自限」。
 - 引擎会回 `warnings`（漏 `--cpus` / 无显存自限 / Boltz `num_workers` 死锁）——**别忽略**。
 
@@ -68,10 +77,11 @@ gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" \
 **6b · 提交后立刻起监控（GPU 作业必做）**
 
 ```
-python scripts/advise.py wait <JobID>
+python scripts/advise.py wait <JobID> --max-wait <秒>
 ```
 
-**用后台方式跑它**，然后该干嘛干嘛。它正常运行期间一声不吭、不花 token；作业
+**用后台方式跑它**，然后该干嘛干嘛。`--max-wait` 按预计时长给：不带就是不限时，
+程序自己卡死、没被冻结的作业会让它一直挂到作业时限。它正常运行期间一声不吭、不花 token；作业
 **结束 / 失败 / 被冻结 / 被取消** 时立刻返回，你自然就收到了。
 
 固定返回码（认这几个数即可，不必解析文本）：
@@ -84,6 +94,7 @@ python scripts/advise.py wait <JobID>
 | 12 / 13 | 被取消 / 失败 | 看原因 |
 | 20 | 监控自身超时 | **不是**作业失败，状态未知 |
 | 21 / 255 | 查询失败 / 连不上 | 状态未知，别当成完成 |
+| 22 | 没有这个作业号 | 多半是号写错了，用 `squeue -u $USER` 或 `history` 核对 |
 
 > ⚠️ **作业从 `squeue` 消失不等于成功** —— 可能是失败、被取消，或只是那次查询失败了。
 > `wait` 已经处理了这个（终态一律以 `sacct` 为准，并给 accounting 留收敛时间）；

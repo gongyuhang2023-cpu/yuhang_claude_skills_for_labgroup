@@ -45,7 +45,8 @@ Facts vs judgment: this script produces FACTS + a rule-based baseline. The final
 recommendation phrasing / confidence framing is the AI's job -- see
 references/recommend-rules.md.
 
-Config: reads config.json (next to the skill root). Copy config.example.json first.
+Config: reads config.json (next to the skill root). Don't hand-write it: on first run,
+`advise.py detect-server`, then `advise.py init` (SKILL.md「首次配置」).
 """
 import argparse
 import datetime
@@ -79,6 +80,41 @@ def emit(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def _soft(fn, *args):
+    """调用一个可能 die() 的查询（如 cmd_status）：失败返回 None，而不是退出整个进程。
+
+    die() 会先往 stdout 打一段错误 JSON 再 sys.exit —— 光接住 SystemExit 不够，
+    那段 JSON 已经打出去了，调用方会收到两段。所以连 stdout 一起截住。
+    """
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fn(*args)
+    except SystemExit:
+        return None
+
+
+def local_path(p):
+    """本机文件路径（--out / --script）。
+
+    Git Bash 里为了保住服务器路径要带 MSYS_NO_PATHCONV=1，可这样一来本机路径也不转换了：
+    /c/Users/... 会被 Windows 版 Python 当成 C:\\c\\Users\\...，/tmp/x 当成 C:\\tmp\\x。
+    """
+    if os.name != "nt" or not p or not p.startswith("/"):
+        return p
+    m = re.match(r"^/([a-zA-Z])(/.*)?$", p)
+    if m:
+        return m.group(1).upper() + ":" + (m.group(2) or "/")
+    try:
+        r = subprocess.run(["cygpath", "-w", p], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return p
+
+
 def load_config():
     for p in CONFIG_CANDIDATES:
         if os.path.exists(p):
@@ -89,9 +125,12 @@ def load_config():
                 die(f"config.json is not valid JSON: {e}")
             for key in ("host", "user", "node"):
                 if not cfg.get(key):
-                    die(f"config.json is missing '{key}'. See config.example.json.")
+                    die(f"config.json is missing '{key}'. Re-create it: advise.py detect-server, "
+                        "then advise.py init (SKILL.md「首次配置」).")
             return cfg
-    die("config.json not found. Copy config.example.json -> config.json and fill it in.")
+    die("config.json not found -- first-time setup: run `advise.py detect-server`, ask the user "
+        "for their server username, then `advise.py init --user <name> --host <IP> --node <name>` "
+        "(SKILL.md「首次配置」). Don't hand-write config.json.")
 
 
 _RESOLVED_HOST = None
@@ -288,19 +327,27 @@ WAIT_CANCELLED   = 12   # 被取消
 WAIT_FAILED      = 13   # FAILED / TIMEOUT / OOM / NODE_FAIL / PREEMPTED
 WAIT_TIMEOUT     = 20   # 监控自身超时（**不是**作业超时）
 WAIT_QUERY_FAIL  = 21   # 查询失败 —— 不知道作业怎么样了，绝不当成完成
+WAIT_NO_SUCH_JOB = 22   # 没有这个作业号（squeue 说 Invalid job id，sacct 也没有记录）—— 多半是号写错了
 WAIT_SSH_FAIL    = 255  # 连不上服务器
 
+# squeue / sacct 的报错不再丢进 /dev/null：「没有这个作业」和「查询失败」要分得开。
+# squeue 的状态行加 ST: 前缀，好和报错行区分；sacct 的退出码单独回传（SA_RC）。
 _WAIT_PROBE = r"""
 echo "SQ_BEGIN"
-squeue -h -j {jid} -o '%T' 2>/dev/null
+squeue -h -j {jid} -o 'ST:%T' 2>&1
 echo "FZ_BEGIN"
 cat /run/spark-usage/frozen-jobs.json 2>/dev/null || echo '{{}}'; echo
 echo "CGFZ_BEGIN"
 CG=$(ls -d /sys/fs/cgroup/system.slice/*slurmstepd.scope/job_{jid} 2>/dev/null | head -1)
 [ -n "$CG" ] && cat "$CG/cgroup.freeze" 2>/dev/null
 echo "SA_BEGIN"
-sacct -X -n -P -j {jid} -o State,ExitCode 2>/dev/null
+sacct -X -n -P -j {jid} -o State,ExitCode 2>&1
+echo "SA_RC=$?"
 """
+
+# sacct 有记录但还不是终态（squeue 一时没查到、或作业正在收尾）—— 不能当终态返回
+_NONTERMINAL = ("RUNNING", "PENDING", "REQUEUED", "RESIZING", "SUSPENDED",
+                "COMPLETING", "CONFIGURING", "STAGE_OUT")
 
 
 def cmd_wait(cfg, jid, interval, max_wait):
@@ -331,6 +378,7 @@ def cmd_wait(cfg, jid, interval, max_wait):
     """
     t0 = time.time()
     gone_since = None       # 作业从 squeue 消失的时刻，用于给 sacct 留收敛时间
+    first = True            # 只有第一次查询就查无此号，才判「没有这个作业」
     probe = _WAIT_PROBE.format(jid=shlex.quote(str(jid)))
 
     while True:
@@ -350,7 +398,23 @@ def cmd_wait(cfg, jid, interval, max_wait):
 
         sq, fz, cgfz, sa = _split_sections(
             out, ["SQ_BEGIN", "FZ_BEGIN", "CGFZ_BEGIN", "SA_BEGIN"])
-        state = sq.strip().splitlines()[0].strip() if sq.strip() else ""
+        sq_lines = [ln.strip() for ln in sq.splitlines() if ln.strip()]
+        state = next((ln[3:].strip() for ln in sq_lines if ln.startswith("ST:")), "")
+        sq_err = " ".join(ln for ln in sq_lines if not ln.startswith("ST:"))
+        no_such = "Invalid job id" in sq_err
+        sa_lines = [ln.strip() for ln in sa.splitlines() if ln.strip()]
+        sa_rc = next((ln[6:] for ln in sa_lines if ln.startswith("SA_RC=")), "")
+        if sa_rc != "0":
+            sa_err = " ".join(ln for ln in sa_lines if "|" not in ln and not ln.startswith("SA_RC="))
+            return WAIT_QUERY_FAIL, {"job": jid, "result": "query-failed",
+                                     "error": (sa_err or "sacct 退出码 %s" % (sa_rc or "未知"))[:200],
+                                     "note": "sacct 查询失败，作业状态未知 —— 不要当成已完成"}
+        if sq_err and not no_such:
+            # squeue 自己出错（比如连不上 slurmctld）时 state 是空的，不处理就会被当成
+            # 「作业已离开队列」，再拿 sacct 里的 RUNNING 当终态 —— 状态未知就说未知。
+            return WAIT_QUERY_FAIL, {"job": jid, "result": "query-failed",
+                                     "error": sq_err[:200],
+                                     "note": "squeue 查询失败，作业状态未知 —— 不要当成已完成"}
 
         # ---- 冻结优先判断：它在 squeue 里长得跟正常运行一模一样 ----
         # 两个来源都认：memguard 维护的清单（带 user/name 等元信息），以及直接读
@@ -374,6 +438,7 @@ def cmd_wait(cfg, jid, interval, max_wait):
             }
 
         if state:                    # 还在队列里跑着/排着
+            first = False
             gone_since = None
             time.sleep(interval)
             continue
@@ -382,7 +447,16 @@ def cmd_wait(cfg, jid, interval, max_wait):
         if gone_since is None:
             gone_since = time.time()
         final = _parse_sacct(sa)
+        if final is not None and final[0].split()[0] in _NONTERMINAL:
+            final = None             # sacct 说还在跑/在收尾：不是终态，接着等
         if final is None:
+            if first and no_such:
+                # 第一次查就两边都没有：不用干等 60 秒再报「状态未知」
+                return WAIT_NO_SUCH_JOB, {
+                    "job": jid, "result": "no-such-job",
+                    "note": "squeue 和 sacct 都查不到这个作业号 —— 多半是号写错了。"
+                            "用 squeue -u $USER 或 advise.py history 核对作业号"}
+            first = False
             if time.time() - gone_since > 60:
                 return WAIT_QUERY_FAIL, {
                     "job": jid, "result": "no-final-state",
@@ -496,6 +570,7 @@ echo "SQ_BEGIN"; squeue -h -j "$JID" -o '%T' 2>/dev/null
 echo "OWNER_BEGIN"; squeue -h -j "$JID" -o '%u' 2>/dev/null
 echo "AUDIT_BEGIN"; cat /run/spark-usage/frozen-jobs.json 2>/dev/null || echo '{{}}'; echo
 echo "SUDO_BEGIN"; sudo -n true 2>/dev/null && echo YES || echo NO
+echo "SA_BEGIN"; sacct -X -n -P -j "$JID" -o State,User 2>/dev/null
 """
 
 _CF_EXECUTE = r"""
@@ -538,21 +613,45 @@ def cmd_cancel_frozen(cfg, jid, confirm):
     if rc != 0:
         return WAIT_SSH_FAIL, {"job": jid, "result": "ssh-failed",
                                "error": err.strip()[:200]}
-    cg, fz, sq, owner, aud, sudo_ok = _split_sections(
+    cg, fz, sq, owner, aud, sudo_ok, sa = _split_sections(
         out, ["CG_PATH_BEGIN", "FREEZE_BEGIN", "SQ_BEGIN", "OWNER_BEGIN",
-              "AUDIT_BEGIN", "SUDO_BEGIN"])
+              "AUDIT_BEGIN", "SUDO_BEGIN", "SA_BEGIN"])
     cg, fz = cg.strip(), fz.strip()
     state, owner = sq.strip(), owner.strip()
+    sa_row = next((ln.split("|") for ln in sa.strip().splitlines() if "|" in ln), None)
+    owner = owner or (sa_row[1].strip() if sa_row and len(sa_row) > 1 else "")
+    # 不是自己的作业要说出来：取消别人的作业之前必须先和对方确认
+    whose = ("" if not owner or owner == cfg.get("user")
+             else "这是 %s 的作业，动它之前先和对方确认。" % owner)
 
+    # 31 =「这条命令不适用」，按 note 做。别笼统地说「scancel 即可」：
+    # 对没有这个作业、已经结束、还在排队、或找不到 cgroup 的作业，那句话都会误导。
     if not cg:
+        if not state and not sa_row:
+            return CF_NOT_FROZEN, {
+                "job": jid, "result": "no-such-job",
+                "note": "squeue 和 sacct 都查不到这个作业号 —— 多半是号写错了，不需要取消。"}
+        if not state:
+            return CF_NOT_FROZEN, {
+                "job": jid, "result": "already-ended", "owner": owner,
+                "slurm_state": sa_row[0].strip(),
+                "note": "作业已经结束（sacct：%s），不需要取消。" % sa_row[0].strip()}
+        if state == "PENDING":
+            return CF_NOT_FROZEN, {
+                "job": jid, "result": "pending", "owner": owner, "slurm_state": state,
+                "note": "作业还在排队，没有被冻结，不需要这条命令。确认要取消、且得到"
+                        "作业主人同意后，排队中的作业可以直接 scancel %s。%s" % (jid, whose)}
         return CF_NOT_FROZEN, {
-            "job": jid, "result": "no-cgroup",
-            "note": "找不到该作业的 cgroup —— 它可能已经结束了。用普通 scancel 即可。"}
+            "job": jid, "result": "no-cgroup", "owner": owner, "slurm_state": state,
+            "note": "作业状态是 %s，但找不到它的 cgroup（可能刚启动或正在收尾），判断不了"
+                    "是否冻结。过一会儿再跑一次本命令，**先别 scancel**。%s" % (state, whose)}
     if fz != "1":
         return CF_NOT_FROZEN, {
-            "job": jid, "result": "not-frozen", "cgroup": cg, "slurm_state": state,
+            "job": jid, "result": "not-frozen", "owner": owner, "cgroup": cg,
+            "slurm_state": state,
             "note": ("该作业**没有被冻结**（cgroup.freeze=%s），不需要这条命令。"
-                     "直接 scancel 就行。" % (fz or "读不到"))}
+                     "确认要取消、且得到作业主人同意后，可以直接 scancel %s。%s"
+                     % (fz or "读不到", jid, whose))}
 
     # 谁冻的：从 memguard 维护的冻结清单里取（该清单带 frozen_by_memguard 标志，
     # 是它从自己的审计记录里恢复出来的 —— 审计文件本身普通用户读不到）。
@@ -1208,7 +1307,9 @@ def cmd_history(cfg, user, tool, days):
     rows = [r for r in jobs.values() if r.get("name")]
     if tool:
         rows = [r for r in rows if tool.lower() in r.get("name", "").lower()]
-    rows.sort(key=lambda r: r["job"], reverse=True)
+    # 按作业号的**数值**倒序：按字符串排 113 会排在 99 后面，作业号一跨位数，
+    # 最新的作业反而被下面的 rows[:40] 截掉。数组作业形如 1264_3，取前面的号。
+    rows.sort(key=lambda r: int(re.match(r"\d*", r["job"]).group() or 0), reverse=True)
     peaks = [r["host_peak_gb"] for r in rows if r.get("host_peak_gb")]
     return {
         "user": user, "tool_filter": tool, "days": days,
@@ -1216,10 +1317,9 @@ def cmd_history(cfg, user, tool, days):
         "host_mem_peaks_gb": peaks,
         "note": "MaxRSS = HOST (CPU-side) memory. Reliable for CPU jobs; DISTORTED for GPU "
                 "jobs (cudaMalloc bypasses cgroup accounting -> under-reports by ~100x). "
-                "Real per-job VRAM peaks ARE sampled server-side since 2026-07-20 "
-                "(gpu_proc_samples), but nothing exposes them per job -- only the "
-                "fleet-wide aggregate via `spark-usage --all`. This engine does not fetch "
-                "VRAM at all: a known boundary, not a missing feature. Do not expect "
+                "Per-job VRAM is sampled server-side since 2026-07-20 (gpu_proc_samples); "
+                "read it with `advise.py gpu-peak <jobid>` (a LOWER bound -- 5s sampling "
+                "misses spikes). This history command does not fetch VRAM, so do not expect "
                 "host_mem_peaks_gb to say anything about GPU memory.",
         "jobs": rows[:40],
     }
@@ -1232,6 +1332,8 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
     # 写死的数迟早过时（gpu_pool_gb 曾停留在 120，而实际早已是 113.9）。
     pool = st.get("mem_allocatable_gb") or cfg.get("gpu_pool_gb", 120)
     floor = cfg.get("gpu_floor_gb", 96)
+    # lua 的兜底是 96000M（MiB）≈ 93.75 GiB；可调度内存按 GiB 算，比较和算余量都用这个数
+    floor_gib = round(floor * 1000 / 1024, 2)
     rec = {"gres": None, "cpus": cpus, "mem_gb": None, "time": None,
            "confidence": "low", "basis": [], "warnings": [], "run_now": None}
 
@@ -1251,12 +1353,13 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             rec["basis"].append(
                 f"Declaring {rec['mem_gb']}G instead of the {floor}G default leaves "
                 f"{round(pool - rec['mem_gb'], 1)}G for everyone else while you run "
-                f"(the default would leave only {round(pool - floor, 1)}G).")
+                f"(the default would leave only {round(pool - floor_gib, 1)}G).")
             rec["warnings"].append(
                 "Declare honestly. spark-memguard reconciles actual usage against this number "
                 "when memory gets tight (>=88%) and freezes whoever exceeds their own declaration "
                 "by the most. Under-declaring puts you first in line to be frozen. "
-                "Rounding UP is free; rounding down is not.")
+                "Rounding UP costs nothing while memory is plentiful; rounding down is never free. "
+                "But when schedulable memory is short, a bigger declaration makes you QUEUE (see run_now).")
         else:
             # 第一次跑某个工具/某个输入规模时，猜不如量。让 lua 兜底给 96G 跑一趟，
             # 采样器会记下真实峰值，下一次就能精确申报。
@@ -1265,12 +1368,18 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             rec["basis"].append(
                 f"GPU job with no estimate: OMIT --mem for this first run -> lua gives the safe "
                 f"{floor}G default. To get an exact number for NEXT time, make the job measure "
-                f"itself (PyTorch: print torch.cuda.max_memory_allocated()/1024**3 at the end). "
-                f"The server also samples per-job VRAM, but nothing exposes it per job -- do not "
-                f"promise the user they can just look it up afterwards.")
+                f"itself (PyTorch: print torch.cuda.max_memory_reserved()/1024**3 at the end, then "
+                f"declare that + the host-side peak, with margin). "
+                f"Afterwards `advise.py gpu-peak <jobid>` reads the per-job VRAM the server sampled -- "
+                f"a LOWER bound only (5s sampling can miss spikes). If fewer than {floor_gib}G are "
+                f"schedulable right now, omitting --mem makes the job QUEUE (see run_now). "
+                f"This applies to sbatch only: an interactive debug session cannot omit it "
+                f"(debug-start needs --mem-gb; see debug-session.md for how to estimate).")
             rec["basis"].append(
-                f"Cost of that default: only {round(pool - floor, 1)}G left for everyone else "
-                f"while this runs. Worth it once, to get a real measurement.")
+                f"Cost of that default: only {round(pool - floor_gib, 1)}G left for everyone else "
+                f"while this runs. Worth it once, to get a real measurement -- but for a long run "
+                f"(a day or more), measure with a few-minute short run first instead of holding "
+                f"{floor_gib}G for days.")
             rec["warnings"].append(
                 "If you already know roughly how much VRAM this needs, pass --mem-guess instead "
                 "-- declaring a smaller number lets others use the machine alongside you.")
@@ -1366,10 +1475,24 @@ def cmd_recommend(cfg, tool, needs_gpu, mem_guess, cpus, time_guess):
             f"没传 --cpus 会落 Slurm 默认 1 核，别让并行工具白跑单核。")
 
     if needs_gpu:
-        rec["run_now"] = not st["gpu_job_running"]
-        if st["gpu_job_running"]:
+        # 卡空着也可能排队：GPU 作业一样要内存和核。2026-10-13 可调度内存只剩 23G 时，
+        # 申报 30G 的 GPU 作业照样得等。没写 --mem 的按 lua 兜底的 96G 算。
+        gpu_ok = not st["gpu_job_running"]
+        mem_need = rec["mem_gb"] or floor_gib
+        mem_ok = mem_need <= st["mem_schedulable_gb"]
+        cpu_ok = rec["cpus"] is None or cpu_free is None or rec["cpus"] <= cpu_free
+        rec["run_now"] = gpu_ok and mem_ok and cpu_ok
+        if not gpu_ok:
             rec["warnings"].append(
                 f"GPU is BUSY now ({st['pending_count']} already queued) -> your job will QUEUE.")
+        if not mem_ok:
+            rec["warnings"].append(
+                f"Needs {mem_need}G" + ("" if rec["mem_gb"] else f" (no --mem -> lua default 96000M = {floor_gib}G)")
+                + f" but only {st['mem_schedulable_gb']}G schedulable now -> will QUEUE"
+                + (" even though the GPU is free." if gpu_ok else "."))
+        if not cpu_ok:
+            rec["warnings"].append(
+                f"Needs {rec['cpus']} cores but only {cpu_free}/{cpu_total} cores free now -> will QUEUE.")
     else:
         mem_ok = (rec["mem_gb"] or 0) <= st["mem_schedulable_gb"]
         cpu_ok = rec["cpus"] is None or cpu_free is None or rec["cpus"] <= cpu_free
@@ -1437,23 +1560,27 @@ def cpus_warning(gres, cpus):
             "或显式 --cpus。")
 
 
-def vram_cap_block(mem_gb, pool_gb):
-    """生成一段可直接粘进脚本的显存自限提示（按申报量算好比例）。
+def vram_cap_block(mem_gb, declared=None):
+    """生成一段可直接粘进脚本的显存自限提示：上限 = 申报量。
 
     刻意生成成**注释**而不是可执行代码：不同工具限制显存的方式完全不同，
-    自动插一行 torch 调用可能直接改坏用户的程序。给出算好的数字让人自己选。
+    自动插一行 torch 调用可能直接改坏用户的程序。
+
+    比例不在这里算死：GB10 是统一内存，nvidia-smi 报不出显存总量（[N/A]），torch 的
+    total_memory 接近整机（约 121.7 GiB），比 Slurm 可分配的 111 GiB 大。拿可分配量当分母，
+    上限会比申报高约 9%（2026-10-14 验收时发现）。所以给算式，让作业里按 total_memory 现算。
     """
-    if not mem_gb or not pool_gb:
+    if not mem_gb:
         return []
-    frac = max(0.02, min(0.95, round(float(mem_gb) / float(pool_gb), 2)))
+    frac = "min(0.95, %s * 1024**3 / torch.cuda.get_device_properties(0).total_memory)" % mem_gb
     return [
         "# ── 显存自限（强烈建议）──────────────────────────────",
-        f"# 本机 --mem 管不住显存，上面那个 {mem_gb}G 是**申报**：机器内存吃紧时",
-        f"# spark-memguard 按它对账，超出最多的作业会被冻结。请让程序自己也守住：",
-        f"#   vLLM     : --gpu-memory-utilization {frac}",
-        f"#   PyTorch  : torch.cuda.set_per_process_memory_fraction({frac})",
+        "# 本机 --mem 管不住显存，%s是**申报**：机器内存吃紧时" % (declared or "上面那个 %sG " % mem_gb),
+        "# spark-memguard 按它对账，超出最多的作业会被冻结。让程序自己守住（上限 = 申报量）：",
+        "#   PyTorch  : torch.cuda.set_per_process_memory_fraction(%s)" % frac,
+        "#   vLLM     : --gpu-memory-utilization $(python -c 'import torch; print(round(%s, 2))')" % frac,
         "#   不支持的工具（如 Boltz）：控制输入规模；结尾自己打印",
-        "#     torch.cuda.max_memory_allocated()/1024**3  拿到真值后修正申报",
+        "#     torch.cuda.max_memory_reserved()/1024**3，下次申报 = 它 + 主机侧峰值，再留余量",
         "# ─────────────────────────────────────────────────────",
     ]
 
@@ -1490,9 +1617,10 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
         # GPU 作业不写 --mem 是合法的（lua 兜底给 96G），但要让人知道这是有意为之
         L.append("# 未写 --mem：job_submit.lua 会兜底预留 96000M（这一趟别人只剩 ~18G）。")
         L.append("# 想让下一趟能精确申报，让程序自己报峰值 —— PyTorch 在结尾加：")
-        L.append("#   print('VRAM peak GB:', torch.cuda.max_memory_allocated()/1024**3)")
-        L.append("# 拿到数后改成 #SBATCH --mem=<实测+30%>G，别人就能和你同时用机器。")
-        L.append("# （服务器侧也在采显存，但按作业的值取不回来，别指望跑完去面板查。）")
+        L.append("#   print('VRAM peak GB:', torch.cuda.max_memory_reserved()/1024**3)")
+        L.append("# 下次改成 #SBATCH --mem=<显存峰值 + 主机侧峰值，再加 30%>G，别人就能和你同时用机器。")
+        L.append("# 要跑一天以上的，先用同样参数跑几分钟短版拿峰值，别让别人连着几天只剩 ~18G。")
+        L.append("# （跑完也能用 advise.py gpu-peak <作业号> 读服务器采到的显存，但那只是下界。）")
     if time:
         L.append(f"#SBATCH --time={time}")
     if workdir:
@@ -1508,19 +1636,27 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
         L.append("#SBATCH --output=logs/%x-%j.log")
     else:
         L.append("#SBATCH --output=%x-%j.log")
+    # 和 /opt/bio/share/templates 的模板一致：出错就停，管道里任何一步失败都算失败。
+    # 模板写的是 -euo，这里不带 -u：--command 原样写进来，命令里常有 conda activate，
+    # 它的激活脚本在 -u 下会报 unbound variable。必须放在最后一个 #SBATCH 之后 ——
+    # sbatch 遇到第一条真命令就不再读 #SBATCH。
+    L += ["", "set -eo pipefail"]
     if is_gpu:
-        try:
-            pool = cmd_status(cfg).get("mem_allocatable_gb")
-        except Exception:
-            pool = None       # 连不上服务器不该让生成脚本失败，只是少一段提示
-        if pool:
-            L += [""] + vram_cap_block(mem_gb, pool)
+        # 没写 --mem 的按 lua 兜底的 96000M 算：第一次跑、没估计正是最需要自限的时候
+        floor_gib = round(cfg.get("gpu_floor_gb", 96) * 1000 / 1024, 2)
+        L += [""] + vram_cap_block(
+            mem_gb or floor_gib,
+            None if mem_gb else "这趟没写 --mem，lua 兜底预留的 96000M（≈%sG）" % floor_gib)
     L += ["", command or "# TODO: your command here", ""]
     script = "\n".join(L)
     result = {"sbatch_script": script}
     if out:
-        with open(out, "w", encoding="utf-8", newline="\n") as f:
-            f.write(script)
+        out = local_path(out)
+        try:
+            with open(out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(script)
+        except OSError as e:
+            die(f"写不了 --out {out}：{e}")
         result["written_to"] = out
     warns = [w for w in (gpu_cap_warning(gres, command),
                          cpus_warning(gres, cpus),
@@ -1533,10 +1669,14 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
 
 
 def cmd_submit(cfg, script_path):
+    script_path = local_path(script_path)
     if not os.path.exists(script_path):
         die(f"script not found: {script_path}")
-    with open(script_path, encoding="utf-8") as f:
-        script = f.read()
+    try:
+        with open(script_path, encoding="utf-8") as f:
+            script = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        die(f"读不了 --script {script_path}：{e}")
     # --chdir 的目标和它下面的 logs/ 必须在作业启动前就存在：Slurm 打不开 --output
     # 指定的文件时，作业直接失败，而且失败信息本身也没地方写。
     created = None
@@ -1707,6 +1847,8 @@ def cmd_init(user, host, node, partition, gpu_pool_gb, gpu_floor_gb):
 
 DEBUG_DEFAULT_TIME = "6:00:00"   # 默认 6 小时。够长到不会在干活途中被掐，
                                  # 又短到不能拿调试会话当批处理使（正经长活该走 sbatch）。
+DEBUG_GPU_DEFAULT_TIME = "2:00:00"  # 带 --gpu 的会话默认 2 小时：会话开着就占着唯一那块卡，
+                                    # 超过 1 小时卡闲着又有人等卡，面板会公开点名（debug-session.md）
 DEBUG_WARN_FRACTION = 0.25       # 剩余不足 1/4 时开始催「去排下一个会话」。
                                  # 用比例不用固定值：时限不能延长，只能重开，
                                  # 而重开要重新排队 —— 会话越长，需要的提前量越大。
@@ -1784,7 +1926,7 @@ def _is_interactive(cfg, jobid):
 
 
 def cmd_debug_start(cfg, time_str, cpus, mem_gb, gpu, name, wait_secs):
-    time_str = time_str or DEBUG_DEFAULT_TIME
+    time_str = time_str or (DEBUG_GPU_DEFAULT_TIME if gpu else DEBUG_DEFAULT_TIME)
     name = name or ("debug-" + cfg["user"])
     parts = ["salloc", "--no-shell", "--immediate=%d" % int(wait_secs),
              "--job-name=%s" % shlex.quote(name),
@@ -1803,7 +1945,7 @@ def cmd_debug_start(cfg, time_str, cpus, mem_gb, gpu, name, wait_secs):
         # 缩小 / 去 GPU / 等 —— 不在这里替用户选。
         return {"ok": False, "reason": "not_granted",
                 "salloc_output": blob[:600],
-                "server_now": cmd_status(cfg),
+                "server_now": _soft(cmd_status, cfg),   # 查不到就是 null，不丢掉这份结果
                 "hint": "机器现在腾不出这个规格。可以：① 缩小 --cpus / --mem-gb "
                         "② 去掉 --gpu ③ 等正在跑的作业结束（server_now 里有还剩多久）"}
     info = _debug_session_info(cfg, jid) or {}
@@ -1816,7 +1958,8 @@ def cmd_debug_start(cfg, time_str, cpus, mem_gb, gpu, name, wait_secs):
             "run_with": "advise.py debug-run --jobid %s --command '...'" % jid,
             "end_with": "advise.py debug-end --jobid %s" % jid,
             "note": "会话到 --time 自动释放。别人在 squeue 里看到的是一个正常作业，"
-                    "名字 '%s' —— 有名有姓有上限，不会被当成卡死的作业。" % name}
+                    "名字 '%s' —— 有名有姓有上限，不会被当成卡死的作业。" % name,
+            "warnings": [w for w in [cpus_warning("gpu:1" if gpu else None, cpus)] if w]}
 
 
 DEBUG_RUN_DIR = "$HOME/.spark-debug"      # 每个会话一个子目录，存 cmd/out/rc
@@ -1906,6 +2049,11 @@ def cmd_debug_run(cfg, jobid, command, wait):
 
     result = _debug_outcome(jid, run_no, state, exit_rc, output, after, wait, perr)
     result["wall_seconds"] = elapsed
+    # gen-sbatch 会提醒的坑，会话这条路也要提醒：Boltz 卡死时 debug-run / debug-log
+    # 只会一直返回 pending，调用方照规矩接着等，就成了无限轮询
+    w = boltz_num_workers_warning(command)
+    if w:
+        result.setdefault("warnings", []).append(w)
     return result
 
 
@@ -2137,8 +2285,10 @@ def main():
     w.add_argument("--interval", type=float, default=8.0,
                    help="轮询间隔秒数（默认 8）")
     w.add_argument("--max-wait", type=float, default=0,
-                   help="监控自身的最长存活秒数，0 = 不限。超时返回 20，"
-                        "含义是「监控放弃了」而不是「作业超时了」")
+                   help="监控自身的最长存活秒数，0 = 不限（作业自己卡死、没被冻结时会一直等到作业时限）。"
+                        "建议按预计时长带上。超时返回 20，含义是「监控放弃了」而不是「作业超时了」。"
+                        "返回码：0 正常 / 10 退出码非零 / 11 被冻结 / 12 被取消 / 13 失败 / "
+                        "20 监控超时 / 21 查询失败 / 22 没有这个作业 / 255 连不上")
 
     # 干净地取消一个被冻结的作业：解冻 → 取消 → 确认真的退干净了。
     # 直接 scancel 一个冻结的作业会让它永久卡住且不还内存 —— 这条命令的全部意义
@@ -2156,9 +2306,12 @@ def main():
     # 交互式调试会话。默认 6 小时，理由见 cmd_debug_start 上面那段注释。
     ds = sub.add_parser("debug-start")
     ds.add_argument("--time", default=None,
-                    help="会话时长，默认 6:00:00。时限不能事后延长，往大了报")
+                    help="会话时长，默认 6:00:00；带 --gpu 默认 2:00:00（占着唯一那块卡）。"
+                         "时限不能事后延长，CPU 会话往大了报")
     ds.add_argument("--cpus", type=int, default=None)
-    ds.add_argument("--mem-gb", type=int, default=None)
+    ds.add_argument("--mem-gb", type=int, required=True,
+                    help="必填。不写的话：CPU 会话被 job_submit.lua 拒绝；GPU 会话按 96G 兜底，"
+                         "内存紧时根本申请不到。拿不准就先用 recommend 估一个")
     ds.add_argument("--gpu", action="store_true", help="会话要占 GPU")
     ds.add_argument("--name", default=None,
                     help="squeue 里显示的名字，默认 debug-<user>")

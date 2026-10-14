@@ -8,8 +8,9 @@
 ## 架构与底座
 - **aarch64**，DGX OS（Ubuntu 24.04 基底），定制内核 `6.17-nvidia`
 - GPU：GB10（统一内存，无独立显存框），驱动 580，**CUDA 13.0**
-- 系统 Python 3.12、gcc 13.3（可从源码编译）、**docker 可用**
-- **系统无 conda/mamba** —— 要 conda 得自己在家目录装 miniforge
+- 系统 Python 3.12、gcc 13.3（可从源码编译）
+- **docker 普通用户用不了**：装了，但用户不在 docker 组（2026-10-14 核实，`/ai.md` 也这么写）
+- **公共软件优先**：`/opt/bio/bin` 里有大量工具，`micromamba` 也是公共的；要自己装照 `/ai.md`：优先 pixi，不新建 conda 环境
 
 ### ⚠ 「查不到」≠「没装」——非交互 ssh 的 PATH 是残缺的
 
@@ -71,9 +72,9 @@ print(d['latest_version'], sorted({f.get('attrs',{}).get('subdir') for f in d['f
 ```
 
 ## 建议用法
-- **每人在自己家目录建 venv 或 conda 环境**（隔离、钉死依赖）；别裸依赖系统 Python。
-- 装包优先 pip wheel → 没 wheel 再考虑 conda(自装 miniforge) 或源码编译。
-- 需要复杂/x86-only 依赖时可考虑 docker（但要 ARM 镜像）。
+- **先查公共区有没有**（`software find`），有就直接用 `/opt/bio/bin` 里的。
+- 要自己装：照 `/ai.md`，命令行工具用 `pixi global install`，项目要钉版本就在项目里 `pixi init` / `pixi add`；纯 Python 依赖可以用 venv。别裸依赖系统 Python。
+- 装包优先 pip wheel（要 aarch64 的），没有 wheel 再考虑源码编译。docker 普通用户用不了。
 
 ## 陈旧提示
 本文件是手工经验，`env-profile.local.json` 是自动实时探测。两者冲突以实时探测为准，并回来更新本文件。

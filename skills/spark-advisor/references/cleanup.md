@@ -17,7 +17,7 @@
     python scripts/advise.py cleanup apply P --action archive --env           # 预演：先原样打包到 NAS 再删
     python scripts/advise.py cleanup apply P --action … --yes                 # 真执行
 
-路径用 scan 结果里的 `path`。
+环境路径用 scan 结果里的 `path`；它属于哪个项目，看 `created_from` 和 `refs` 指向的位置。要找 scan 结果以外的项目目录时照 SKILL.md：先读 `references/workspace-layout.local.md`，没有这个文件就问用户，别自己编。
 - 在 Windows 的 Git Bash 里直接传绝对路径也可以，被 Git Bash 改写的路径会自动还原；统一带 `MSYS_NO_PATHCONV=1` 最省事（`gen-sbatch` 的 `--workdir` 不会自动还原）。
 - 也可以传带引号的 `'~/…'`。
 
@@ -49,7 +49,7 @@
   - 只认按环境名激活和绝对路径（含 `~/`、`$HOME/` 写法）。**相对路径和用变量拼的路径查不到**，比如 `./_data/envs/<名>`、`$D/_data/envs/<名>`。
   - 所以环境在项目目录里（如 `<项目>/_data/envs/<名>`，`type` 是 `conda-prefix`，引擎会附一句 `refs_note`）时，`refs` 为空不算数，要自己在那个项目里只读搜一遍，再问用户项目还用不用它：
     - 搜 `envs/<名>`、`activate <名>`、`-n <名>`，别搜光秃秃的环境名（`bio` 会命中 biopython）；
-    - 加 `--exclude-dir=_data --exclude-dir=.git`（环境自己就在 `_data` 里），用 `--include` 只看 `.sh .py .R .qmd .Rmd .smk .sbatch .yml` 这类脚本文件。
+    - 加 `--exclude-dir=_data --exclude-dir=.git`（环境自己就在 `_data` 里），用 `--include` 只看脚本和配置：`.sh .bash .py .R .qmd .Rmd .smk .sbatch .slurm .nf .yml .yaml`（文档 `.md` 里的命中只作参考）。
 - **`in_use`**：正在用它的进程和作业（包括脚本里按环境名激活它的排队作业）。`other_jobs` 是用户另外还有几个作业在排队或在跑。
 - **`created_from`**：环境是用什么命令建的。从项目的 `environment.yml` 建出来的，多半是项目环境。
 - **`suggest.action`**：`remove`、`keep`、`wait`、`link`（只用于数据库副本）、`none`。部分重复的一律是 `keep`：换不换由你按下面的规则和用户一起判断。
@@ -69,7 +69,7 @@
 - 只凭名字对上的，只算线索，先问用户一句。
 - 环境还被项目外的脚本用着（`refs` 在项目外）：就算项目已经搬走，也先告诉用户，打包后那些脚本会失效。
 
-项目已经搬到 NAS（`cleanup archived` 里有），或用户说课题结束了：**打包到 NAS 再删**（`--action archive --env`），不用再问 ②。
+项目已经搬到 NAS（`cleanup archived` 里有；这条命令会顺手重写个人清单 `references/nas-archive.local.md`，无害。只想确认一个项目的话，看它原处有没有 `<名>.ON_NAS.txt` 就够了），或用户说课题结束了：**打包到 NAS 再删**（`--action archive --env`），不用再问 ②。
 
 **② 还在用，换不换成公共版？** 从上往下看，**第一条对上的就是结论**。下表的「保留」只是不换；以后不用了，照样可以按 ① 打包。
 
@@ -79,6 +79,7 @@
 | 公共版比用户的**旧**（`public_older` 不为空） | 保留：换过去等于降级 |
 | 和数据库版本绑定的工具（Bakta、GTDB-Tk、CheckV、geNomad 这类，工具版本决定能读哪版数据库） | 保留，除非用户确认数据库也一起换 |
 | 课题还在写论文、已经用这个版本出过结果 | 保留（可复现）；论文发了再处理 |
+| 脚本直接调环境里的 `python` | `/opt/bio/bin` 里没有 python。脚本只用标准库的，可以改用系统的 `/usr/bin/python3`（3.12），但要用小数据实测一遍；环境钉了别的 python 版本、或用到第三方包的，按下一行保留。R 不受影响：`Rscript` 走公共的 `/opt/bio/bin/Rscript` |
 | 脚本是用 `import` / `library()` 调用环境里的库 | 保留：库换不成 `/opt/bio/bin` 下的命令 |
 | 用到了公共区没有的包，或环境里放了数据（`reasons` 里有不属于任何包的文件，比如下载进环境的数据库） | 保留，或先用 `software` 申请装进公共区 |
 | `major` 差距，或 `0.x` 版本的 `minor` 差距 | 默认保留：大版本、0.x 的小版本都可能不兼容 |
