@@ -193,20 +193,34 @@ git clone https://github.com/hugohe3/ppt-master.git "C:\Users\<你>\Tools\ppt-ma
 
 ### `qproj-helper` — qproj 工作流指导助手
 
-**用途**：指导用户使用 [qproj](https://github.com/rujinlong/qproj)（轻量级 Quarto 分析工作流脚手架）。Claude Code 无法直接操作 R Console，因此本 Skill 的核心是**分析用户所处阶段，给出可粘贴到 Console 的 R 命令**。
+**用途**：指导用户使用 [qproj](https://github.com/rujinlong/qproj)（轻量级 Quarto 分析工作流脚手架），**按 qproj 0.12.0 写**。两类工作分开：在已有项目里写 / 改 `.qmd` 分析代码、跑渲染与检查，由 Claude 直接动手；建项目、建步骤这类结构决策，给出可粘贴到 R Console 的命令。
 
-**触发词**：`qproj`、`创建qmd`、`新建分析步骤`、`初始化分析项目`、`path_target`、`path_source`
+**触发词**：`qproj`、`创建qmd`、`新建分析步骤`、`初始化分析项目`、`path_target`、`path_source`、`proj_doctor`、`lineage`、`qg`
 
 **核心功能**：
-- **7 场景决策树**：从零建项目、添加分析步骤、数据放哪、读上游数据、已有文件夹初始化、依赖管理、概念解释
-- **CLAUDE.md 模板生成**：初始化完成后，引导用户生成项目级 CLAUDE.md（含 qproj path binding 规则），通过逐板块问答完善内容
-- **qproj 速查表**：四个路径绑定、核心函数、命名约定、数据流规则
+- **场景决策树**：在 `.qmd` 里写代码的铁律、从零建项目、加步骤、数据放哪、读上游、依赖管理、依赖图（`qg`）、代码怎么组织才对得上论文、体检与过期检查、Bash / Python 的 Slurm 步骤、项目数据库与样本 metadata
+- **CLAUDE.md 模板生成**：初始化完成后，引导用户生成项目级 CLAUDE.md（qproj 规则 + 代码组织判据），通过逐板块问答完善内容
+- **升级预检**：`scripts/preflight.R` 只读扫描项目，找出升级到 0.2.0+ 后渲染会中止的地方
+
+**本次更新**（上一版对应 qproj 0.1.5）—— qproj 这几个月的行为变化，skill 已全部跟上：
+
+| | 0.1.x | 0.12.0 |
+|---|---|---|
+| 读编号更大的步骤 | 警告 | **渲染中止**（`qproj_order_error`） |
+| `params$name` 与文件名不符 | 不查 | **渲染中止**（`qproj_identity_error`） |
+| `clean` 默认值 | `TRUE` | `FALSE` |
+| `_quarto.yml` 的 `cache` | 全局 `true` | 不设，逐 chunk 开；`proj_doctor()` 体检 |
+| 每次渲染读了什么、写了什么 | 无记录 | `.qproj/provenance/` 运行记录 + `proj_lineage_check()` |
+| 手拼路径读别的步骤的 `d<step>/` | — | `qg bypass` 标为反模式，且逃过运行记录 |
+| 新增 | — | `use_manuscript()`、项目数据库 `proj_db_*`、metadata 工作簿、Bash / Python 步骤（`qproj.sh` / `qproj.py`） |
 
 **配套文件**：
-- `templates/CLAUDE-qproj.md` — 项目级 CLAUDE.md 模板（98 行），初始化时复制到项目根目录
-- `references/qproj-guide.md` — 完整使用指南（553 行），复杂问题时按需读取
+- `templates/CLAUDE-qproj.md` — 项目级 CLAUDE.md 模板（130 行），初始化时复制到项目根目录
+- `references/qproj-guide.md` — 完整使用指南（998 行，按需读取；第二十节是从 0.1.x 升级）
+- `references/qproj-authoring-guide.md` — 何时拆 `.qmd`、何时抽函数、怎么接论文（92 行）
+- `scripts/preflight.R` — 升级前的只读预检
 
-**依赖**：需先安装 qproj R 包（`pak::pak("rujinlong/qproj")`）
+**依赖**：qproj ≥ 0.12.0（spark 的公共 R 已装；本机 `pak::pak("rujinlong/qproj")`）；`qg` 需要 `jq`
 
 ---
 
@@ -315,11 +329,14 @@ skills/
 │   ├── WARP.md
 │   └── consultation-notes.md
 └── qproj-helper/
-    ├── SKILL.md                   ← 决策树 + 引导问题（220 行）
+    ├── SKILL.md                   ← 决策树 + 引导问题（464 行，按 qproj 0.12.0）
     ├── templates/
-    │   └── CLAUDE-qproj.md        ← 项目级 CLAUDE.md 模板（98 行）
-    └── references/
-        └── qproj-guide.md         ← 完整使用指南（553 行，按需读取）
+    │   └── CLAUDE-qproj.md        ← 项目级 CLAUDE.md 模板（130 行）
+    ├── references/
+    │   ├── qproj-guide.md         ← 完整使用指南（998 行，按需读取）
+    │   └── qproj-authoring-guide.md ← 代码组织与论文映射（92 行）
+    └── scripts/
+        └── preflight.R            ← 升级前只读预检
 tools/
 └── weekly-summary/
     ├── README.md
