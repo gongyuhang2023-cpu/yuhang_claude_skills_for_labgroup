@@ -5,6 +5,7 @@
     "notes.date 早于该 skill 最后一次改动时，面板改列这段时间的提交说明，所以没写说明也不会显示过期内容。",
     "skills/ 下新增的 skill 不登记也会出现（用途取 SKILL.md 的 description 第一句）；不想上面板的写进 exclude。",
     "notify_since 之后的新版本和新 skill 会给每个人弹出提醒卡片，直到他复制提示词或点「不再提示」。",
+    "提醒只认 changes：notes 只写了 headline、没写 changes 的新版本不会弹提醒卡片。",
     "repo 缺省为本仓库、path 缺省为 skills/<name>；install 为 readme 的照那个仓库 README 的安装说明装。",
     "care 是安装、更新时都要 AI 注意的事；care_install 只进安装提示词，care_update 只进更新提示词。"
   ],
@@ -80,7 +81,13 @@
       "care_update": "这一版新增服务器转录：在它的目录重新运行 python install.py --profile both（本机和 spark 都能选）或 --profile server；不带参数重跑会保持原来的本机转录。",
       "notes": {
         "date": "2026-10-23",
-        "headline": "转录可以交给 spark（不需要显卡）；云盘上有人传过的会直接复用；解读完一键上传云盘；修复只装 [transcribe] 时录不了"
+        "headline": "转录可以交给 spark，不需要显卡；和实验室云盘打通",
+        "changes": [
+          "服务器转录：音频传到 spark 排队转录，转完即删，本机不需要显卡；安装时用 --profile 选 server、local 或 both",
+          "云盘复用：转录前先查实验室云盘，同一场会有人传过，就直接用现成的转录或结果",
+          "上传云盘：解读完问你要不要上传，上传前先查有没有人传过",
+          "修复：08-25 以后按默认方式装的，录制一启动就报缺 torchaudio"
+        ]
       }
     },
     {
