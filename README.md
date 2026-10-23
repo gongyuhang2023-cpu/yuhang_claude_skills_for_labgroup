@@ -30,11 +30,24 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ### `meeting_mind` — 会议录制全流程（线上 + **面对面**）
 
-**用途**：一键录制会议，自动完成音频抓取 + PPT 翻页截图 + 本地 ASR 转录 + Claude 分批并行解读 → `interpretation.md` + `summary.md` 两份产物。
+**用途**：一键录制会议，自动完成音频抓取 + PPT 翻页截图 + ASR 转录（本机，或交给实验室服务器 spark）+ Claude 分批并行解读 → `interpretation.md` + `summary.md` 两份产物，问过你之后上传实验室云盘。
 
 **触发词**：`录会议`、`录个会议`、`开始录制`、`start recording a meeting`
 
-**本次更新相比库里的上一版，是一个代际的差距**：
+**2026-10 更新：和实验室云盘打通**
+- 录完、转录之前，先查实验室云盘的会议文件夹里有没有同一场会（同一天、录制时间重叠过半）。有的话可以直接用别人的结果，或者只用他的转录、自己结合项目做解读（时间轴会自动对齐到你自己的截图），省掉转录。
+- 解读完问你要不要上传：截图、转录、解读、总结，加上压成 FLAC 的音频（约为 WAV 的 5%）。已经有人传过就选不传、只补充你的解读，或另存一份；断点续传。
+- 第一次用时在浏览器里登录实验室账号授权一次，应用密码存在系统钥匙串里，可在云盘「设置 → 安全」里吊销；云盘地址自动从 spark 取。
+
+**2026-10 更新：转录可以交给 spark**
+- 安装时选档位：`--profile server`（交给 spark，不装 torch、不下模型，几分钟装完，核显电脑也能用）、`local`（本机 N 卡）、`both`（每次转录前再选）。
+- 服务器转录按正常 Slurm 排队，是一个 GPU 作业：33 分钟的会，从上传到取回约 3 分钟（GPU 空闲时）。环境和模型全组共用一份，装在 spark 的 `/opt/bio`。
+- 音频压成 16 kHz 单声道 FLAC 上传（每小时 30-40 MB），放在只有自己能读、不进备份的目录里，**作业一结束就删**。
+- 中途断网、关掉会话都不怕：再跑同一条命令会接着等原来的作业，不会重复提交。
+- 修复：只装了 `[transcribe]` 的安装从 08-25 起 `record` 会因缺 torchaudio 启动失败，这版修好了。
+- macOS 录制在开发中；录制目前仍只支持 Windows。
+
+**09 月那次更新相比再上一版**：
 
 | 能力 | 上一版 | 现在 |
 |------|--------|------|
@@ -52,22 +65,22 @@ cp -r skills/<skill-name> ~/.claude/skills/
 **工作流**：
 1. 说"录会议" → 一次问清主题/软件/灵敏度/麦克风
 2. 后台启动 `meetingmind record`，停止信号靠写 `STOP` 文件
-3. 说"结束了" → 触发 STOP → 等录制进程退出 → 自动 `postprocess`（resample + Qwen3-ASR + 写 `ai_input.json`）
+3. 说"结束了" → 触发 STOP → 等录制进程退出 → 两种都装时问一句在哪转录 → `postprocess`（本机 Qwen3-ASR，或交给 spark 排队转录）→ 写 `ai_input.json`
 4. **自动进入 AI 解读**：过滤 revisit → 并行 sub-agent（每批 5 张图 + 完整 transcript）→ 合并 `interpretation.md` → `summary.md`
 
 **安装**：
 ```bash
 cp -r skills/meeting_mind ~/.claude/skills/
 cd ~/.claude/skills/meeting_mind
-python install.py
+python install.py --profile server   # 交给 spark 转录（推荐）；有 N 卡想本机转录用 --profile both
 ```
-6 步全自动（Python/Windows/CUDA 检测 → 建自己的 venv → 装 `[transcribe]` extras → 覆盖为 `vendor/proctap` 补丁版）。首次跑会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`。
+不给 `--profile` 会先问你；更新 skill 后不带参数重跑会沿用原来的档位。server / both 档要能 `ssh spark` 免密登录（按服务器使用指南配好）。local / both 档首次转录会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`。
 
 **依赖**（装进 skill 自带 venv，**不污染你其他项目**）：
-- 核心：`proc-tap`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`
-- 转录：`torch+cu128`、`transformers`、`qwen-asr`、`librosa`、`soundfile`、`accelerate`
+- 录制：`proc-tap`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`、`soundfile`、`soxr`
+- 本机转录（local / both 档）：`torch+cu128`、`transformers`、`qwen-asr`、`librosa`、`accelerate`
 
-**系统要求**：Windows 10 build 19041+ / Windows 11 + Python 3.10+ + NVIDIA GPU（推荐 6 GB+ 显存；CPU 可跑但慢 5-10×）
+**系统要求**：录制需要 Windows 10 build 19041+ / Windows 11 + Python 3.10+。转录：server 档不需要显卡；local 档需要 NVIDIA GPU（推荐 6 GB+ 显存；CPU 可跑但慢 5-10×）。
 
 **注意**：
 - 会议数据默认存本地 `~/Report/Group_Meeting/<date>-<topic>/`，**不外发**。AI 解读会把截图 + transcript 发给 Claude API，受 [Anthropic Privacy Policy](https://www.anthropic.com/legal/privacy) 约束；会议特别敏感时只跑到 transcript 阶段。

@@ -1,16 +1,25 @@
 """MeetingMind 一键安装脚本（朋友圈版）.
 
 朋友拿到 repo 后：
-    python install.py
+    python install.py                      # 会问转录在哪里跑
+    python install.py --profile server     # 不问：server / local / both
 
-会完成六件事：
+转录在哪里跑（--profile）：
+    server  交给实验室服务器 spark（不装 torch、不下模型；Mac / 核显电脑也能用）
+    local   在这台电脑上跑（要 N 卡，多装约 5 GB 依赖 + 4.4 GB 模型）
+    both    两个都装，每次转录前再选
+
+会完成这些事：
     1. Python ≥ 3.10 检查
-    2. Windows 10 build 19041+ 检查（非 Windows 警告但允许继续）
-    3. CUDA / GPU 探测（nvidia-smi）
-    4. 创建 .venv（已存在则跳过）
-    5. 装 [transcribe] extras（torch / qwen-asr / librosa 等）
-       5b. 覆盖为 vendor/proctap 的补丁版 proctap（修 WASAPI loopback 静音）
-    6. 部署 Claude Code skill 到 ~/.claude/skills/meetingmind/
+    2. 系统检查（Windows 10 build 19041+；其它系统警告但允许继续）
+    3. 选档位（不给 --profile 时沿用已有配置；已装过本机版的保持 local；
+       全新安装默认 server）
+    4. CUDA / GPU 探测（nvidia-smi，仅 local / both）
+    5. 创建 .venv（已存在则跳过）
+    6. 装依赖：server 只装录制部分；local / both 加装 [transcribe]
+       6b. 覆盖为 vendor/proctap 的补丁版 proctap（修 WASAPI loopback 静音，仅 Windows）
+    7. 连 spark 自检（仅 server / both）
+    8. 写配置 ~/.meetingmind/config.json，部署 Claude Code skill
 
 整个流程跑在**系统 Python** 下（朋友的 Python，未激活 venv），
 通过 subprocess 派生子进程调 .venv 里的 Python。
@@ -21,7 +30,10 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import json
+import os
 import platform
 import subprocess
 import sys
@@ -32,6 +44,15 @@ VENV_DIR = REPO_ROOT / ".venv"
 PYPI_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/"
 WINDOWS_UPDATE_URL = "https://support.microsoft.com/windows/update"
+TOTAL_STEPS = 8
+
+#: --profile → the backends written to the config (first = default).
+PROFILES: dict[str, list[str]] = {
+    "server": ["spark"],
+    "local": ["local"],
+    "both": ["spark", "local"],
+}
+DEFAULT_SPARK_HOST = "spark"
 
 
 # --------------------------------------------------------------------- helpers
@@ -57,7 +78,7 @@ def _harden_stdio_encoding() -> None:
 def _format_step_header(step_num: int, title: str) -> str:
     """统一的步骤分隔符 — 所有步骤视觉上一致，输出像 checklist。"""
     bar = "═" * 60
-    return f"\n{bar}\n[步骤 {step_num}/6] {title}\n{bar}"
+    return f"\n{bar}\n[步骤 {step_num}/{TOTAL_STEPS}] {title}\n{bar}"
 
 
 def _parse_python_version(version: tuple[int, int, int]) -> tuple[bool, str]:
@@ -109,8 +130,9 @@ def check_windows() -> bool:
         print(
             f"⚠️ 非 Windows 系统（检测到 {system}）。\n"
             f"MeetingMind 的录音模块（ProcTap）+ 截图模块（Windows Graphics "
-            f"Capture API）只在 Windows 10 build 19041+ / Windows 11 工作。\n"
-            f"你可以继续装、看代码 / 跑测试，但 record 子命令会失败。"
+            f"Capture API）目前只在 Windows 10 build 19041+ / Windows 11 工作，"
+            f"macOS 录制正在开发。\n"
+            f"可以继续装：转录（尤其 --profile server）不受影响，但 record 子命令暂时用不了。"
         )
         return True
 
@@ -175,7 +197,10 @@ def detect_cuda() -> str | None:
 def confirm_continue_without_gpu() -> bool:
     """没 GPU 时问朋友：还装吗？默认 yes（朋友可能想先装着以后买 GPU）。"""
     try:
-        ans = input("没检测到 GPU，CPU 推理会慢 5-10 倍。继续装吗？(Y/n): ").strip().lower()
+        ans = input(
+            "没检测到 GPU，本机转录会慢 5-10 倍（可改用 --profile server 交给 spark）。"
+            "继续装本机版吗？(Y/n): "
+        ).strip().lower()
     except EOFError:
         # 非交互环境（CI / pipe）→ 默认继续
         return True
@@ -224,8 +249,144 @@ def create_venv() -> bool:
     return True
 
 
-def pip_install_extras(has_cuda: bool) -> bool:
-    """在 .venv 里跑 `pip install -e ".[transcribe]" [--extra-index-url ...]`."""
+def _config_path() -> Path:
+    """Same rule as meetingmind.config.config_path (install.py runs outside the venv)."""
+    override = os.environ.get("MEETINGMIND_CONFIG")
+    return Path(override).expanduser() if override else Path.home() / ".meetingmind" / "config.json"
+
+
+def read_existing_profile() -> str | None:
+    """已有配置对应的档位；没有或读不了则 None。"""
+    try:
+        data = json.loads(_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    backends = data.get("backends") or []
+    for name, wanted in PROFILES.items():
+        if sorted(wanted) == sorted(backends):
+            return name
+    return None
+
+
+def venv_has_torch() -> bool:
+    """.venv 里是否已经装了 torch —— 说明这是一次本机版安装的重跑。"""
+    venv_py = _venv_python()
+    if not venv_py.is_file():
+        return False
+    code = "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('torch') else 1)"
+    try:
+        return subprocess.run([str(venv_py), "-c", code], timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def choose_profile(requested: str | None) -> str:
+    """定下档位。没给 --profile 时**不改变已有安装的行为**：
+
+    更新 skill 时常常是 AI 不带参数重跑本脚本。已经在用本机转录的人，
+    不能因为新版默认 server 就被悄悄改成只能交给服务器。
+    """
+    if requested:
+        return requested
+    existing = read_existing_profile()
+    if existing:
+        default, why = existing, "沿用已有配置"
+    elif venv_has_torch():
+        default, why = "local", "已装过本机转录"
+    else:
+        default, why = "server", "全新安装"
+    print(
+        "转录在哪里跑？\n"
+        "  server  交给实验室服务器 spark：不装 torch、不下模型，Mac / 核显电脑也能用\n"
+        "  local   在这台电脑上跑：需要 N 卡，多装约 5 GB 依赖 + 4.4 GB 模型\n"
+        "  both    两个都装，每次转录前再选\n"
+        "（下次可直接 `python install.py --profile server|local|both`）"
+    )
+    try:
+        ans = input(f"选择 [默认 {default}，{why}]: ").strip().lower()
+    except EOFError:
+        # 非交互环境（AI 代跑 / pipe）→ 用默认，并说清楚用了哪个
+        print(f"（非交互运行，使用 {default}：{why}）")
+        return default
+    if ans in PROFILES:
+        return ans
+    if ans:
+        print(f"⚠️ 不认识「{ans}」，使用 {default}。")
+    return default
+
+
+def check_spark(host: str) -> bool:
+    """用 venv 里刚装好的 meetingmind 连一次 spark：能免密登录、服务器端已部署、协议一致。"""
+    venv_py = _venv_python()
+    code = (
+        "import json, sys\n"
+        "from meetingmind.config import DEFAULT_SPARK_COMMAND\n"
+        "from meetingmind.remote import PROTOCOL, RemoteError, SparkClient\n"
+        "try:\n"
+        "    d = SparkClient(sys.argv[1], DEFAULT_SPARK_COMMAND).call('doctor', timeout=60)\n"
+        "except RemoteError as e:\n"
+        "    d = dict(e.data, error=str(e))\n"
+        "d['client_protocol'] = PROTOCOL\n"
+        "print(json.dumps(d, ensure_ascii=False))\n"
+    )
+    try:
+        out = subprocess.run(
+            [str(venv_py), "-c", code, host],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+        info = json.loads(out.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as exc:
+        print(f"❌ spark 自检没跑起来：{exc}")
+        return False
+
+    if info.get("error") and "protocol" not in info:
+        print(
+            f"❌ 连不上 spark 或服务器端没部署好：\n   {info['error']}\n"
+            f"   检查：Tailscale 是否在线；终端里 `ssh {host}` 能否不输密码直接登录；\n"
+            f"   都没问题的话，服务器端转录可能还没装好，联系管理员。"
+        )
+        return False
+    if info.get("protocol") != info.get("client_protocol"):
+        print(
+            f"❌ 服务器端版本（protocol {info.get('protocol')}）和本机 skill"
+            f"（protocol {info.get('client_protocol')}）不一致：先更新 skill，"
+            f"仍不一致就请管理员更新服务器端。"
+        )
+        return False
+    if not info.get("ok"):
+        print(f"❌ 服务器端自检没通过，请联系管理员：{json.dumps(info, ensure_ascii=False)}")
+        return False
+    print(f"spark 连通 ✓（服务器端 {info.get('version')}，模型 {info.get('model_dir')}）")
+    return True
+
+
+def write_config(profile: str, host: str) -> bool:
+    venv_py = _venv_python()
+    backends = PROFILES[profile]
+    # Only the transcription fields change: an existing cloud sign-in survives a re-run.
+    code = (
+        "import dataclasses, sys\n"
+        "from meetingmind import config\n"
+        "b = tuple(sys.argv[1].split(','))\n"
+        "try:\n"
+        "    old = config.load()\n"
+        "except RuntimeError:\n"
+        "    old = config.Config()\n"
+        "new = dataclasses.replace(old, backends=b, default=b[0], spark_host=sys.argv[2], path=None)\n"
+        "print(config.save(new))\n"
+    )
+    try:
+        out = subprocess.run([str(venv_py), "-c", code, ",".join(backends), host],
+                             capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"❌ 写配置失败：{exc}")
+        return False
+    print(f"配置已写入 ✓ {out.stdout.strip()}\n  转录后端：{', '.join(backends)}（默认 {backends[0]}）")
+    return True
+
+
+def pip_install(profile: str, has_cuda: bool) -> bool:
+    """在 .venv 里装依赖：server 只装录制部分，local / both 加 [transcribe]。"""
     venv_py = _venv_python()
     cmd = [
         str(venv_py),
@@ -238,19 +399,21 @@ def pip_install_extras(has_cuda: bool) -> bool:
     except subprocess.CalledProcessError as exc:
         print(f"\n⚠️ pip 升级失败（exit {exc.returncode}），继续尝试装项目（旧 pip 通常也能用）。")
 
+    local = "local" in PROFILES[profile]
     cmd = [
         str(venv_py),
         "-m", "pip", "install",
-        "-e", ".[transcribe]",
+        "-e", ".[transcribe]" if local else ".",
     ]
-    if has_cuda:
+    if not local:
+        print("装录制部分（转录交给 spark，不装 torch，几十 MB）...")
+    elif has_cuda:
         cmd.extend(["--extra-index-url", PYPI_CUDA_INDEX])
         print("装 [transcribe] extras（含 CUDA torch wheel，~2 GB 下载）...")
         print(f"  额外索引: {PYPI_CUDA_INDEX}")
+        print("（torch wheel 较大，可能要 3-10 分钟，看网速。请耐心等。）")
     else:
         print("装 [transcribe] extras（CPU 版 torch，~200 MB 下载）...")
-
-    print("（torch wheel 较大，可能要 3-10 分钟，看网速。请耐心等。）")
     print(f"  完整命令: {' '.join(cmd)}\n")
 
     try:
@@ -267,7 +430,7 @@ def pip_install_extras(has_cuda: bool) -> bool:
         )
         return False
 
-    print("\n[transcribe] extras 安装成功 ✓")
+    print("\n依赖安装成功 ✓")
     return True
 
 
@@ -371,11 +534,11 @@ def install_patched_proctap() -> bool:
 
 
 def deploy_skill() -> bool:
-    """部署 Claude Code skill 到 ~/.claude/skills/meeting_mind/.
+    """部署 Claude Code skill 到 ~/.codex/skills/meeting_mind/.
 
     两种运行场景：
       - **dev 模式**（MeetingMind 项目根）：`skill/install.py` 存在 →
-        调它把 `skill/SKILL.md` 拷到 ~/.claude/skills/meeting_mind/。
+        调它把 `skill/SKILL.md` 拷到 ~/.codex/skills/meeting_mind/。
       - **in-place 模式**（朋友拿 lab repo bundle 部署后从 skill 目录
         自身跑 install.py）：`skill/install.py` 不存在 → SKILL.md 已经
         在 skill 目录里了，跳过部署。
@@ -389,7 +552,7 @@ def deploy_skill() -> bool:
         return True
 
     venv_py = _venv_python()
-    print("部署 Claude Code skill 到 ~/.claude/skills/meeting_mind/...")
+    print("部署 Claude Code skill 到 ~/.codex/skills/meeting_mind/...")
     try:
         subprocess.run(
             [str(venv_py), str(skill_installer)],
@@ -409,8 +572,26 @@ def deploy_skill() -> bool:
 # --------------------------------------------------------------------- main
 
 
-def main() -> int:
-    _harden_stdio_encoding()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MeetingMind 安装")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default=None,
+        help="转录在哪里跑：server（交给 spark）/ local（本机）/ both。不给就询问；"
+             "非交互时沿用已有安装，全新安装用 server。",
+    )
+    parser.add_argument(
+        "--spark-host",
+        default=DEFAULT_SPARK_HOST,
+        help=f"连 spark 用的 ssh 别名（默认 {DEFAULT_SPARK_HOST}，即服务器指南里配的那个）",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    _harden_stdio_encoding()  # before argparse: --help prints Chinese
+    args = parse_args(argv)
     print("MeetingMind 一键安装脚本（朋友圈版）")
     print(f"项目根: {REPO_ROOT}")
 
@@ -423,53 +604,92 @@ def main() -> int:
         )
         return 1
 
-    # Step 2: Windows
-    print(_format_step_header(2, "Windows 版本检查"))
+    # Step 2: 系统
+    print(_format_step_header(2, "系统检查"))
     check_windows()  # 返回值忽略 — 非 Windows / 旧版本都是警告不拦
 
-    # Step 3: CUDA
-    print(_format_step_header(3, "CUDA / GPU 探测"))
-    gpu_name = detect_cuda()
-    has_cuda = gpu_name is not None
-    if not has_cuda and not confirm_continue_without_gpu():
-        print("\n用户取消安装。.venv 未创建，无副作用。")
-        return 1
+    # Step 3: 档位
+    print(_format_step_header(3, "选择转录方式"))
+    profile = choose_profile(args.profile)
+    local = "local" in PROFILES[profile]
+    server = "spark" in PROFILES[profile]
+    print(f"档位：{profile}")
 
-    # Step 4: venv
-    print(_format_step_header(4, ".venv 创建"))
+    # Step 4: CUDA（只有本机转录需要）
+    print(_format_step_header(4, "CUDA / GPU 探测"))
+    has_cuda = False
+    if local:
+        gpu_name = detect_cuda()
+        has_cuda = gpu_name is not None
+        if not has_cuda and not confirm_continue_without_gpu():
+            print("\n用户取消安装。.venv 未创建，无副作用。")
+            return 1
+    else:
+        print("server 档不在本机跑模型，跳过。")
+
+    # Step 5: venv
+    print(_format_step_header(5, ".venv 创建"))
     if not create_venv():
         return 1
 
-    # Step 5: pip install
-    print(_format_step_header(5, "装 [transcribe] 依赖"))
-    if not pip_install_extras(has_cuda):
+    # Step 6: pip install
+    print(_format_step_header(6, "装依赖"))
+    if not pip_install(profile, has_cuda):
         return 1
 
-    # Step 5b: 用本地补丁版 proctap 覆盖 PyPI 原版（否则录音可能静音）
-    print("\n— 步骤 5b：覆盖为本地补丁版 proctap（vendor/proctap）—")
-    proctap_patched = install_patched_proctap()  # best-effort：失败只警告，不中止安装
+    # Step 6b: 用本地补丁版 proctap 覆盖 PyPI 原版（否则录音可能静音）
+    print("\n— 步骤 6b：覆盖为本地补丁版 proctap（vendor/proctap）—")
+    if platform.system() == "Windows":
+        proctap_patched = install_patched_proctap()  # best-effort：失败只警告，不中止安装
+    else:
+        proctap_patched = True
+        print("非 Windows，跳过（补丁只针对 Windows 的 WASAPI 回环）。")
 
-    # Step 6: skill deploy
-    print(_format_step_header(6, "部署 Claude Code skill"))
+    # Step 7: spark 自检
+    print(_format_step_header(7, "连 spark 自检"))
+    spark_ok = True
+    if server:
+        spark_ok = check_spark(args.spark_host)
+        if not spark_ok and local:
+            print("⚠️ 服务器转录暂时用不了，本机转录不受影响；处理好后重跑本脚本即可。")
+    else:
+        print("local 档不用 spark，跳过。")
+
+    # Step 8: 配置 + skill
+    print(_format_step_header(8, "写配置、部署 Claude Code skill"))
+    if not write_config(profile, args.spark_host):
+        return 1
     if not deploy_skill():
         return 1
 
-    # Closing message
+    where = {
+        "server": "录完后交给 spark 排队转录（音频转完即删）",
+        "local": "录完后在这台电脑上转录",
+        "both": "每次转录前会问你：交给 spark 还是本机",
+    }[profile]
     print(
         "\n" + "═" * 60 +
-        "\n✓ 安装完成。\n"
+        f"\n✓ 安装完成（档位 {profile}：{where}）。\n"
         "\n下一步：\n"
         "  1. 重启 Claude Code（或开一个新对话）\n"
         '  2. 对 Claude 说「录会议」 / 「录个会议」 / 「开始录制」 触发 skill\n'
         "  3. 跟着 Claude 的提示走（会问 4 个问题：主题/软件/灵敏度/麦克风）\n"
+        "\n实验室云盘（查有没有人传过同一场会、上传结果）：第一次用到时会在浏览器里请你\n"
+        "登录实验室账号授权一次；也可以现在就运行 `.venv 里的 python -m meetingmind cloud login`。\n"
         "\n出问题找 Yuhang。\n"
         + "═" * 60
     )
     if not proctap_patched:
         print(
             "\n⚠️ 重要：录音补丁（proctap）未生效，会议音频可能录成静音 —— "
-            "按上方「步骤 5b」的提示修复后再录。"
+            "按上方「步骤 6b」的提示修复后再录。"
         )
+    if not spark_ok and not local:
+        print(
+            "\n❌ server 档需要连得上 spark，现在还不行 —— 按上方「步骤 7」的提示处理后，"
+            "重跑 `python install.py --profile server`。"
+        )
+        return 1
     return 0
 
 

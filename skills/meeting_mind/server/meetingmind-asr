@@ -1,0 +1,9 @@
+#!/bin/sh
+# Shared meeting_mind server-side transcription (Qwen3-ASR-1.7B on the GPU).
+# pixi workspace /opt/bio/apps/meetingmind; code in its src/ (a copy of the skill's
+# src/meetingmind); model /opt/bio/db/qwen3-asr-1.7b/current; job dirs under
+# /scratch/meetingmind/<user> (not backed up). Called over ssh by the skill:
+#   postprocess --backend spark   ->   meetingmind-asr new-job|submit|status|...
+A=/opt/bio/apps/meetingmind
+export PYTHONPATH="$A/src"
+exec "$A/.pixi/envs/default/bin/python" -m meetingmind.server "$@"

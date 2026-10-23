@@ -71,16 +71,16 @@
     {
       "name": "meeting_mind",
       "icon": "mic",
-      "purpose": "录制线上或面对面会议的音频与幻灯片，本机转录后由 AI 逐页解读并总结",
+      "purpose": "录制线上或面对面会议的音频与幻灯片，转录（本机或交给 spark）后由 AI 逐页解读并总结，可上传实验室云盘",
       "needs": [
-        "仅 Windows",
-        "需要 Windows 10/11；建议使用 NVIDIA 显卡（6 GB 显存以上）；首次运行下载约 3.4 GB 模型"
+        "录制仅 Windows（macOS 开发中）",
+        "转录二选一：交给 spark（不需要显卡，要能 ssh spark 免密登录），或在本机跑（NVIDIA 显卡 6 GB 显存以上，首次下载约 3.4 GB 模型）"
       ],
-      "care_install": "复制好后在它的目录运行 python install.py（建环境、装依赖；首次运行会下载约 3.4 GB 模型）。",
-      "care_update": "依赖有变化时，在它的目录重新运行 python install.py。",
+      "care_install": "复制好后在它的目录运行 python install.py --profile server（交给 spark 转录，几分钟装完）；有 N 卡想在本机转录就用 --profile both。",
+      "care_update": "这一版新增服务器转录：在它的目录重新运行 python install.py --profile both（本机和 spark 都能选）或 --profile server；不带参数重跑会保持原来的本机转录。",
       "notes": {
-        "date": "2026-09-06",
-        "headline": "面对面会议、说话人分离与声纹识别、长会议边录边存"
+        "date": "2026-10-23",
+        "headline": "转录可以交给 spark（不需要显卡）；云盘上有人传过的会直接复用；解读完一键上传云盘；修复只装 [transcribe] 时录不了"
       }
     },
     {

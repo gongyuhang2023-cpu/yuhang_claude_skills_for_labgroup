@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove abandoned (>2 d, job gone) meeting_mind job dirs in /scratch/meetingmind
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bio/sbin/meetingmind-scratch-clean
+Nice=19
+IOSchedulingClass=idle

@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
+import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from . import __version__, postprocess, recovery
-from .audio import AudioRecorder
-from .process_finder import ProcessInfo, find_audio_sessions, find_by_keyword
-from .session import MeetingSession
-from .slides import SlideCapture
+# The recording stack (audio / process_finder / session / slides, and recovery,
+# which pulls in session) is imported inside the commands that use it. Those
+# modules need platform capture libraries at import time; `postprocess`,
+# `backends` and `--version` must keep working without them — on a machine
+# that only sends audio to the server, or on a platform without a recorder yet.
+from . import __version__, postprocess
 from .transcribe import (
     DEFAULT_CHUNK_MINUTES,
     DEFAULT_MODEL_ID,
@@ -23,6 +30,9 @@ from .transcribe import (
 )
 from .vocabulary import load as load_vocabulary
 from .vocabulary import resolve_vocab_path, to_context_string
+
+if TYPE_CHECKING:
+    from .process_finder import ProcessInfo
 
 EPILOG = """\
 status:
@@ -361,10 +371,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Meeting directory produced by `record` (must contain metadata.json)",
     )
     p_postprocess.add_argument(
+        "--backend",
+        choices=("auto", "local", "spark"),
+        default="auto",
+        help=(
+            "Where the ASR runs: local (this machine) or spark (the lab server, "
+            "queued as a GPU job). auto = the default chosen at install time "
+            "(local when install.py never set one up). See `backends`."
+        ),
+    )
+    p_postprocess.add_argument(
         "--device",
         choices=("auto", "cuda", "cpu"),
         default="auto",
-        help="Inference device for the transcribe step (default: auto)",
+        help="Inference device for the local backend (default: auto)",
     )
     p_postprocess.add_argument(
         "--vocab",
@@ -462,6 +482,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many people are in the room. Say 2 for a 1:1 — knowing beats guessing.",
     )
 
+    p_backends = subparsers.add_parser(
+        "backends",
+        help="Show where transcription can run here, and the spark GPU queue",
+        description=(
+            "List the transcription backends this install has (local / spark), "
+            "which one is the default, the local GPU, and — when spark is set "
+            "up — how busy its GPU queue is right now."
+        ),
+    )
+    p_backends.add_argument(
+        "--json",
+        action="store_true",
+        help="One JSON object on stdout (what the skill reads)",
+    )
+
+    p_spark_cancel = subparsers.add_parser(
+        "spark-cancel",
+        help="Withdraw a meeting's queued/running spark transcription job",
+        description=(
+            "Cancel the spark job that `postprocess --backend spark` submitted for "
+            "this meeting and delete its files on the server — e.g. to transcribe "
+            "locally instead while the GPU queue is long."
+        ),
+    )
+    p_spark_cancel.add_argument("meeting_dir", type=Path, help="The meeting directory")
+
+    p_cloud = subparsers.add_parser(
+        "cloud",
+        help="The lab cloud (Nextcloud): sign in, look up and upload meetings",
+        description=(
+            "Work with the shared meetings folder on the lab cloud. `login` once "
+            "(approve meeting_mind in the browser; the app password goes into the "
+            "OS keychain), then the other actions use it."
+        ),
+    )
+    cloud_sub = p_cloud.add_subparsers(dest="cloud_command", metavar="<action>")
+    p_cloud_login = cloud_sub.add_parser("login", help="Approve meeting_mind in the browser (once)")
+    p_cloud_login.add_argument("--url", default=None, metavar="URL",
+                               help="Cloud address (default: the saved one, else asked from "
+                                    "the lab server with `meetingmind-asr lab`)")
+    p_cloud_login.add_argument("--folder", default=None, metavar="PATH",
+                               help="The shared meetings folder (default: as for --url)")
+    p_cloud_login.add_argument("--no-browser", action="store_true",
+                               help="Only print the link instead of opening the browser")
+    p_cloud_status = cloud_sub.add_parser("status", help="Who is signed in; can the folder be reached")
+    p_cloud_status.add_argument("--json", action="store_true")
+    p_cloud_ls = cloud_sub.add_parser("ls", help="List a cloud folder (default: the meetings folder)")
+    p_cloud_ls.add_argument("path", nargs="?", default=None,
+                            help="Relative to the meetings folder, or absolute (starting with /)")
+    p_cloud_find = cloud_sub.add_parser(
+        "find", help="Is this meeting already in the cloud? (same day, overlapping time)")
+    p_cloud_find.add_argument("meeting_dir", type=Path)
+    p_cloud_find.add_argument("--json", action="store_true")
+    p_cloud_fetch = cloud_sub.add_parser(
+        "fetch", help="Use a cloud copy of this meeting instead of transcribing it")
+    p_cloud_fetch.add_argument("meeting_dir", type=Path)
+    p_cloud_fetch.add_argument("--from", dest="source", required=True, metavar="PATH",
+                               help="The cloud meeting folder (as `find` printed it)")
+    p_cloud_fetch.add_argument(
+        "--what", choices=("transcript", "all"), default="transcript",
+        help="transcript: rebuild this meeting's transcript.md + ai_input.json from theirs "
+             "(then interpret with your own slides); all: copy their summary, interpretation, "
+             "transcript and slides into <meeting_dir>/from_cloud/")
+    p_cloud_fetch.add_argument(
+        "--force", action="store_true",
+        help="With --what transcript: replace a transcript this meeting already has "
+             "(the old files are moved to transcript/backup-<time>/ first)")
+    p_cloud_upload = cloud_sub.add_parser("upload", help="Upload this meeting to the shared folder")
+    p_cloud_upload.add_argument("meeting_dir", type=Path)
+    p_cloud_upload.add_argument(
+        "--as", dest="mode", choices=("new", "notes"), default=None,
+        help="Only needed when someone else already uploaded this meeting: new = a separate "
+             "folder anyway; notes = add just your summary/interpretation (+ slides) into theirs")
+    p_cloud_upload.add_argument("--into", default=None, metavar="PATH",
+                                help="With --as notes: which cloud meeting folder (default: the best match)")
+    p_cloud_upload.add_argument("--json", action="store_true")
+
     p_enroll = subparsers.add_parser(
         "enroll",
         help="Build a voiceprint from audio of one known person",
@@ -555,6 +652,8 @@ def _format_table(rows: list[ProcessInfo]) -> str:
 
 
 def _run_list_processes(args: argparse.Namespace) -> int:
+    from .process_finder import find_audio_sessions, find_by_keyword
+
     rows = (
         find_by_keyword(args.filter_keyword)
         if args.filter_keyword
@@ -590,6 +689,8 @@ def _default_audio_test_path() -> Path:
 
 
 def _run_record_audio(args: argparse.Namespace) -> int:
+    from .audio import AudioRecorder
+
     output: Path = args.output if args.output else _default_audio_test_path()
     duration: float | None = args.duration
 
@@ -653,6 +754,8 @@ def _resolve_window_keyword(raw: str) -> str:
 
 
 def _run_capture_slides(args: argparse.Namespace) -> int:
+    from .slides import SlideCapture
+
     output_dir: Path = args.output_dir if args.output_dir else _default_slides_test_dir()
     monitor_index = args.monitor
     if monitor_index is None and not args.window:
@@ -734,6 +837,7 @@ def _run_record(args: argparse.Namespace) -> int:
         return 2
 
     from .audioio import resolve as _resolve_path
+    from .session import MeetingSession
 
     args.output_root = _resolve_path(args.output_root)
     sess = MeetingSession(
@@ -922,8 +1026,347 @@ def _run_enroll(args: argparse.Namespace) -> int:
     return 0
 
 
+def _local_gpu() -> str | None:
+    """Name of the first NVIDIA GPU, or None. nvidia-smi, so no torch import."""
+    try:
+        cp = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    names = [ln.strip() for ln in cp.stdout.splitlines() if ln.strip()] if cp.returncode == 0 else []
+    return names[0] if names else None
+
+
+def _run_backends(args: argparse.Namespace) -> int:
+    from . import config
+
+    try:
+        cfg = config.load()
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    info: dict = {
+        "backends": list(cfg.backends),
+        "default": cfg.default,
+        "config": str(cfg.path) if cfg.path else None,
+    }
+    if config.LOCAL in cfg.backends:
+        info["local"] = {"gpu": _local_gpu()}
+    if config.SPARK in cfg.backends:
+        from .remote import RemoteError, SparkClient
+
+        try:
+            queue = SparkClient(cfg.spark_host, cfg.spark_command).call("queue", timeout=30)
+            info["spark"] = {"reachable": True, **queue}
+        except RemoteError as exc:
+            info["spark"] = {"reachable": False, "error": str(exc)}
+
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False))
+        return 0
+    names = [f"{b}（默认）" if b == cfg.default else b for b in cfg.backends]
+    print(f"transcription backends / 转录后端: {', '.join(names)}")
+    if "local" in info:
+        print(f"  local: {info['local']['gpu'] or 'no NVIDIA GPU / 没有 N 卡（CPU 会很慢）'}")
+    if "spark" in info:
+        sp = info["spark"]
+        if not sp["reachable"]:
+            print(f"  spark: unavailable / 现在用不了 — {sp['error']}")
+        else:
+            running = sp.get("gpu_running", [])
+            busy = (
+                "GPU 空闲" if not running else
+                "GPU 正被占用（" + "；".join(f"已跑 {j['elapsed']} / 上限 {j['limit']}" for j in running) + "）"
+            )
+            print(f"  spark: {busy}，排队中的 GPU 作业 {sp.get('gpu_pending', 0)} 个")
+    return 0
+
+
+def _run_spark_cancel(args: argparse.Namespace) -> int:
+    from . import config
+    from .remote import SparkClient, cancel_on_spark
+
+    try:
+        cfg = config.load()
+        message = cancel_on_spark(args.meeting_dir.resolve(),
+                                  SparkClient(cfg.spark_host, cfg.spark_command))
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(message)
+    return 0
+
+
+def _lab_settings(cfg) -> dict:  # noqa: ANN001
+    """The lab cloud's address and meetings folder, asked from the lab server.
+
+    They are not in the skill itself (it is published); every lab member can
+    reach the server with the same ssh alias the spark backend uses.
+    """
+    from .remote import RemoteError, SparkClient
+
+    try:
+        return SparkClient(cfg.spark_host, cfg.spark_command).call("lab", timeout=30)
+    except RemoteError as exc:
+        raise RuntimeError(
+            f"could not ask {cfg.spark_host} for the lab cloud's address ({exc}); "
+            "pass --url and --folder (ask an admin)"
+            f" / 没能从 {cfg.spark_host} 取到实验室云盘的地址，请用 --url 和 --folder 指定（问管理员）"
+        ) from exc
+
+
+def _login_target(cfg, args: argparse.Namespace) -> tuple[str, str]:  # noqa: ANN001
+    """--url / --folder, else what this machine saved, else what the lab server says."""
+    url = args.url or cfg.cloud_url
+    folder = _unmangle(args.folder) if args.folder else cfg.cloud_folder
+    if not url or not folder:
+        lab = _lab_settings(cfg)
+        url, folder = url or lab["cloud_url"], folder or lab["cloud_folder"]
+    return url, folder
+
+
+def _cloud_client(cfg):  # noqa: ANN001, ANN202 — config.Config → cloud.Cloud
+    from . import cloud
+
+    if not (cfg.cloud_url and cfg.cloud_login and cfg.cloud_user and cfg.cloud_folder):
+        raise RuntimeError("not signed in to the lab cloud yet — run `meetingmind cloud login`"
+                           " / 还没连云盘，请先运行 meetingmind cloud login")
+    password = cloud.load_password(cfg.cloud_url, cfg.cloud_login)
+    if not password:
+        raise RuntimeError("the cloud app password is not in the keychain — run "
+                           "`meetingmind cloud login` again / 钥匙串里没有云盘授权，请重新运行 cloud login")
+    return cloud.Cloud(cfg.cloud_url, cfg.cloud_user, cfg.cloud_login, password)
+
+
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[/\\]")
+
+
+def _unmangle(arg: str) -> str:
+    """Undo Git Bash's rewrite of a POSIX-looking argument into a Windows path.
+
+    `cloud ls /lab` run from Git Bash reaches Python as
+    `C:/Program Files/Git/lab`. A cloud path never starts with a drive
+    letter, so strip the MSYS root (where bash.exe lives, two levels up).
+    """
+    if not _DRIVE_PATH.match(arg):
+        return arg
+    posix = arg.replace("\\", "/")
+    roots = [os.environ.get("EXEPATH", "")]
+    bash = shutil.which("bash")
+    if bash:
+        roots.append(str(Path(bash).resolve().parents[1]))
+    for root in filter(None, roots):
+        root = root.replace("\\", "/").rstrip("/")
+        if posix.lower().startswith(root.lower() + "/"):
+            return posix[len(root):]
+    match = re.match(r"^[A-Za-z]:/.*?/Git(/.*)$", posix, re.I)
+    return match.group(1) if match else arg
+
+
+def _cloud_path(cfg, arg: str | None) -> str:  # noqa: ANN001
+    if not arg:
+        return cfg.cloud_folder
+    arg = _unmangle(arg)
+    return arg if arg.startswith("/") else f"{cfg.cloud_folder.rstrip('/')}/{arg}"
+
+
+def _cloud_find(cfg, meeting_dir: Path) -> tuple[Any, list]:  # noqa: ANN001
+    from . import cloud as _cloud
+
+    client = _cloud_client(cfg)
+    meta = postprocess.load_metadata(meeting_dir)
+    return client, _cloud.find_meetings(client, cfg.cloud_folder, meta)
+
+
+def _run_cloud(args: argparse.Namespace) -> int:
+    import dataclasses
+    import webbrowser
+
+    from . import cloud, config
+
+    try:
+        cfg = config.load()
+        if args.cloud_command == "login":
+            url, folder = _login_target(cfg, args)
+            server, login, password = cloud.login_flow(
+                url, show=None if args.no_browser else webbrowser.open,
+            )
+            uid = cloud.user_id(server, login, password)
+            cloud.save_password(server, login, password)
+            found = cloud.Cloud(server, uid, login, password).exists(folder)
+            # The sign-in is kept either way; a folder that is not there is not saved.
+            config.save(dataclasses.replace(cfg, cloud_url=server, cloud_login=login, cloud_user=uid,
+                                            cloud_folder=folder if found else cfg.cloud_folder,
+                                            path=None))
+            print(f"[cloud] signed in as {login}; meetings folder {folder}: "
+                  f"{'found' if found else 'NOT FOUND — pass --folder'}"
+                  f" / 已连上云盘；会议文件夹{'找到了' if found else '没找到，请用 --folder 指定'}",
+                  file=sys.stderr)
+            return 0 if found else 1
+        if args.cloud_command == "status":
+            info: dict = {"signed_in": bool(cfg.cloud_url), "url": cfg.cloud_url,
+                          "login": cfg.cloud_login, "folder": cfg.cloud_folder}
+            if cfg.cloud_url:
+                try:
+                    info["folder_found"] = _cloud_client(cfg).exists(cfg.cloud_folder)
+                except (RuntimeError, cloud.CloudError) as exc:
+                    info["error"] = str(exc)
+            print(json.dumps(info, ensure_ascii=False) if args.json else
+                  "\n".join(f"{k}: {v}" for k, v in info.items()))
+            return 0
+        if args.cloud_command == "ls":
+            path = _cloud_path(cfg, args.path)
+            for e in sorted(_cloud_client(cfg).list(path), key=lambda e: (not e.is_dir, e.name)):
+                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.modified)) if e.modified else ""
+                print(f"{'d' if e.is_dir else '-'} {e.size / 1048576:9.1f} MB  {stamp}  {e.name}")
+            return 0
+        if args.cloud_command == "find":
+            return _cloud_find_cmd(cfg, args)
+        if args.cloud_command == "fetch":
+            client = _cloud_client(cfg)
+            source = _cloud_path(cfg, args.source)
+            meeting_dir = args.meeting_dir.resolve()
+            if args.what == "all":
+                print(cloud.fetch_results(client, source, meeting_dir))
+                return 0
+            uploader = None
+            with contextlib.suppress(cloud.CloudError, ValueError):
+                uploader = json.loads(client.get(f"{source}/{cloud.UPLOAD_MARKER}")).get("uploaded_by")
+            out = cloud.reuse_transcript(client, source, meeting_dir, uploader, force=args.force)
+            print(json.dumps(out, ensure_ascii=False))
+            print(f"[cloud] transcript rebuilt from {source} ({out['segments']} segments, "
+                  f"shifted {out['shift_seconds']:+d} s) / 已用云盘上的转录生成本场转录", file=sys.stderr)
+            return 0
+        if args.cloud_command == "upload":
+            return _cloud_upload_cmd(cfg, args)
+    except (RuntimeError, FileNotFoundError, cloud.CloudError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print("usage: meetingmind cloud {login,status,ls,find,fetch,upload} …", file=sys.stderr)
+    return 2
+
+
+def _cloud_find_cmd(cfg, args: argparse.Namespace) -> int:  # noqa: ANN001
+    if not cfg.cloud_url:
+        info: dict = {"signed_in": False, "matches": []}
+    else:
+        _, matches = _cloud_find(cfg, args.meeting_dir.resolve())
+        base = cfg.cloud_folder.rstrip("/") + "/"
+        rows = [{**m.as_dict(),
+                 # relative to the meetings folder: what `fetch --from` / `upload --into` take,
+                 # and immune to Git Bash rewriting a leading "/"
+                 "rel_path": m.path[len(base):] if m.path.startswith(base) else m.path,
+                 "mine": m.uploader_login == cfg.cloud_login} for m in matches]
+        info = {"signed_in": True, "folder": cfg.cloud_folder, "matches": rows}
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False))
+        return 0
+    if not info["signed_in"]:
+        print("not signed in to the lab cloud / 还没连云盘（meetingmind cloud login）")
+    elif not info["matches"]:
+        print("no copy of this meeting in the cloud yet / 云盘上还没有这场会")
+    for m in info["matches"]:
+        have = " ".join(k for k, v in (("转录", m["has_transcript"]), ("解读", m["has_interpretation"]),
+                                       ("总结", m["has_summary"])) if v) or "—"
+        overlap = "未知（没有 metadata）" if m["overlap"] is None else f"{m['overlap']:.0%}"
+        print(f"{m['name']}  {m['start_time'] or '?'}  重叠 {overlap}  有：{have}  "
+              f"上传：{m['uploader'] or '?'}{'（我）' if m['mine'] else ''}")
+    return 0
+
+
+def _claim_new(client: Any, folder: str, name: str) -> str:
+    """A fresh folder for this upload, taken atomically (MKCOL): two people
+    uploading at the same moment end up in two folders, not one shared mess."""
+    for n in range(1, 100):
+        candidate = f"{folder}/{name}" if n == 1 else f"{folder}/{name}-{n}"
+        if client.claim(candidate):
+            return candidate
+    raise RuntimeError(f"no free folder name for {name} in {folder}")
+
+
+def _read_json(path: Path) -> dict | None:
+    with contextlib.suppress(OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _cloud_upload_cmd(cfg, args: argparse.Namespace) -> int:  # noqa: ANN001
+    from . import __version__, cloud
+
+    meeting_dir = args.meeting_dir.resolve()
+    if not (meeting_dir / "transcript" / "transcript.md").is_file():
+        raise RuntimeError("this meeting has no transcript yet — finish postprocess first"
+                           " / 这场会还没转录完，先跑完 postprocess")
+    client, matches = _cloud_find(cfg, meeting_dir)
+    same = [m for m in matches if m.same_meeting]
+    mine = [m for m in same if m.uploader_login == cfg.cloud_login]
+    others = [m for m in same if m not in mine]
+    # Where an earlier run of this upload went — known even if it stopped
+    # before the cloud copy had anything to recognise it by.
+    record_path = meeting_dir / cloud.LOCAL_RECORD
+    record = _read_json(record_path) or {}
+    resume = (record.get("dest") if record.get("login") == cfg.cloud_login
+              and isinstance(record.get("dest"), str) and client.exists(record["dest"]) else None)
+
+    if args.mode is None and not resume and not mine and others:
+        print(json.dumps({"status": "duplicate", "matches": [m.as_dict() for m in others]},
+                         ensure_ascii=False))
+        print("[cloud] someone already uploaded this meeting — nothing sent. Re-run with "
+              "--as notes (add yours to theirs) or --as new (separate folder)."
+              " / 这场会已经有人传过，这次没上传；要补充就加 --as notes，要另存就加 --as new。",
+              file=sys.stderr)
+        return 3
+    uploader = cloud.display_name(client.server, client.login, client.password)
+    notes = False
+    # An explicit --as wins over resuming: "only my notes" must never send the whole meeting.
+    if args.mode == "notes":
+        into = _cloud_path(cfg, args.into) if args.into else (others[0].path if others else "")
+        if not into:
+            raise RuntimeError("--as notes needs a meeting to add to (--into) / 没有可以补充的会议")
+        dest, notes = f"{into}/{cloud.notes_folder(uploader, cfg.cloud_login)}", True
+    elif args.mode == "new":
+        dest = _claim_new(client, cfg.cloud_folder, meeting_dir.name)
+    elif resume:
+        dest = resume
+    elif mine:
+        dest = mine[0].path  # finish or refresh this user's own earlier upload
+    else:
+        dest = _claim_new(client, cfg.cloud_folder, meeting_dir.name)
+    if not notes:
+        record = {"dest": dest, "login": cfg.cloud_login, "status": "uploading",
+                  "started_at": datetime.now().isoformat(timespec="seconds")}
+        record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    result = cloud.upload_meeting(client, dest, meeting_dir, uploader=uploader,
+                                  login=cfg.cloud_login, notes_only=notes, version=__version__)
+    if not notes:
+        record.update(status="complete", url=result["url"])
+        record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"status": "uploaded", **result}, ensure_ascii=False) if args.json
+          else result["url"])
+    return 0
+
+
 def _run_postprocess(args: argparse.Namespace) -> int:
+    from . import config
+
     meeting_dir: Path = args.meeting_dir.resolve()
+    try:
+        cfg = config.load()
+        backend = config.resolve_backend(args.backend, cfg)
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    spark_client = None
+    if backend == config.SPARK:
+        from .remote import SparkClient
+
+        spark_client = SparkClient(cfg.spark_host, cfg.spark_command)
+    if not args.quiet:
+        print(f"[postprocess] backend     : {backend}", file=sys.stderr)
+
     try:
         prints = _parse_voiceprints(args.voiceprint)
         if args.primary and args.primary not in prints:
@@ -949,10 +1392,21 @@ def _run_postprocess(args: argparse.Namespace) -> int:
             primary=args.primary,
             other_name=args.other,
             num_speakers=args.speakers,
+            backend=backend,
+            spark_client=spark_client,
         )
     except (RuntimeError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        if backend == config.SPARK:
+            print(
+                "\n[postprocess] Stopped waiting. The job keeps running on spark; run the "
+                "same command again to pick it up (it will not be submitted twice)."
+                " / 已停止等待，作业仍在 spark 上运行；再跑同一条命令会接着等，不会重复提交。",
+                file=sys.stderr,
+            )
+        return 130
 
     # stdout = the ai_input.json path so shell pipelines / the future skill
     # wrapper can pick it up without parsing stderr noise.
@@ -971,6 +1425,8 @@ def _run_postprocess(args: argparse.Namespace) -> int:
 
 
 def _run_recover(args: argparse.Namespace) -> int:
+    from . import recovery
+
     meeting_dir: Path = args.meeting_dir.resolve()
     try:
         report = recovery.recover_incomplete(
@@ -1019,6 +1475,9 @@ _DISPATCH = {
     "record": _run_record,
     "transcribe": _run_transcribe,
     "postprocess": _run_postprocess,
+    "backends": _run_backends,
+    "spark-cancel": _run_spark_cancel,
+    "cloud": _run_cloud,
     "enroll": _run_enroll,
     "recover": _run_recover,
 }

@@ -21,6 +21,11 @@ Pipeline (top-down in `run()`):
      crash between steps a and b leaves no `transcript.md`, causing the
      next run to retry cleanly instead of trusting partial state.
 
+  Where the ASR runs is the `backend`: ``local`` (Qwen3-ASR on this machine)
+  or ``spark`` (the lab server, via `remote.py`). Only the segments come from
+  the backend; labelling, merging and both output files are built here either
+  way, so the two produce the same files from the same segments.
+
 Public API:
   - `run(meeting_dir, ...)` — main entry point.
   - `load_metadata(meeting_dir)` — read `metadata.json` as a dict.
@@ -298,12 +303,19 @@ def run(
     primary: str | None = None,
     other_name: str | None = None,
     num_speakers: int | None = None,
+    backend: str = "local",
+    spark_client: Any = None,
 ) -> Path:
     """Orchestrate transcribe + ai_input emission for one meeting.
 
     Returns the path to ``ai_input.json``. See module docstring for the
-    idempotency contract and write ordering.
+    idempotency contract and write ordering. ``backend="spark"`` needs a
+    `remote.SparkClient` as ``spark_client``.
     """
+    if backend not in ("local", "spark"):
+        raise ValueError(f"unknown backend {backend!r}")
+    if backend == "spark" and spark_client is None:
+        raise ValueError("backend='spark' needs spark_client")
     meeting_dir = Path(meeting_dir)
     metadata = load_metadata(meeting_dir)
     _require_finished_recording(meeting_dir, metadata)
@@ -336,6 +348,14 @@ def run(
         parsed = load_vocabulary(resolved_vocab)
         vocab_context = to_context_string(parsed)
 
+    if backend == "spark" and diarize:
+        # The server job only transcribes; speaker separation would need the
+        # diarization stack and the voiceprints there as well.
+        raise RuntimeError(
+            "--diarize is not supported with the spark backend yet; use --backend local."
+            " / 服务器转录暂不支持 --diarize（说话人分离），请用 --backend local。"
+        )
+
     # Diarization runs *before* transcription so it can decide where the cuts
     # go. Only for single-stream audio: with mic.wav present the speakers are
     # already separated by construction, and re-deriving them could only be worse.
@@ -349,33 +369,52 @@ def run(
                 num_speakers, device, chunk_minutes,
             )
 
-    transcriber = Transcriber(model_id=model_id, device=device)
-    segments = transcriber.transcribe(
-        audio_path,
-        vocab_context=vocab_context,
-        chunk_minutes=chunk_minutes,
-        partial_path=transcript_path.parent / "_partial.md",
-        spans=(plan[0] if plan else None),
-    )
-    if plan:
-        # Match on start time, not on position: spans that transcribe to nothing
-        # (a cough, a 0.4 s "嗯") are dropped, so the two lists drift apart.
-        speaker_by_start = plan[1]
-        segments = [replace(s, speaker=speaker_by_start.get(s.start)) for s in segments]
-
     # Two-stream 1:1 recordings (`record --mic`) leave a second WAV with the
     # user's own voice. Transcribe it too and merge by timestamp, labelling each
     # stream by speaker — loopback = the other party, mic = the user. Group
     # recordings have no mic.wav and skip this, leaving behaviour byte-identical.
     mic_path = meeting_dir / _MIC_PATH
-    if mic_path.is_file():
-        segments = [replace(s, speaker=_OTHER_LABEL) for s in segments]
-        mic_segments = transcriber.transcribe(
-            mic_path,
+    has_mic = mic_path.is_file()
+    mic_segments: list[Segment] = []
+    if backend == "spark":
+        from .remote import transcribe_on_spark
+
+        files = [("main", audio_path)] + ([("mic", mic_path)] if has_mic else [])
+        by_role = transcribe_on_spark(
+            meeting_dir,
+            files,
             vocab_context=vocab_context,
             chunk_minutes=chunk_minutes,
-            partial_path=transcript_path.parent / "_partial_mic.md",
+            client=spark_client,
+            # --force means "transcribe again", not "rebuild from the last fetch"
+            reuse_result=not force,
         )
+        segments = by_role.get("main", [])
+        mic_segments = by_role.get("mic", [])
+    else:
+        transcriber = Transcriber(model_id=model_id, device=device)
+        segments = transcriber.transcribe(
+            audio_path,
+            vocab_context=vocab_context,
+            chunk_minutes=chunk_minutes,
+            partial_path=transcript_path.parent / "_partial.md",
+            spans=(plan[0] if plan else None),
+        )
+        if plan:
+            # Match on start time, not on position: spans that transcribe to nothing
+            # (a cough, a 0.4 s "嗯") are dropped, so the two lists drift apart.
+            speaker_by_start = plan[1]
+            segments = [replace(s, speaker=speaker_by_start.get(s.start)) for s in segments]
+        if has_mic:
+            mic_segments = transcriber.transcribe(
+                mic_path,
+                vocab_context=vocab_context,
+                chunk_minutes=chunk_minutes,
+                partial_path=transcript_path.parent / "_partial_mic.md",
+            )
+
+    if has_mic:
+        segments = [replace(s, speaker=_OTHER_LABEL) for s in segments]
         mic_segments = [replace(s, speaker=_SELF_LABEL) for s in mic_segments]
         # Stable interleave by start time; at equal starts list the other party
         # first so a question→answer in one chunk reads in a natural order.

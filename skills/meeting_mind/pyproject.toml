@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetingmind"
-version = "0.1.0.dev0"
+version = "0.2.0"
 description = "Auto-record online meetings (Teams/Zoom/Tencent): audio + PPT screenshots + transcription + AI summary. Volume-independent capture via Windows Process Loopback API."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,17 +39,24 @@ dependencies = [
     # fallback when per-process WASAPI loopback records silence (SystemAudioRecorder).
     "soundcard>=0.4",
     # Screen capture (Windows Graphics Capture API)
-    "windows-capture>=1.4.0",
+    "windows-capture>=1.4.0; sys_platform == \"win32\"",
     # Image processing for change detection
     "pillow>=10.0",
     "numpy>=2.0",
     # Process discovery and audio session inspection
     "psutil>=5.9",
-    "pycaw>=20240210",
-    "comtypes>=1.4",
+    "pycaw>=20240210; sys_platform == \"win32\"",
+    "comtypes>=1.4; sys_platform == \"win32\"",
     # Window management
-    "pygetwindow>=0.0.9",
-    "pywin32>=306",
+    "pygetwindow>=0.0.9; sys_platform == \"win32\"",
+    "pywin32>=306; sys_platform == \"win32\"",
+    # Server transcription (--backend spark): the WAV goes up as 16 kHz mono
+    # FLAC. Both are small wheels; [transcribe] pulls them in anyway.
+    "soundfile>=0.12",
+    "soxr>=0.3",
+    # Lab cloud (meetingmind cloud …): the Nextcloud app password lives in the
+    # OS keychain (Windows Credential Manager / macOS Keychain), not in a file.
+    "keyring>=24",
 ]
 
 [project.optional-dependencies]

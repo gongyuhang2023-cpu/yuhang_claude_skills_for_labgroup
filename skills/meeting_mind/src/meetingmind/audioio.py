@@ -12,17 +12,24 @@ hundreds of megabytes.
 
 `librosa` is deliberately avoided too: its `lazy_loader` calls `inspect.stack()`,
 whose frame walk trips other lazily-imported packages in this environment.
+
+torch and torchaudio are imported inside the functions that need them, not at
+module level: `record` imports `resolve` from here, and an install without the
+speech-model extras (server-only, or [transcribe] without [diarize], which is
+the only thing that brings torchaudio) must still be able to record.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import soundfile as sf
-import torch
-import torchaudio
+
+if TYPE_CHECKING:
+    import torch
 
 #: What the speaker models expect. Everything is resampled to this on load.
 SAMPLE_RATE = 16_000
@@ -55,6 +62,9 @@ def load_mono_16k(
     loopback capture can carry a voice on one side only, and dropping a channel
     would silently drop that voice.
     """
+    import torch  # noqa: PLC0415 — see module docstring
+    import torchaudio  # noqa: PLC0415
+
     path = resolve(path)
     info = sf.info(str(path))
     frame_start = 0 if start is None else max(0, int(start * info.samplerate))

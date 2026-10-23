@@ -1,0 +1,31 @@
+# Shared meeting_mind server-side transcription: Qwen3-ASR-1.7B on the GB10 GPU.
+# Client: the meeting_mind skill (`postprocess --backend spark`); entry point
+# /opt/bio/apps/bin/meetingmind-asr; model /opt/bio/db/qwen3-asr-1.7b/current.
+# Versions match the skill's [transcribe] extra, so local and server transcripts agree.
+# After `pixi install` (as root, umask 002, PIXI_CACHE_DIR=/opt/bio/cache):
+#   1. src/meetingmind/ = a copy of the skill's src/meetingmind (the release in use;
+#      the skill lives in the lab skill library under skills/meeting_mind)
+#   2. launcher /opt/bio/apps/bin/meetingmind-asr = the skill's server/meetingmind-asr
+#   3. install -d -m 1777 /scratch/meetingmind   (job dirs; /scratch is not backed up)
+#   4. lab.json here: {"cloud_url": ..., "cloud_folder": ...} for `meetingmind-asr lab`
+#   5. clean-up: /opt/bio/sbin/meetingmind-scratch-clean + its .service/.timer (daily 07:30)
+# Full steps, ownership/modes and the update procedure: the skill's server/DEPLOY.md.
+[workspace]
+name = "spark-shared-meetingmind"
+version = "0.2.0"
+channels = ["conda-forge"]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+python = "3.12.*"
+pip = "*"
+setuptools = "<82"   # torch 2.11 requires setuptools<82; conda-forge's pip would pull a newer one
+
+[pypi-dependencies]
+torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cu130" }
+transformers = "==4.57.6"
+accelerate = "==1.12.0"
+qwen-omni-utils = "==0.0.9"
+librosa = "==0.11.0"
+soundfile = "==0.13.1"
+qwen-asr = "==0.0.6"

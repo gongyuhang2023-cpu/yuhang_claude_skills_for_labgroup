@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily clean-up of abandoned meeting_mind job dirs
+
+[Timer]
+OnCalendar=*-*-* 07:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

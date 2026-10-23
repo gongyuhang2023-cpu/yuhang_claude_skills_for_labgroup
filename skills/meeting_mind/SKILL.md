@@ -2,11 +2,13 @@
 name: meeting_mind
 description: |
   自动录制线上会议（Teams/Zoom/腾讯会议/Edge 直播等）的音频和 PPT 截图，
-  会后本地转录文字并 AI 逐页解读 + 整体总结。当用户说"录会议"、"录个会议"、
-  "开始录制"、"start recording a meeting"等触发。系统静音/调音量不影响录制。
+  会后转录文字（本机，或交给实验室服务器 spark 排队转录）并 AI 逐页解读 + 整体总结。
+  当用户说"录会议"、"录个会议"、"开始录制"、"start recording a meeting"等触发。
+  系统静音/调音量不影响录制。
 
-  录制 → Qwen3-ASR 转录 → 5 张/批并行 sub-agent 视觉解读 →
-  interpretation.md + summary.md。完全本地，不外发会议内容。
+  录制 → 查云盘（有人传过就直接用他的转录/结果）→ Qwen3-ASR 转录 → 5 张/批并行
+  sub-agent 视觉解读 → interpretation.md + summary.md → 问要不要上传实验室云盘。
+  本机转录完全不外发；服务器转录只把音频传到实验室服务器，转完即删；上传云盘每次都先问。
 ---
 
 # MeetingMind — 自动录会议 + 转录
@@ -17,19 +19,22 @@ description: |
 ## 关键约定：使用 skill 自带的 Python
 
 本 skill 是 **self-contained** — 它自己有 venv，里面装好了 `meetingmind`
-包和所有依赖。所有 CLI 调用**必须**走 skill 自己的 venv Python：
+包和所有依赖。所有 CLI 调用**必须**走 skill 自己的 venv Python。
 
-- **Windows**（默认）: `~/.claude/skills/meeting_mind/.venv/Scripts/python.exe`
-- **macOS / Linux**: `~/.claude/skills/meeting_mind/.venv/bin/python`
+`<SKILL_DIR>` = 本 skill 所在的目录：加载 skill 时开头给出的
+"Base directory for this skill"（Codex 里是这份 SKILL.md 所在的目录）。
+下面所有 Bash 命令的 `<PY>` 是：
 
-下面所有 Bash 命令的 `<PY>` 就是这个绝对路径——**不要**用 `python` /
-`python3` / `py` 这些可能命中错误环境的快捷命令，那会找不到 `meetingmind`
-模块。Bash tool 的 `~` 会被 shell 自动展开。
+- **Windows**: `<SKILL_DIR>/.venv/Scripts/python.exe`
+- **macOS / Linux**: `<SKILL_DIR>/.venv/bin/python`
+
+用替换好的绝对路径——**不要**用 `python` / `python3` / `py` 这些可能命中
+错误环境的快捷命令，那会找不到 `meetingmind` 模块。
 
 如果这个路径不存在（venv 还没建），告诉用户：
-> "MeetingMind skill 的 venv 不存在。请到 `~/.claude/skills/meeting_mind/`
-> 目录跑 `python install.py` 完成安装（5-15 分钟，看网速）。装好后重新
-> 触发我。"
+> "MeetingMind skill 的 venv 不存在。请到 `<SKILL_DIR>` 目录跑
+> `python install.py` 完成安装。它会问转录在哪里跑：server（交给实验室服务器
+> spark，几分钟装完）、local（本机，要 N 卡，5-15 分钟）或 both。装好后重新触发我。"
 
 ---
 
@@ -37,7 +42,7 @@ description: |
 
 1. 确认 skill venv 存在 + `meetingmind` CLI 可用：
    ```
-   Bash: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind --version
+   Bash: <PY> -m meetingmind --version
    ```
    - 成功 → 继续
    - `No such file or directory` → venv 没装。告诉用户跑 install.py（见上）
@@ -45,7 +50,7 @@ description: |
 
 2. 确认有可录的会议软件在跑：
    ```
-   Bash: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind list-processes
+   Bash: <PY> -m meetingmind list-processes
    ```
    读输出，记下哪些进程有 `ON` 标记（活跃音频会话）。如果**没有任何
    活跃会话**，告诉用户："当前没检测到活跃会议软件。请先打开 Teams/
@@ -111,7 +116,7 @@ Q3: "录麦克风（你自己的发言）？"
 
 ```
 Bash:
-  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind record \
+  command: <PY> -m meetingmind record \
              --process <software> \
              --topic "<topic>" \
              --interval <interval> \
@@ -200,12 +205,85 @@ STOP 文件出现后，后台的 `record` 进程会在下一次 wait 轮询（�
 后再继续。如果 30 秒还没退出，告诉用户："录制进程没在 30 秒内停止，
 可能卡在 audio/slides teardown。我等等再试或者你按 Ctrl+C。"
 
-### Step 3.4: 跑 postprocess（前台同步）
+### Step 3.3b: 先查云盘：这场会是不是已经有人传过
+
+```
+Bash: <PY> -m meetingmind cloud find "<meeting_dir>" --json
+```
+
+同一场会按**同一天 + 录制时间段重叠超过一半**认（各人起的文件夹名不一样，时间才可靠）。
+
+- `signed_in: false` → 这台电脑没连云盘，**跳过本步、不提**（上传时再提授权）。
+- 命令报错（连不上云盘等）→ 一句话告诉用户，继续 Step 3.4。
+- `matches` 为空 → 继续 Step 3.4。
+- `upload_complete: false` 的（别人**正在上传**，还没传完）不拿来复用：告诉用户「<uploader> 正在上传
+  这场会」，问一句要不要过几分钟再查（再跑一次 find），还是直接全部自己来。
+- 有 `same_meeting: true`、`upload_complete: true` 且 `has_transcript: true` 的（取第一个）→ 用 AskUserQuestion 问一次：
+
+  ```
+  Q: "云盘上已经有这场会了：<uploader 或 '有人'>上传，<start_time> 开始，有 <转录/解读/总结>。怎么处理？"
+    - "直接用他的结果"（对方有解读和总结时放第一个、标推荐）
+        description：「不转录、不解读，把他的总结、解读、转录和截图拷到本场目录的 from_cloud/ 下」
+    - "用他的转录，我自己解读"
+        description：「省掉转录；用他的文字配你自己的截图做解读，适合要结合自己项目的时候」
+    - "全部自己来"
+        description：「照常转录和解读」
+  ```
+  `self_voice_included` 为 false 时，问题里加一句：「注意：那份录音里没有<uploader>自己的声音，
+  如果他是主讲人，他讲的部分会缺。」
+- 只有 `overlap` 为 null 的（同一天、手动上传、没有 metadata）→ 告诉用户云盘上同一天有
+  `<name>`，问是不是同一场。是 → 只给两个选项：「直接用他的结果」或「全部自己来」。
+  **不提供「用他的转录」**：没有 metadata 就不知道他几点开录，转录对不上你的截图。否 → 继续 Step 3.4。
+
+按选择执行，`<rel_path>` 用 find 输出里的 `rel_path`：
+- **直接用他的结果**：
+  ```
+  Bash: <PY> -m meetingmind cloud fetch "<meeting_dir>" --from "<rel_path>" --what all
+  ```
+  输出是拷贝到的目录。读其中的 summary.md 给用户简要转述，告诉用户各文件在哪。
+  **流程到此结束**：不跑 Phase 4，也不问上传（云盘上已经有了）。
+- **用他的转录，我自己解读**：
+  ```
+  Bash: <PY> -m meetingmind cloud fetch "<meeting_dir>" --from "<rel_path>" --what transcript
+  ```
+  它按两人开录的时间差把对方的转录平移到这段录音的时间轴上，写好本场的
+  `transcript/transcript.md` 和 `ai_input.json`（来源记在 `transcript/source.json`）。
+  `<ai_input>` = `<meeting_dir>/ai_input.json`，**跳过 Step 3.4–3.6，直接进 Phase 4**。
+- **全部自己来** → 继续 Step 3.4。
+
+### Step 3.4: 选在哪转录
+
+```
+Bash: <PY> -m meetingmind backends --json
+```
+
+读 JSON：`backends`（装了哪些：`spark` / `local`）、`default`、`local.gpu`、
+`spark.reachable` / `spark.gpu_running`（每项 elapsed / limit）/ `spark.gpu_pending` / `spark.error`。
+
+- **只装了一种** → 直接用它，不问；一句话告诉用户在哪转。
+  只有 spark 且 `reachable` 为 false → 把 `error` 告诉用户（多半是 Tailscale 没连上，
+  或 `ssh spark` 不能免密登录），录音已经安全落盘，处理好后从 Step 3.5b 重跑即可。
+- **两种都装了** → 用 AskUserQuestion 问一次（spark 放第一个、标推荐）：
+
+  ```
+  Q: "这场会在哪转录？"
+    - "服务器 spark（推荐）"
+        description：按 spark 字段写实况。GPU 空闲 →「GPU 空闲，约 <会议分钟数÷10> 分钟出结果，
+        不占本机」；GPU 被占用 →「GPU 正被占用（已跑 X / 上限 Y），另有 N 个在排队，要等前面跑完」；
+        连不上 →「现在连不上：<error 摘要>」（此时把「本机」标推荐）
+    - "本机"
+        description：local.gpu 有值 →「<GPU 名>，约 <会议分钟数÷6> 分钟，转录期间占用显卡」；
+        没有 → 「没有 N 卡，CPU 会很慢」
+  ```
+
+  用户选哪个就走对应的 Step 3.5a / 3.5b。
+
+### Step 3.5a: 本机转录（local）
 
 ```
 Bash:
-  command: ~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>" --device cuda --chunk-minutes 3
-  description: "Transcribe and build ai_input.json"
+  command: <PY> -m meetingmind postprocess "<meeting_dir>" --backend local --device cuda --chunk-minutes 3
+  description: "Transcribe locally and build ai_input.json"
   (不开 run_in_background — 这步需要拿到结果)
   timeout: 600000  # 10 minutes
 ```
@@ -224,7 +302,32 @@ WDDM 共享显存溢出到系统内存 → **整机硬重启**（2026-06-15 实�
 
 stdout 第一行是 `ai_input.json` 路径。读出来存为 `<ai_input>`。
 
-### Step 3.5: 简短确认 + 自动进入 Phase 4
+### Step 3.5b: 服务器转录（spark）
+
+```
+Bash:
+  command: <PY> -m meetingmind postprocess "<meeting_dir>" --backend spark
+  description: "Send the audio to spark, wait for the GPU job, build ai_input.json"
+  run_in_background: true   # 可能要排队，不能卡在 10 分钟的前台时限上
+```
+
+它会把音频压成 16 kHz 单声道 FLAC（每小时 30-40 MB）、上传、在 spark 上交一个 Slurm
+GPU 作业，然后一直等到结果回来；进度以 `[spark] ...` 行写在输出里。对用户说：
+> "已交给 spark 排队转录（音频转完就从服务器删掉）。GPU 空闲时 1 小时的会约 5-6 分钟；
+> 你可以先做别的，好了我接着做解读和总结。"
+
+等后台任务的完成通知再继续；用户问进度就读输出文件里最近的 `[spark]` 行转述。
+- **退出码 0** → `<ai_input>` = `<meeting_dir>/ai_input.json`，进 Step 3.6。
+- **退出码非 0** → 把输出最后的 `Error:` 段告诉用户，按「失败兜底 → 服务器转录失败」处理。
+- **会话断了 / 用户关了窗口 / 按了 Ctrl+C**：作业还在 spark 上。之后**再跑同一条命令**就会
+  接着等同一个作业（记录在 `<meeting_dir>/transcript/spark_job.json`），不会重复提交。
+- **排队太久、用户想改本机**（且装了 local）：先撤掉服务器上的作业，别让它白占 GPU，
+  再走 Step 3.5a：
+  ```
+  Bash: <PY> -m meetingmind spark-cancel "<meeting_dir>"
+  ```
+
+### Step 3.6: 简短确认 + 自动进入 Phase 4
 
 对用户说：
 > "✓ 转录完成（`<meeting_dir>/transcript/transcript.md`）。
@@ -436,9 +539,48 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 > - 转录原文：`<meeting_dir>/transcript/transcript.md`
 > - AI 输入数据：`<meeting_dir>/ai_input.json`
 > - 原始音频：`<meeting_dir>/audio/recording.wav`
-> - 截图：`<meeting_dir>/slides/`
-> 
-> 完整流程到此结束。"
+> - 截图：`<meeting_dir>/slides/`"
+
+然后进 Step 4.6。
+
+### Step 4.6: 问要不要上传到实验室云盘
+
+用 AskUserQuestion 问一次（**不要默认上传**）：
+
+```
+Q: "要把这场会上传到实验室云盘的会议文件夹吗？"
+  - "上传"
+      description：「截图、转录、解读、总结，加上压成 FLAC 的音频（约为原 WAV 的 5%）；
+      上传前会再查一次是不是已经有人传过」
+  - "先不传"
+```
+
+选「先不传」→ 对用户说「完整流程到此结束」。选「上传」：
+
+```
+Bash:
+  command: <PY> -m meetingmind cloud upload "<meeting_dir>" --json
+  timeout: 600000   # 长会议要压缩音频再上传，可能几分钟
+```
+
+- **退出码 0** → 把输出里的 `url` 给用户：「已上传：<url>」。完整流程结束。
+- **退出码 3**（`status: duplicate`）→ 这几分钟里或之前，已经有人传过同一场会。AskUserQuestion：
+  - 「不传了」（对方已有解读和总结时推荐）
+  - 「只补充我的解读和总结」→ `<PY> -m meetingmind cloud upload "<meeting_dir>" --as notes --json`
+    （放进对方文件夹下以你名字命名的子目录，连同解读里用到的截图）
+  - 「另存一份」→ `<PY> -m meetingmind cloud upload "<meeting_dir>" --as new --json`
+
+  在 Step 3.3b 选过「用他的转录，我自己解读」的，到这里通常就是这种情况，推荐「只补充我的解读和总结」。
+- **报错 `not signed in` / 授权失效** → 先授权一次：
+  ```
+  Bash（run_in_background: true）: <PY> -m meetingmind cloud login
+  ```
+  读输出第一行的链接给用户：「浏览器已打开（没打开就点这个链接），登录实验室账号后点『允许访问』。」
+  第一次授权时，云盘地址和会议文件夹会自动从 spark 取（`ssh spark` 要能免密登录）；取不到就请用户问管理员，
+  用 `cloud login --url <地址> --folder <文件夹>` 指定。
+  等后台任务结束（输出里有「已连上云盘」），再跑一次上面的 upload。授权存在系统钥匙串里，
+  以后不用再登；在云盘「设置 → 安全」里能看到、能吊销。
+- 中途失败（断网等）→ 重跑同一条 upload：已经传上去的文件会跳过，接着传剩下的。
 
 ### Phase 4 失败兜底
 
@@ -492,8 +634,8 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 **处理**：跑 recover 补全，然后正常 postprocess：
 
 ```
-~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind recover "<meeting_dir>"
-~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess "<meeting_dir>"
+<PY> -m meetingmind recover "<meeting_dir>"
+<PY> -m meetingmind postprocess "<meeting_dir>"
 ```
 
 想先看会改什么就加 `--dry-run`。recover **不会**自动跑，也不该自动跑 ——
@@ -534,7 +676,32 @@ recover 之后 `metadata.json` 的 `recording_status` 变成 `recovered`，并�
 
 把错误贴给用户。**transcript.md 没生成不要伪装成功**。会议数据
 （音频 + 截图）已经在 `<meeting_dir>` 里，用户可以晚点手动重跑
-`~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess <meeting_dir> --force`。
+`<PY> -m meetingmind postprocess <meeting_dir> --force`。
+
+### 服务器转录失败（Step 3.5b）
+
+本机的录音始终不动，任何一种失败都可以重跑；服务器上的那份音频转完或失败后都会删掉。
+- `Cannot reach spark over ssh` / `连不上 spark` → Tailscale 没连上，或 `ssh spark` 不能免密
+  登录。处理好后重跑同一条命令。
+- `is not set up on this machine` → 这台电脑没装服务器转录，在 `<SKILL_DIR>` 跑
+  `python install.py --profile both`（或 `server`）。
+- `protocol` 不一致 → skill 和服务器端版本对不上：先更新 skill，仍不行就找管理员。
+- `does not exist on this server` / `server-side transcription is not set up` → 服务器端没部署，找管理员。
+- `frozen by spark-memguard` → 服务器内存吃紧，作业被冻结。按报错里的
+  `advise.py cancel-frozen <作业号>` 在 spark 上取消（**不要直接 scancel**），再重跑。
+- `ended as FAILED / TIMEOUT / CANCELLED` → 报错里有服务器日志的最后几行；
+  已转好的部分拉回到了 `transcript/_partial.md`。把日志给用户看，重跑或改用本机。
+- `--diarize is not supported with the spark backend` → 说话人分离只能本机做：`--backend local`。
+
+### 云盘失败（Step 3.3b / 4.6）
+
+云盘只是锦上添花：查重失败就照常转录，上传失败不影响本地产物。
+- `cannot reach` / `连不上云盘` → 网络问题，稍后重跑。
+- `no longer accepts the saved app password` / `授权失效` → 应用密码被吊销或过期：
+  后台跑 `<PY> -m meetingmind cloud login` 重新授权（见 Step 4.6）。
+- `cloud login` 最后说会议文件夹「没找到」→ 这个账号看不到实验室的会议文件夹（没被加进共享）；
+  请用户问管理员，或用 `cloud login --folder <自己看到的路径>` 指定。
+- `that cloud meeting's date / start time does not line up` → 选的不是同一天的会，回到 Step 3.4 照常转录。
 
 ### 用户中途取消
 
@@ -543,14 +710,20 @@ recover 之后 `metadata.json` 的 `recording_status` 变成 `recovered`，并�
    metadata。但即使被 kill，音频也已经在盘上了，用 `recover` 能收尾）
 2. **不**跑 postprocess
 3. 告诉用户：录制已停止，原始数据保留在 `<meeting_dir>`，需要时可以
-   手动跑 `~/.claude/skills/meeting_mind/.venv/Scripts/python.exe -m meetingmind postprocess <meeting_dir>` 后处理。
+   手动跑 `<PY> -m meetingmind postprocess <meeting_dir>` 后处理。
 
 ---
 
 ## 边界 / 已知限制（v1）
 
-- **仅 Windows 10 build 19041+ / Windows 11**（ProcTap + WGC 限制）。
-  其他平台触发时直接告诉用户"暂不支持，请在 Windows 上使用"。
+- **录制仅 Windows 10 build 19041+ / Windows 11**（ProcTap + WGC 限制），macOS 录制在开发中。
+  其他平台触发录制时直接告诉用户"暂不支持，请在 Windows 上录"；已有的录音照样可以转录、解读。
+- **服务器转录（spark）**：要连得上实验室服务器（Tailscale + `ssh spark` 免密）；GPU 一次只跑
+  一个作业，别人占着就要排队；不支持 `--diarize`。音频只在转录期间留在服务器上
+  （`/scratch`，不进备份），转完即删。
+- **实验室云盘**：第一次用要在浏览器里授权一次（应用密码存在系统钥匙串）。上传的会议实验室成员
+  都看得到；音频传的是 16 kHz 单声道 FLAC，原始 WAV 留在本机。别人上传的转录来自他自己的
+  录音：线上会议里录音者本人的发言不在其中（除非他录了麦克风）。
 - **会议窗口不能最小化到任务栏**（WGC 不抓不可见窗口）。可以拖到
   屏幕角落 / 跨虚拟桌面，但不能完全隐藏。
 - **不录用户麦克风**（v1 限制，见 Phase 1 Step 1.2）。

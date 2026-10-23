@@ -1,0 +1,49 @@
+diff --git a/src/proctap/_native.cpp b/src/proctap/_native.cpp
+index a274387..04c69c9 100644
+--- a/src/proctap/_native.cpp
++++ b/src/proctap/_native.cpp
+@@ -340,9 +340,11 @@ public:
+ 
+         // オーディオクライアントを初期化
+         // AUDCLNT_STREAMFLAGS_EVENTCALLBACKは使わず、ポーリング方式で実装
++        // Process loopback requires AUTOCONVERTPCM so WASAPI handles format
++        // conversion automatically (matching Microsoft's ApplicationLoopback sample).
+         hr = m_audioClient->Initialize(
+             AUDCLNT_SHAREMODE_SHARED,
+-            AUDCLNT_STREAMFLAGS_LOOPBACK,
++            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+             10000000, // 1秒
+             0,
+             m_waveFormat,
+@@ -367,10 +369,10 @@ public:
+ 
+             OutputDebugStringA("INFO: Using fallback PCM format (44.1kHz, 16-bit, stereo)\n");
+ 
+-            // Retry with fallback format
++            // Retry with fallback format (same AUTOCONVERTPCM flag)
+             hr = m_audioClient->Initialize(
+                 AUDCLNT_SHAREMODE_SHARED,
+-                AUDCLNT_STREAMFLAGS_LOOPBACK,
++                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                 10000000, // 1秒
+                 0,
+                 m_waveFormat,
+@@ -585,11 +587,16 @@ public:
+ 
+         UINT32 dataSize = numFramesAvailable * m_waveFormat->nBlockAlign;
+ 
+-        // データをコピー
++        // AUDCLNT_BUFFERFLAGS_SILENT means pData is indeterminate (typically zeros).
++        // Write explicit zeros to preserve timeline alignment.
+         EnterCriticalSection(&m_bufferLock);
+         size_t oldSize = m_captureBuffer.size();
+         m_captureBuffer.resize(oldSize + dataSize);
+-        memcpy(m_captureBuffer.data() + oldSize, pData, dataSize);
++        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
++            memset(m_captureBuffer.data() + oldSize, 0, dataSize);
++        } else {
++            memcpy(m_captureBuffer.data() + oldSize, pData, dataSize);
++        }
+         LeaveCriticalSection(&m_bufferLock);
+ 
+         m_captureClient->ReleaseBuffer(numFramesAvailable);

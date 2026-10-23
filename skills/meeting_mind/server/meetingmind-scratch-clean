@@ -1,0 +1,37 @@
+#!/bin/bash
+# Daily: remove meeting_mind job directories under /scratch/meetingmind/<user>/ that are older
+# than 2 days and whose Slurm job is no longer queued or running. The client deletes its job
+# directory as soon as it has fetched the result, so whatever is left here was abandoned (a
+# closed laptop, a failed job nobody came back for). The audio is gone already — the job
+# deletes it however it ends — so this bounds how long the remaining text stays.
+#
+# Safety:
+#  - Each user's directories are listed and deleted AS THAT USER (runuser), never by root:
+#    the paths run through a directory the user controls, and a symlink swapped in between
+#    "found" and "deleted" must not let root delete anything the user could not.
+#  - A job is kept while Slurm lists it — by the id in slurm_job_id, or, if that file is
+#    missing (sbatch accepted the job just before the submitter died), by its working dir.
+#  - If squeue cannot be asked, nothing is removed.
+HOURS=${MM_CLEAN_HOURS:-48}
+ROOT=${MM_CLEAN_ROOT:-/scratch/meetingmind}
+LOG=${MM_CLEAN_LOG:-/opt/bio/logs/meetingmind-scratch-clean.log}
+[ -d "$ROOT" ] || exit 0
+if ! queue=$(squeue -h -o '%A|%Z' 2>&1); then
+  echo "$(date -Is) squeue failed, nothing removed: $queue" >> "$LOG"
+  exit 0
+fi
+ids=$(cut -d'|' -f1 <<< "$queue")
+workdirs=$(cut -d'|' -f2- <<< "$queue")
+n=0
+for udir in "$ROOT"/*; do
+  [ -d "$udir" ] && [ ! -L "$udir" ] || continue
+  owner=$(stat -c %U -- "$udir") || continue
+  [ "$owner" != root ] && [ "$owner" != UNKNOWN ] || continue
+  while IFS= read -r -d '' job; do
+    jid=$(runuser -u "$owner" -- cat -- "$job/slurm_job_id" 2>/dev/null)
+    if [ -n "$jid" ] && grep -qxF -- "$jid" <<< "$ids"; then continue; fi
+    if grep -qxF -- "$job" <<< "$workdirs"; then continue; fi
+    runuser -u "$owner" -- rm -rf --one-file-system -- "$job" && n=$((n+1))
+  done < <(runuser -u "$owner" -- find "$udir" -mindepth 1 -maxdepth 1 -type d -mmin +$((HOURS * 60)) -print0)
+done
+echo "$(date -Is) removed $n job dirs idle > ${HOURS}h" >> "$LOG"
