@@ -72,21 +72,20 @@
     {
       "name": "meeting_mind",
       "icon": "mic",
-      "purpose": "录制线上或面对面会议的音频与幻灯片，转录（本机或交给 spark）后由 AI 逐页解读并总结，可上传实验室云盘",
+      "purpose": "录制会议音频与幻灯片，转录后生成逐页解读和便于会后阅读、学习的总结，可上传实验室云盘",
       "needs": [
         "录制仅 Windows（macOS 开发中）",
         "转录二选一：交给 spark（不需要显卡，要能 ssh spark 免密登录），或在本机跑（NVIDIA 显卡 6 GB 显存以上，首次下载约 3.4 GB 模型）"
       ],
       "care_install": "复制好后在它的目录运行 python install.py --profile server（交给 spark 转录，几分钟装完）；有 N 卡想在本机转录就用 --profile both。",
-      "care_update": "这一版新增服务器转录：在它的目录重新运行 python install.py --profile both（本机和 spark 都能选）或 --profile server；不带参数重跑会保持原来的本机转录。",
+      "care_update": "本次更新会后总结规则与references/meeting-reading-notes.md，请一并复制。已正常使用当前录制和转录功能的，无需为此次文档更新重装依赖；从更早版本升级且缺少服务器转录等功能时，按安装说明重跑install.py。保留现有录音、配置及虚拟环境。",
       "notes": {
-        "date": "2026-10-23",
-        "headline": "转录可以交给 spark，不需要显卡；和实验室云盘打通",
+        "date": "2026-11-02",
+        "headline": "会后总结升级为阅读与学习稿",
         "changes": [
-          "服务器转录：音频传到 spark 排队转录，转完即删，本机不需要显卡；安装时用 --profile 选 server、local 或 both",
-          "云盘复用：转录前先查实验室云盘，同一场会有人传过，就直接用现成的转录或结果",
-          "上传云盘：解读完问你要不要上传，上传前先查有没有人传过",
-          "修复：08-25 以后按默认方式装的，录制一启动就报缺 torchaudio"
+          "按报告串起研究问题、方法、结果和讨论，取消500字硬上限，篇幅随内容安排",
+          "回看完整转录补足没有新截图的关键问答，解释必要术语，配少量关键图和回查链接",
+          "已有会议可只重写summary.md，无需重新录制或转录；逐页解读继续保留供查阅"
         ]
       }
     },

@@ -343,7 +343,7 @@ Phase 3 拿到 `<ai_input>` 路径（即 `<meeting_dir>/ai_input.json`）后**�
 不等用户主动触发。目标：在 `<meeting_dir>` 根目录写两个 markdown：
 
 - `interpretation.md` — 逐页解读（视觉内容 / 对应转录 / 内容解读）
-- `summary.md` — 整体总结（概要 / 要点 / 方法结果 / 待跟进）
+- `summary.md` — 会后阅读与学习稿（按报告串起问题、方法、结果和讨论，默认阅读入口）
 
 ### Step 4.1: 读 ai_input.json + 过滤 revisit
 
@@ -477,57 +477,21 @@ project 等）不列。
 
 ### Step 4.4: 生成 summary.md
 
-**不要复用内存里的 sub-agent 输出**——从文件读 interpretation.md
-确保一致性。先 Read `<meeting_dir>/interpretation.md`。
+先读 [会后阅读稿规范](references/meeting-reading-notes.md)。`summary.md` 是用户会后
+直接阅读的主产物：按报告组织研究主线，解释理解结果所必需的术语与方法，并保留关键问答。
+不再使用500字硬上限，也不要把逐页解读压缩成逐页列表。
 
-然后**单独**一个 Agent 调用（`subagent_type="general-purpose"`，**不并行**）
-生成 summary。prompt 模板：
+从磁盘读完整 `interpretation.md`、完整 `transcript/transcript.md` 和会议元信息；
+后者用于补足没有新截图的讨论。过滤 revisit 只去重图片，不能删除对应时段的新发言。
+证据冲突、关键数字或方法不清时，定点回看原图/转录，不凭ASR猜名称和结论。
 
-```
-你是 MeetingMind 的总结 sub-agent。基于下面的 interpretation.md 全文，
-生成一份会议总结。
+然后单独调用一个总结 agent（不与逐页批次并行），提供上述文件的绝对路径、元信息及
+阅读稿规范的绝对路径，要求按规范读取并生成 `<meeting_dir>/summary.md`。
+文件才是产物；主对话读回全文，核对各场报告及重要问答是否覆盖、关键数字能否回溯、
+解释是否超出会议证据，再向用户交付。用户只要修改总结时直接执行本步骤，不重录或重跑ASR。
 
-═══ 会议元信息 ═══
-
-- 主题: <meta.topic>
-- 日期: <meta.date>
-- 时长: <meta.duration_seconds // 60> 分钟
-- 起止时间: <meta.start_time> ~ <end_time>
-- 有效幻灯片: <N> 张
-
-═══ interpretation.md 全文 ═══
-
-<完整内容贴在这里>
-
-═══ 输出格式（精确照抄） ═══
-
-# 组会总结 — <meta.date>
-> <N> 张幻灯片 | 时长 <minutes> 分钟 | <start_time> ~ <end_time>
-
-## 整体概要
-<2-3 句：本场会议讲什么、谁讲（若 interpretation 里能看出）、主线是什么。>
-
-## 关键要点
-<3-5 个 bullet，每个 ≤ 1 句话，提炼一个独立 take-away。可引用具体
-Slide N。>
-
-## 方法与结果
-<如果是技术汇报 / 研究报告：1-2 段说方法 + 结果。如果是一般讨论会：
-写"（本次会议未涉及具体方法/结果讨论）"。>
-
-## 待跟进问题
-<2-4 个 bullet：未解决的问题、待办、要决策的事。无则写"（无明显
-待跟进项）"。>
-
-═══ 关键约束 ═══
-
-- 总长度 < 500 字（中文字符 + 数字一起算）
-- 具体（引用 Slide N 或具体术语），不空话
-- **不要重新读 transcript.md**——interpretation.md 已经整合好了视觉+口语
-- 不要输出前言、不要输出收尾，只输出上面四段
-```
-
-Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
+默认保留 `interpretation.md` 供回查；总结放少量关键图和精确来源链接，不重复全部截图。
+本地重写已上传的总结不等于获准更新共享版本；云盘更新仍先取得用户明确授权。
 
 ### Step 4.5: 汇报最终产物
 
@@ -535,7 +499,7 @@ Agent 返回后，用 Write tool 写到 `<meeting_dir>/summary.md`。
 > "✓ AI 总结完成。本次会议产物：
 > 
 > - **逐页解读**：`<meeting_dir>/interpretation.md`（<N> 张 slide）
-> - **整体总结**：`<meeting_dir>/summary.md`
+> - **会后阅读稿（建议先读）**：`<meeting_dir>/summary.md`
 > - 转录原文：`<meeting_dir>/transcript/transcript.md`
 > - AI 输入数据：`<meeting_dir>/ai_input.json`
 > - 原始音频：`<meeting_dir>/audio/recording.wav`
@@ -740,7 +704,7 @@ recover 之后 `metadata.json` 的 `recording_status` 变成 `recovered`，并�
   （**读**是安全的：从 2026-08-04 起 WAV 头每批都回写，录制中的文件在
   任何时刻都是合法可播的。metadata.json 同理，开录就写、原子替换，
   中途读到的是 `recording_status: "recording"` 的那一版。）
-- **不要尝试加 AI 总结**（解读 / 摘要）—— P3.2 才做。本 SKILL.md
-  的范围到 `postprocess` 产出 transcript.md + ai_input.json 为止。
+- **不要在转录完成前生成会议解读或总结**。`postprocess` 负责转录与 ai_input.json，
+  AI 逐页解读和会后阅读稿按 Phase 4 执行。
 - **不要把 meeting_dir 路径泄漏到不该泄漏的地方**（如复制粘贴到外部
   IM / 邮件）。会议内容是用户隐私。
