@@ -18,14 +18,14 @@
       "name": "spark-advisor",
       "icon": "server",
       "purpose": "判断任务在本机还是服务器运行，推荐资源参数并提交作业；spark 排不上时把小任务放到 Google Colab；查询公共资源、清理空间、管理服务器上的项目",
-      "care_install": "装好后照 SKILL.md「首次配置」做：advise.py detect-server 找服务器，问我服务器用户名，再 advise.py init。",
-      "care_update": "config.json、env-profile.local.json、references/ 下的 *.local.* 和 spark-pitfalls.md 保留不动。",
+      "care_install": "装好后照 SKILL.md「首次配置」做：advise.py detect-server 找服务器，问我服务器用户名，再 advise.py init。配置好后，接着帮我开通 Colab：到服务器上运行 colab-free usage。还没授权，就读新增的 references/colab-first-login.md，告诉我授权范围，然后带我走完 Google 账号授权，我只需要在浏览器里点一次同意；已经授权就跳过这一步。我说现在不用，也跳过。",
+      "care_update": "config.json、env-profile.local.json、references/ 下的 *.local.* 和 spark-pitfalls.md 保留不动。文件更新好后，接着帮我开通 Colab：到服务器上运行 colab-free usage。还没授权，就读新增的 references/colab-first-login.md，告诉我授权范围，然后带我走完 Google 账号授权，我只需要在浏览器里点一次同意；已经授权就跳过这一步。我说现在不用，也跳过。",
       "notes": {
         "date": "2026-11-06",
         "headline": "spark 排不上时，可以把小任务放到 Google Colab",
         "changes": [
           "spark 排不上时，AI 会判断任务能不能放到 Google 的免费算力上；你同意后，传数据、跑任务、取结果、释放机器都由它代办",
-          "第一次使用只需在浏览器里点一次同意，不用自己建 Google Cloud 项目",
+          "这次更新时 AI 会顺便带你完成授权：只需在浏览器里点一次同意，不用自己建 Google Cloud 项目",
           "只用免费额度：账号有付费额度时工具会拒绝计算，也没有购买入口",
           "执行地判断调整：跑超过几分钟的活默认上服务器"
         ]

@@ -1,10 +1,15 @@
 # Colab 首次登录
 
-> 什么时候读：`spark-colab start` 或 `colab-free usage` 报“还没授权”“授权已过期”，或用户说要绑定 Google 账号、绑定云盘时。已经授权过就不用读。
+> 什么时候读：`spark-colab start` 或 `colab-free usage` 报“还没授权”“授权已过期”，或用户说要开通 Colab、绑定 Google 账号、绑定云盘时。已经授权过就不用读。
 
 每人只做一次。凭据保存在各人 Linux 账号的 `~/.config/gws/`，只有本人可读。AI 用谁的 SSH 身份登录，绑的就是谁的账号；多人共用的管理员账号上不要绑定，`spark-colab` 也会拒绝。
 
 ## 流程
+
+开始前先告诉用户两点，用户说现在不用就跳过，以后要用时再做：
+
+- 授权范围是读写整个 Google Drive 和 Google Cloud，凭据保存在他自己的服务器账号下。
+- 只有 Drive 里的 `spark-lab` 目录会挂载到服务器，这个目录服务器上的其他用户都能读。
 
 **1. 在 spark 上启动登录：**
 
@@ -25,7 +30,7 @@ spark-colab login
 
 1. 选自己的 Google 账号。
 2. 看到“Google 未验证此应用”时，点「高级」，再点「转至 spark-colab（不安全）」。这是组内自建的应用，没有提交 Google 审核，所以有这个提示。
-3. 权限页会列出读写整个 Google Drive 和 Google Cloud，这是工具需要的范围，要如实告诉用户。有勾选框就全部勾上，再点继续。
+3. 权限页有勾选框就全部勾上，再点继续。
 4. 看到登录成功的页面就完成了。
 
 **4. 完成设置：**
@@ -52,6 +57,10 @@ spark-colab login --finish
 `colab-free` 只放行余额为 0 的账号，保证只花免费额度。Colab 额度只发给 Google AI 付费套餐的主账号，家庭组里被拉进来的成员余额是 0。所以如果余额非零，这个账号多半是家庭组管理员，或者自己买过额度。
 
 这不是故障。云盘照常能用，只是不能用 `spark-colab` 计算。告诉用户原因，让用户决定换一个账号还是继续在 spark 排队。不要尝试消耗余额，也不要绕过检查。
+
+## 授权反复过期
+
+大约 7 天就过期，多半是自己建的客户端还停在“测试”状态。到 Google Cloud 控制台把应用发布成正式版；或者把 `~/.config/gws/client_secret.json` 换成共用客户端 `/opt/bio/share/colab/client_secret.json`，再重新走上面的流程。
 
 ## 共用客户端不可用时：自己建一个
 
