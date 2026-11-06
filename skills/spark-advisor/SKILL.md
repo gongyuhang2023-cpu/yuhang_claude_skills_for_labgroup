@@ -1,11 +1,11 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；查明脚本用的数据库版本（versions）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；查明脚本用的数据库版本（versions）；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
 ---
 
 # spark-advisor — 共享 GPU 服务器顾问
 
-> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON（`rules` 例外：原样返回 `/ai.md` 的 Markdown）——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。
+> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON（`rules` 例外：原样返回 `/ai.md` 的 Markdown）——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。`spark-colab` 是例外：它本身就是服务器上封装好的公共命令，直接在服务器上运行。
 
 ## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
 
@@ -18,7 +18,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 ## ⛔ 红线与总闸（动手前必看）
 
 - **GPU / 重活只走 Slurm**（`gen-sbatch → submit` 或调试会话），**绝不** `ssh <server> 'python xxx.py'` 裸跑，哪怕用户说"就跑一下"：裸跑不留痕、逃过 memguard、抢显存（详见 `references/server-facts.md`）。轻活（改代码、几秒的小脚本、`squeue`/`nvidia-smi`）可以直接跑；拿不准就走队列。
-- **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。叫出这个 skill、说「帮我清理 / 腾空间」只是开始商量，不算同意；「能删的都删」这类笼统的话也不算，要逐项点名。
+- **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；用 Colab 跑任务（数据会传给 Google）；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。叫出这个 skill、说「帮我清理 / 腾空间」只是开始商量，不算同意；「能删的都删」这类笼统的话也不算，要逐项点名。
 - **作业在跑但没进度，禁止直接 `scancel`**：对冻结的作业 scancel 会让它永久卡住、不还内存。先 `wait <id>` 或 `status` 判断；冻结的用 `cancel-frozen <id>`（先不带 `--yes` 看计划）：返回 0 = 退干净；30 = 请求发了但资源没确认释放（**不算成功**）；31 = 这条命令不适用（没有这个作业、已结束、在排队、没冻结或暂时判断不了），照 `note` 做；32 = 这个账号没权限，请用户找管理员；33 = 只检查了、没执行（没带 `--yes`）。细节读 `references/frozen-jobs.md`。没冻结、确认是用户自己的作业，用户点头后可以直接 `scancel <id>`。
 - **`wait` 返回码**：0 正常结束；10 跑完但退出码非零；**11 被冻结（别 scancel）**；12 / 13 被取消 / 失败；20 监控自己超时（作业状态未知）；21 / 255 查询失败（**别当成完成**）；22 没有这个作业号（多半写错了）。作业从 `squeue` 消失不等于成功。调用时带 `--max-wait`（按预计时长给）：不带就一直等，程序自己卡死、没被冻结的作业会把它挂到作业时限。
 - **备份不是归档**：NAS 备份只能找回 1–2 个月内删掉的东西。要长期留，代码推 Gitea、数据搬进 NAS 归档（`references/storage.md`）。
@@ -33,6 +33,8 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 要盯着结果改代码、反复跑；开个调试会话 | `debug-start` / `debug-log` / `debug-list` / `debug-end` | `references/debug-session.md` |
 | 作业不动了、卡住了、帮我 scancel | `wait` / `status` → `cancel-frozen` | `references/frozen-jobs.md` |
 | 服务器忙不忙 | `status`：人话汇总 GPU 空/忙、可调度内存、空闲核、队列；`disk.hint` 有内容就转达 | — |
+| spark 排不上、用 Colab 跑、用 Google 云跑 | `spark-colab`（在 spark 上运行） | `references/colab.md` |
+| 绑定 Google 账号、绑定云盘、Colab 授权过期 | `spark-colab login` | `references/colab-first-login.md` |
 | 服务器上有没有装 X、缺数据库、申请安装 | `software find` / `request` / `vote` | `references/software.md` |
 | 磁盘不够、服务器上腾空间 | 按顺序：`project check` → `cleanup scan` → `cleanup cold` | `references/storage.md` |
 | 这几个环境和公共区重复，能删吗 | `cleanup scan` + 智能判断 | `references/cleanup.md` |
@@ -47,11 +49,11 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 
 ## 提交作业（骨架；每步细节在 `references/submit-flow.md`）
 
-0. **执行地判定**：GPU / 峰值内存 >19G / 带宽·BLAS 密集 → 服务器；sklearn 树模型等分支密集的 CPU 活 → 本地更快。判为本地就给本地建议，到此为止。判为服务器后再问一句：要盯着看、反复改吗？是 → `debug`。
+0. **执行地判定**：**默认服务器** —— 本地机的内存和 CPU 被日常进程占着，留在本地要有正面理由。GPU / 峰值内存 >19G / 带宽·BLAS 密集 / 会跑超过几分钟 → 服务器；sklearn 树模型等分支密集的 CPU 活**且数据小、几分钟内完** → 本地更快。判为本地就给本地建议，到此为止。判为服务器后再问一句：要盯着看、反复改吗？是 → `debug`。
 1. **抽输入特征**（你做）：Boltz token、Uni-Dock 盒子 × 并行配体数；纯 CPU 用 `--mem-guess <GB>`。
 2. **查现状 + 历史**：`advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]`。
 3. **定参数**（读 `references/recommend-rules.md`）：`--mem` 用推荐值（CPU 作业必填）；`--cpus` 别漏传；`--time` 默认不传。人话讲清，**带置信度和依据**。
-4. **判排队还是能跑**：看 `run_now` / `warnings`。
+4. **判排队还是能跑**：看 `run_now` / `warnings`。排不上而任务不大时读 `references/colab.md`，合适就主动提一句可以放 Colab。
 5. **生成脚本**：`gen-sbatch … --workdir <项目在服务器上的绝对路径>`。`--workdir` 别省；Git Bash 下带 `MSYS_NO_PATHCONV=1`；GPU 作业要处理显存自限；引擎回的 `warnings` 别忽略。
 6. **提交前确认（总闸）** → 用户点头 → `submit --script …` → JobID。
 7. **GPU 作业提交后**：后台跑 `advise.py wait <JobID> --max-wait <秒>`，按返回码处理。提交前看 `gpu_physical`（`recommend` 的 `server_now` 里就有，刚跑过就不用再跑 `status`）：Slurm 说空闲不等于卡上没人。

@@ -166,16 +166,20 @@ def resolve_host(cfg):
 def ssh_run(cfg, remote_cmd, timeout=30, stdin_data=None):
     """Run a command on the server over SSH. Returns stdout (str)."""
     target = f'{cfg["user"]}@{resolve_host(cfg)}'
-    cmd = ["ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
+    cmd = [cfg.get("ssh_exe") or "ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
     if cfg.get("ssh_key"):
         cmd += ["-i", cfg["ssh_key"]]
+    # Close unused stdin explicitly: nested Win32-OpenSSH can otherwise hang after the remote command exits.
+    if stdin_data is None:
+        cmd += ["-n"]
     cmd += [target, remote_cmd]
     # 走字节 I/O，不用 text=True：Windows 文本模式会把 stdin 里的 \n 翻成 \r\n，
     # sbatch 见到 CRLF 脚本会拒收（"Batch script contains DOS line breaks"）。
     payload = stdin_data.encode("utf-8") if stdin_data is not None else None
     try:
         r = subprocess.run(cmd, capture_output=True,
-                           timeout=timeout, input=payload)
+                           timeout=timeout, input=payload,
+                           stdin=subprocess.DEVNULL if payload is None else None)
     except FileNotFoundError:
         die("`ssh` not found on PATH. Install an OpenSSH client.")
     except subprocess.TimeoutExpired:
@@ -196,14 +200,18 @@ def ssh_try(cfg, remote_cmd, timeout=30, stdin_data=None):
     把两者混成一个结果，正是这次事故里看门狗犯的同一个错误。
     """
     target = f'{cfg["user"]}@{resolve_host(cfg)}'
-    cmd = ["ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
+    cmd = [cfg.get("ssh_exe") or "ssh"] + list(cfg.get("ssh_opts", ["-o", "ConnectTimeout=12", "-o", "BatchMode=yes"]))
     if cfg.get("ssh_key"):
         cmd += ["-i", cfg["ssh_key"]]
+    # Close unused stdin explicitly: nested Win32-OpenSSH can otherwise hang after the remote command exits.
+    if stdin_data is None:
+        cmd += ["-n"]
     cmd += [target, remote_cmd]
     # 走字节 I/O，理由同 ssh_run：Windows 文本模式会把 \n 翻成 \r\n。
     payload = stdin_data.encode("utf-8") if stdin_data is not None else None
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout, input=payload)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, input=payload,
+                           stdin=subprocess.DEVNULL if payload is None else None)
     except FileNotFoundError:
         return 255, "", "ssh not found on PATH"
     except subprocess.TimeoutExpired:
