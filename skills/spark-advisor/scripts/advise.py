@@ -1602,7 +1602,7 @@ def workdir_warning(workdir):
             "看不出哪个对应哪次分析。把项目目录传给 --workdir，日志就进 <workdir>/logs/。")
 
 
-# 低优先级：只在用户明确说「跑着玩 / 不急 / 低优先级」时用，见 references/submit-flow.md「降低优先级」。
+# 低优先级：只在用户主动要求调低优先级时用（如说不急、可以让别人先跑），见 references/submit-flow.md「降低优先级」。
 # 数值要大于公平份额权重：2026-11-07 线上 PriorityWeightFairShare=100000，相邻两档份额差约 12500 分，
 # 小的 nice（如 100）只能调整自己几个作业之间的先后，让不了别人。管理员改权重时同步改这里。
 LOW_PRIORITY_NICE = 100000
@@ -2298,7 +2298,7 @@ def main():
                    help="absolute path of the project dir on the server; job runs there and "
                         "logs go to <workdir>/logs/ instead of piling up in the home dir")
     g.add_argument("--low-priority", action="store_true",
-                   help="只在用户明确说跑着玩 / 不急 / 低优先级时用：加 --nice=%d，"
+                   help="只在用户主动要求调低优先级时用（如说不急、可以让别人先跑）：加 --nice=%d，"
                         "排到所有人的普通作业之后。默认不加" % LOW_PRIORITY_NICE)
 
     s = sub.add_parser("submit")

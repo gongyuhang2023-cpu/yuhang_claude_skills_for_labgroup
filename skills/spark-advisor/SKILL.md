@@ -30,7 +30,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 |---|---|---|
 | 这活本地还是服务器跑 | 执行地判定 | `references/execution-strategy.md` |
 | 帮我交到服务器、要多少内存 / 显存 | 默认：下面「提交作业」 | `references/recommend-rules.md` → `references/submit-flow.md` |
-| 跑着玩、不急、可以排在别人后面（用户自己说的） | 「提交作业」第 5 步加 `--low-priority` | `references/submit-flow.md`「降低优先级」 |
+| 想自己调低作业优先级：不急、可以让别人先跑（用户自己说的） | 「提交作业」第 5 步加 `--low-priority` | `references/submit-flow.md`「降低优先级」 |
 | 要盯着结果改代码、反复跑；开个调试会话 | `debug-start` / `debug-log` / `debug-list` / `debug-end` | `references/debug-session.md` |
 | 作业不动了、卡住了、帮我 scancel | `wait` / `status` → `cancel-frozen` | `references/frozen-jobs.md` |
 | 服务器忙不忙 | `status`：人话汇总 GPU 空/忙、可调度内存、空闲核、队列；`disk.hint` 有内容就转达 | — |
@@ -55,7 +55,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 2. **查现状 + 历史**：`advise.py recommend --tool <tool> [--gpu] [--mem-guess <GB>] [--cpus N]`。
 3. **定参数**（读 `references/recommend-rules.md`）：`--mem` 用推荐值（CPU 作业必填）；`--cpus` 别漏传；`--time` 默认不传。人话讲清，**带置信度和依据**。
 4. **判排队还是能跑**：看 `run_now` / `warnings`。排不上而任务不大时读 `references/colab.md`，合适就主动提一句可以放 Colab。
-5. **生成脚本**：`gen-sbatch … --workdir <项目在服务器上的绝对路径>`。`--workdir` 别省；Git Bash 下带 `MSYS_NO_PATHCONV=1`；GPU 作业要处理显存自限；引擎回的 `warnings` 别忽略。用户自己说跑着玩 / 不急 / 低优先级时才加 `--low-priority`，默认不加，也别按任务类型替他判断。
+5. **生成脚本**：`gen-sbatch … --workdir <项目在服务器上的绝对路径>`。`--workdir` 别省；Git Bash 下带 `MSYS_NO_PATHCONV=1`；GPU 作业要处理显存自限；引擎回的 `warnings` 别忽略。用户主动要求调低优先级（如说不急、可以让别人先跑）时才加 `--low-priority`，默认不加，也别按任务类型替他判断。
 6. **提交前确认（总闸）** → 用户点头 → `submit --script …` → JobID。
 7. **GPU 作业提交后**：后台跑 `advise.py wait <JobID> --max-wait <秒>`，按返回码处理。提交前看 `gpu_physical`（`recommend` 的 `server_now` 里就有，刚跑过就不用再跑 `status`）：Slurm 说空闲不等于卡上没人。
 

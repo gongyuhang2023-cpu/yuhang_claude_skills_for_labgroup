@@ -22,9 +22,9 @@
       "care_update": "config.json、env-profile.local.json、references/ 下的 *.local.* 和 spark-pitfalls.md 保留不动。文件更新好后，接着帮我开通 Colab：到服务器上运行 colab-free usage。还没授权，就读 references/colab-first-login.md，告诉我授权范围，然后带我走完 Google 账号授权，我只需要在浏览器里点一次同意；已经授权就跳过这一步。我说现在不用，也跳过。",
       "notes": {
         "date": "2026-11-07",
-        "headline": "跑着玩的作业可以主动排到别人后面；spark 排不上时可以放到 Google Colab",
+        "headline": "用户可以自主调整任务优先级",
         "changes": [
-          "你说「跑着玩」或「不急」时，AI 会把作业排到所有人的普通作业后面；不说就和以前一样。排队期间想恢复，一条命令就行",
+          "可以自主调低作业的优先级：告诉 AI 不急、可以让别人先跑，它会把作业排到所有人的普通作业后面；不说就和以前一样。排队期间想恢复，一条命令就行",
           "spark 排不上时，AI 会判断任务能不能放到 Google 的免费算力上；你同意后，传数据、跑任务、取结果、释放机器都由它代办",
           "这次更新时 AI 会顺便带你完成授权：只需在浏览器里点一次同意，不用自己建 Google Cloud 项目",
           "只用免费额度：账号有付费额度时工具会拒绝计算，也没有购买入口",
