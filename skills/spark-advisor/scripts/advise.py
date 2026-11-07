@@ -1602,7 +1602,14 @@ def workdir_warning(workdir):
             "看不出哪个对应哪次分析。把项目目录传给 --workdir，日志就进 <workdir>/logs/。")
 
 
-def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None):
+# 低优先级：只在用户明确说「跑着玩 / 不急 / 低优先级」时用，见 references/submit-flow.md「降低优先级」。
+# 数值要大于公平份额权重：2026-11-07 线上 PriorityWeightFairShare=100000，相邻两档份额差约 12500 分，
+# 小的 nice（如 100）只能调整自己几个作业之间的先后，让不了别人。管理员改权重时同步改这里。
+LOW_PRIORITY_NICE = 100000
+
+
+def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None,
+                   low_priority=False):
     # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
     # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
@@ -1631,6 +1638,9 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
         L.append("# （跑完也能用 advise.py gpu-peak <作业号> 读服务器采到的显存，但那只是下界。）")
     if time:
         L.append(f"#SBATCH --time={time}")
+    if low_priority:
+        L.append(f"#SBATCH --nice={LOW_PRIORITY_NICE}")
+        L.append("# 低优先级：排在所有人的普通作业之后。排队期间想恢复，运行 scontrol update jobid=<作业号> nice=0")
     if workdir:
         # workdir 是**服务器上**的绝对路径。在 Git Bash / MSYS 下调用本脚本时，
         # 形如 /home/... 的参数会被自动改写成 C:/Program Files/Git/home/...，
@@ -1672,6 +1682,11 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
                          boltz_num_workers_warning(command)) if w]
     if warns:
         result["warnings"] = warns
+    if low_priority:
+        result["low_priority"] = (
+            "已加 --nice=%d。讲给用户：排队时排在所有人的普通作业之后，同样降级的作业之间按提交先后；"
+            "资源空着照样马上跑，开始后不会被打断；排队期间想恢复，运行 "
+            "scontrol update jobid=<作业号> nice=0。" % LOW_PRIORITY_NICE)
     result["next"] = "Review, get user OK, then: advise.py submit --script <file>"
     return result
 
@@ -2282,6 +2297,9 @@ def main():
     g.add_argument("--workdir", default=None,
                    help="absolute path of the project dir on the server; job runs there and "
                         "logs go to <workdir>/logs/ instead of piling up in the home dir")
+    g.add_argument("--low-priority", action="store_true",
+                   help="只在用户明确说跑着玩 / 不急 / 低优先级时用：加 --nice=%d，"
+                        "排到所有人的普通作业之后。默认不加" % LOW_PRIORITY_NICE)
 
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
@@ -2448,7 +2466,7 @@ def main():
         emit(cmd_recommend(cfg, args.tool, args.gpu, args.mem_guess, args.cpus, args.time))
     elif args.cmd == "gen-sbatch":
         emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
-                            args.out, args.workdir))
+                            args.out, args.workdir, low_priority=args.low_priority))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script))
     elif args.cmd == "wait":
