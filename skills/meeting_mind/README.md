@@ -113,6 +113,13 @@ python -m venv .venv
 钥匙串里，可在云盘「设置 → 安全」里吊销）。云盘地址和会议文件夹第一次会自动从 spark 取，不写在 skill 里。
 手动用：`meetingmind cloud login | find | fetch | upload`。
 
+### 实验室面板「组会」页：谁先放就用谁的
+
+组会（主题或文件夹名里有「组会」「group meeting」「lab meeting」）解读完、问要不要上传云盘时，会再问要不要放到
+实验室面板的「组会」页。放之前先查面板上有没有同一场（同一天、录制时间段重叠过半），有人放过就不再重复放。
+只放会后阅读稿、逐页解读和其中用到的截图；spark 以你自己的账号把它们转成网页、截图压成 WebP，页面写着上传人。
+放上去之后改了总结，可以让 AI 更新你自己放的那份。手动用：`meetingmind panel check | publish`。
+
 ---
 
 ## 数据流和隐私（一定要看）
@@ -134,13 +141,17 @@ python -m venv .venv
    - 截图、转录、解读、总结和 FLAC 音频进云盘会议文件夹下的 `<会议>/`，**实验室成员都能看到**
    - 每次上传前都会问你；不想共享的会议选「先不传」
 
-4. **Anthropic（Claude）**：
+4. **实验室面板「组会」页**（只在组会、且你同意放上去时）：
+   - 会后阅读稿、逐页解读和其中用到的截图传到 spark，存进面板的组会目录，**组里成员都能在面板上看到**；转录和音频不传
+   - 每次放之前都会问你
+
+5. **Anthropic（Claude）**：
    - 当 Claude 主对话执行 AI 解读步骤时，会把每批 5 张截图 + 完整 transcript 文字**作为 prompt 发给 Anthropic API**
    - 数据流向受 [Anthropic Privacy Policy](https://www.anthropic.com/legal/privacy) 约束
    - **这一步无法绕过**——AI 解读必须依赖 Claude，否则就没法生成 interpretation.md / summary.md
    - 如果会议**特别敏感**（公司机密、医患对话、法律商务谈判等），考虑只跑到 transcript 阶段（说"录会议但不要 AI 总结"，skill 会在 P3 结束停下），后面手动决定要不要上 AI
 
-**除了实验室自己的 spark（服务器转录时）和云盘（你同意上传时），没有任何第三方服务在 Anthropic 之外接收你的数据。**
+**除了实验室自己的 spark（服务器转录、放面板时）和云盘（你同意上传时），没有任何第三方服务在 Anthropic 之外接收你的数据。**
 
 ---
 

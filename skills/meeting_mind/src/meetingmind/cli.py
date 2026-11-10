@@ -559,6 +559,33 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="With --as notes: which cloud meeting folder (default: the best match)")
     p_cloud_upload.add_argument("--json", action="store_true")
 
+    p_panel = subparsers.add_parser(
+        "panel",
+        help="The lab panel's group-meeting page: is this meeting up already; put it up",
+        description=(
+            "Put a group meeting's reading notes (summary.md, interpretation.md and the "
+            "screenshots they show) on the lab panel's 「组会」 page, run on spark as you. "
+            "Whoever processes a group meeting first puts it up; `check` tells the others it is "
+            "there (same day, overlapping recording time). Transcripts and audio never go up."
+        ),
+    )
+    panel_sub = p_panel.add_subparsers(dest="panel_command", metavar="<action>")
+    p_panel_check = panel_sub.add_parser("check", help="Is this meeting on the panel already?")
+    p_panel_publish = panel_sub.add_parser("publish", help="Put this meeting's reading notes on the panel")
+    for p in (p_panel_check, p_panel_publish):
+        p.add_argument("meeting_dir", type=Path)
+        p.add_argument("--json", action="store_true")
+        p.add_argument("--via", default=None, metavar="HOST",
+                       help="Reach spark through this ssh host (a machine that can `ssh spark`)")
+    p_panel_mode = p_panel_publish.add_mutually_exclusive_group()
+    p_panel_mode.add_argument("--new", action="store_true",
+                              help="Put it up although the panel has a possibly-same meeting that day "
+                                   "(the user said it is a different one)")
+    p_panel_mode.add_argument("--update", default=None, metavar="ID",
+                              help="Replace the notes of a meeting you put up yourself (its id from `check`)")
+    p_panel_publish.add_argument("--group-meeting", action="store_true",
+                                 help="The user confirmed this is a group meeting (its topic does not say so)")
+
     p_enroll = subparsers.add_parser(
         "enroll",
         help="Build a voiceprint from audio of one known person",
@@ -1349,6 +1376,58 @@ def _cloud_upload_cmd(cfg, args: argparse.Namespace) -> int:  # noqa: ANN001
     return 0
 
 
+def _run_panel(args: argparse.Namespace) -> int:
+    from . import config, panel
+    from .remote import RemoteError
+
+    if args.panel_command not in ("check", "publish"):
+        print("usage: meetingmind panel {check,publish} <meeting_dir> …", file=sys.stderr)
+        return 2
+    try:
+        cfg = config.load()
+        meeting_dir = args.meeting_dir.resolve()
+        if not meeting_dir.is_dir():
+            raise FileNotFoundError(f"Meeting directory not found: {meeting_dir} / 找不到会议目录")
+        meta = panel.read_metadata(meeting_dir)
+        info = panel.meeting_info(meeting_dir, meta)
+        client = panel.PanelClient(cfg.spark_host, via=args.via)
+        group = panel.looks_like_group_meeting(meeting_dir, meta)
+        if args.panel_command == "check":
+            result = {**panel.check(client, info), "group_meeting": group,
+                      "has_summary": (meeting_dir / "summary.md").is_file()}
+        elif not (group or args.group_meeting or args.update):
+            result = {"status": "not_group_meeting",
+                      "message": "the topic does not say group meeting; pass --group-meeting once the "
+                                 "user confirms it is one"}
+        else:
+            result = panel.publish(client, meeting_dir, info, new=args.new, update=args.update)
+    except (RuntimeError, FileNotFoundError, RemoteError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    status = result.get("status")
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif status in ("published", "updated"):
+        print(result.get("url", ""))
+    else:
+        for m in result.get("matches") or []:
+            same = "同一场" if m.get("same_meeting") else "同一天（没有录制时间，没法比对）"
+            print(f"{m.get('title')}  {m.get('start_time') or '?'}  {same}  上传：{m.get('uploader')}"
+                  f"{'（我）' if m.get('mine') else ''}  {m.get('url')}")
+        if status == "absent":
+            print("not on the panel yet / 面板上还没有这场")
+        elif status == "not_group_meeting":
+            print("not sent: the topic does not say group meeting / 主题里看不出是组会，没有上传"
+                  "（确认是组会就加 --group-meeting）", file=sys.stderr)
+    if status == "duplicate":
+        print("[panel] already on the panel — nothing sent / 面板上已经有这场了，这次没有上传", file=sys.stderr)
+    elif status == "maybe":
+        print("[panel] the panel has a meeting that day without recording times — nothing sent. "
+              "Same meeting? If not, re-run with --new. / 面板上同一天已有一场（没有录制时间），这次没上传；"
+              "不是同一场就加 --new 重跑。", file=sys.stderr)
+    return 3 if status in ("duplicate", "maybe") else 4 if status == "not_group_meeting" else 0
+
+
 def _run_postprocess(args: argparse.Namespace) -> int:
     from . import config
 
@@ -1478,6 +1557,7 @@ _DISPATCH = {
     "backends": _run_backends,
     "spark-cancel": _run_spark_cancel,
     "cloud": _run_cloud,
+    "panel": _run_panel,
     "enroll": _run_enroll,
     "recover": _run_recover,
 }
