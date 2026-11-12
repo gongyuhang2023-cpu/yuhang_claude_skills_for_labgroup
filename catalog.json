@@ -21,14 +21,12 @@
       "care_install": "装好后照 SKILL.md「首次配置」做：advise.py detect-server 找服务器，问我服务器用户名，再 advise.py init。配置好后，接着帮我开通 Colab：到服务器上运行 colab-free usage。还没授权，就读 references/colab-first-login.md，告诉我授权范围，然后带我走完 Google 账号授权，我只需要在浏览器里点一次同意；已经授权就跳过这一步。我说现在不用，也跳过。",
       "care_update": "config.json、env-profile.local.json、references/ 下的 *.local.* 和 spark-pitfalls.md 保留不动。文件更新好后，接着帮我开通 Colab：到服务器上运行 colab-free usage。还没授权，就读 references/colab-first-login.md，告诉我授权范围，然后带我走完 Google 账号授权，我只需要在浏览器里点一次同意；已经授权就跳过这一步。我说现在不用，也跳过。",
       "notes": {
-        "date": "2026-11-07",
-        "headline": "用户可以自主调整任务优先级",
+        "date": "2026-11-12",
+        "headline": "能查到放在 NAS 上的公共数据库，用之前自动取到本地",
         "changes": [
-          "可以自主调低作业的优先级：告诉 AI 不急、可以让别人先跑，它会把作业排到所有人的普通作业后面；不说就和以前一样。排队期间想恢复，一条命令就行",
-          "spark 排不上时，AI 会判断任务能不能放到 Google 的免费算力上；你同意后，传数据、跑任务、取结果、释放机器都由它代办",
-          "这次更新时 AI 会顺便带你完成授权：只需在浏览器里点一次同意，不用自己建 Google Cloud 项目",
-          "只用免费额度：账号有付费额度时工具会拒绝计算，也没有购买入口",
-          "执行地判断调整：跑超过几分钟的活默认上服务器"
+          "查公共数据库时会告诉你库放在哪：本地、NAS，还是两边都有；搜子库名也能搜到，比如搜 UHGV 会找到 virodb 里的 UHGV",
+          "作业要用 NAS 上的库时，AI 会先把需要的文件取到服务器本地的共享缓存再开始跑；别人取过的直接用，不用每人各存一份",
+          "缓存只读，取完核对过校验值；一段时间没人用会自动清掉，NAS 上的原件一直在"
         ]
       }
     },

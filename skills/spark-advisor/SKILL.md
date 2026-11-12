@@ -1,6 +1,6 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；查明脚本用的数据库版本（versions）；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装、NAS 上的库取到本地缓存：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；查明脚本用的数据库版本（versions）；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、NAS 上的数据库、把库取到本地、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
 ---
 
 # spark-advisor — 共享 GPU 服务器顾问
@@ -37,6 +37,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | spark 排不上、用 Colab 跑、用 Google 云跑 | `spark-colab`（在 spark 上运行） | `references/colab.md` |
 | 绑定 Google 账号、绑定云盘、Colab 授权过期 | `spark-colab login` | `references/colab-first-login.md` |
 | 服务器上有没有装 X、缺数据库、申请安装 | `software find` / `request` / `vote` | `references/software.md` |
+| 要用 NAS 上的数据库、把库取到本地 | `gen-sbatch --stage` / `db-cache` | `references/software.md` |
 | 磁盘不够、服务器上腾空间 | 按顺序：`project check` → `cleanup scan` → `cleanup cold` | `references/storage.md` |
 | 这几个环境和公共区重复，能删吗 | `cleanup scan` + 智能判断 | `references/cleanup.md` |
 | 把 X 搬到 NAS、从 NAS 搬回来、我搬过什么 | `cleanup apply --action archive` / `restore` / `archived` | `references/cold-data.md` |

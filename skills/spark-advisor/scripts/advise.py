@@ -957,11 +957,18 @@ def cmd_software_find(cfg, name, check_arch=False):
                 "commands": cmds[:10], "n_commands": len(t.get("exposed") or [])}))
     dbs = []
     for x in inv.get("dbs", []):
-        r = _rank(q, [x.get("name")], [x.get("version")])
-        if r < 9:
+        aliases = [v.strip() for v in (x.get("aliases") or "").split(",") if v.strip()]
+        nr = _rank(q, [x.get("name")], [])
+        ar = sorted(((_rank(q, [v], []), v) for v in aliases), key=lambda z: (z[0], z[1]))
+        matched = ar[0][1] if ar and ar[0][0] < 9 else None
+        vr = _rank(q, [], [x.get("version")])
+        # Every name match precedes every alias match; version-only matches follow.
+        r = nr if nr < 9 else (10 + ar[0][0] if matched else (20 + vr if vr < 9 else 99))
+        if r < 99:
             dbs.append((r, x.get("name") or "", {"name": x.get("name"), "version": x.get("version"),
-                                                  "path": x.get("path"), "current": bool(x.get("current")),
-                                                  "size": x.get("size")}))
+                "path": x.get("path"), "current": bool(x.get("current")), "size": x.get("size"),
+                "location": x.get("location"), "nas": x.get("nas", ""),
+                "aliases": x.get("aliases", ""), "matched_alias": matched if nr >= 9 else None}))
     reqs = [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
              "status": r.get("status"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
              "user": r.get("user"), "votes": len(r.get("votes") or []),
@@ -975,6 +982,20 @@ def cmd_software_find(cfg, name, check_arch=False):
         out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名和"
                         "数据库变量。cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。"
                         "数据库写带版本号的路径（结果才可复现）。")
+    nas_dbs = [x for x in out["dbs"] if x.get("nas") or x.get("location") in ("nas", "mixed")]
+    if nas_dbs:
+        cache = _soft(lambda: json.loads(ssh_run(cfg, "/usr/local/bin/db-cache list --json")))
+        for x in nas_dbs:
+            prefix = "/scratch/db-cache/" + x["name"] + "/" + x["version"] + "/"
+            x["cache_status"] = ("查询失败" if cache is None else
+                "已缓存（部分或全部，按文件确认）" if any(e.get("status") == "ready" and e.get("path", "").startswith(prefix)
+                    for e in cache.get("items", [])) else "未缓存")
+            x["cache_usage"] = ('db-cache fetch ' + x["path"] + '/<清单中的文件或目录> --wait; '
+                'D1=$(db-cache use ' + x["path"] + '/<清单中的文件或目录>)')
+        out["usage"] += (" NAS 共享库用 db-cache fetch <库路径> [--wait] 取到 /scratch/db-cache，"
+                         "作业开头 D1=$(db-cache use <库路径>) 登记使用。gen-sbatch --stage <库路径> 可重复，"
+                         "用户同意 submit 后自动先取库再带 afterok 依赖；缓存状态见 dbs.cache_status。"
+                         "nas 也可能是下载包或归档，只能取 .files.tsv 的 NAS 条目；不自动解包。")
     if check_arch or not (out["tools"] or out["dbs"]):
         out["arch"] = _conda_arch(name.strip())
     if d.get("me") is None:
@@ -1609,7 +1630,7 @@ LOW_PRIORITY_NICE = 100000
 
 
 def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None,
-                   low_priority=False):
+                   low_priority=False, stage=None):
     # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
     # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
@@ -1659,6 +1680,11 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
     # 它的激活脚本在 -u 下会报 unbound variable。必须放在最后一个 #SBATCH 之后 ——
     # sbatch 遇到第一条真命令就不再读 #SBATCH。
     L += ["", "set -eo pipefail"]
+    stages = cache_plan(cfg, stage or [])
+    for i, entry in enumerate(stages, 1):
+        path = entry["path"]
+        L += ["# DB-CACHE-STAGE " + json.dumps(path, ensure_ascii=True),
+              "D%d=$(db-cache use %s)" % (i, shlex.quote(path))]
     if is_gpu:
         # 没写 --mem 的按 lua 兜底的 96000M 算：第一次跑、没估计正是最需要自限的时候
         floor_gib = round(cfg.get("gpu_floor_gb", 96) * 1000 / 1024, 2)
@@ -1687,11 +1713,29 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
             "已加 --nice=%d。讲给用户：排队时排在所有人的普通作业之后，同样降级的作业之间按提交先后；"
             "资源空着照样马上跑，开始后不会被打断；排队期间想恢复，运行 "
             "scontrol update jobid=<作业号> nice=0。" % LOW_PRIORITY_NICE)
+    if stages:
+        result["stage"] = stages
+        result["stage_note"] = "提交时先取未缓存的库，主作业带 afterok 依赖；仍须先展示计划并取得用户同意。"
     result["next"] = "Review, get user OK, then: advise.py submit --script <file>"
     return result
 
 
-def cmd_submit(cfg, script_path):
+def cache_plan(cfg, paths):
+    result = []
+    for path in dict.fromkeys(paths):
+        if (not path.startswith("/opt/bio/db/") or any(c in path for c in "\r\n\0")
+                or ".." in path.split("/")):
+            die("无效 --stage 库路径：" + path)
+        entry = json.loads(ssh_run(cfg, "/usr/local/bin/db-cache _plan " + shlex.quote(path)))
+        result.append(entry)
+    return result
+
+
+def script_stages(script):
+    return [json.loads(m) for m in re.findall(r"^# DB-CACHE-STAGE (.+)$", script, re.M)]
+
+
+def cmd_submit(cfg, script_path, check_only=False):
     script_path = local_path(script_path)
     if not os.path.exists(script_path):
         die(f"script not found: {script_path}")
@@ -1700,6 +1744,17 @@ def cmd_submit(cfg, script_path):
             script = f.read()
     except (OSError, UnicodeDecodeError) as e:
         die(f"读不了 --script {script_path}：{e}")
+    stages = cache_plan(cfg, script_stages(script))
+    plan = {"stage": stages, "will_fetch": [e["path"] for e in stages if not e["cached"]],
+            "dependency": "afterok:<fetch-job-ids>" if any(not e["cached"] for e in stages) else None}
+    if check_only:
+        return {"check_only": True, **plan, "sbatch_script": script, "submitted": False}
+    dependencies = []
+    for entry in stages:
+        if entry["cached"]: continue
+        value = ssh_run(cfg, "/usr/local/bin/db-cache fetch " + shlex.quote(entry["path"])).strip()
+        if re.fullmatch(r"[0-9]+", value): dependencies.append(value)
+        elif value != entry["local"]: die("无法解析 db-cache fetch 结果：" + value)
     # --chdir 的目标和它下面的 logs/ 必须在作业启动前就存在：Slurm 打不开 --output
     # 指定的文件时，作业直接失败，而且失败信息本身也没地方写。
     created = None
@@ -1708,8 +1763,17 @@ def cmd_submit(cfg, script_path):
         wd = m.group(1)
         ssh_run(cfg, f"mkdir -p {shlex.quote(wd)}/logs")
         created = f"{wd}/logs"
-    out = ssh_run(cfg, "sbatch", stdin_data=script)
+    command = "sbatch" + (" --dependency=afterok:" + ":".join(dependencies) if dependencies else "")
+    out = ssh_run(cfg, command, stdin_data=script)
     result = {"submitted": out.strip(), "as_user": cfg["user"]}
+    result.update(plan, fetch_jobs=dependencies)
+    if stages:
+        match = re.search(r"Submitted batch job ([0-9]+)", out)
+        if not match: die("无法解析主作业号，不能登记缓存使用：" + out)
+        # Pin queued jobs immediately, including files whose fetch hasn't finished.
+        for entry in stages:
+            ssh_run(cfg, "sudo -n -u dbcache /usr/local/bin/db-cache _worker pin " +
+                    shlex.quote(entry["path"]) + " " + match.group(1))
     if created:
         result["ensured_dir"] = created
     return result
@@ -2301,8 +2365,11 @@ def main():
                    help="只在用户主动要求调低优先级时用（如说不急、可以让别人先跑）：加 --nice=%d，"
                         "排到所有人的普通作业之后。默认不加" % LOW_PRIORITY_NICE)
 
+    g.add_argument("--stage", action="append", default=[], help="NAS 库文件/目录；可重复，提交时先取库")
+
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
+    s.add_argument("--check-only", action="store_true", help="只展示取库及依赖计划，不提交")
 
     # 盯住一个作业，出事就返回。给 AI agent 用：正常跑的时候一声不吭、不花 token，
     # 作业结束/失败/**被冻结**/被取消时立刻返回，冻结于是变成一个会主动送达的事件。
@@ -2466,9 +2533,9 @@ def main():
         emit(cmd_recommend(cfg, args.tool, args.gpu, args.mem_guess, args.cpus, args.time))
     elif args.cmd == "gen-sbatch":
         emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
-                            args.out, args.workdir, low_priority=args.low_priority))
+                            args.out, args.workdir, low_priority=args.low_priority, stage=args.stage))
     elif args.cmd == "submit":
-        emit(cmd_submit(cfg, args.script))
+        emit(cmd_submit(cfg, args.script, check_only=args.check_only))
     elif args.cmd == "wait":
         # 退出码是这条命令的主要产物 —— 调用方（含 AI agent）靠它区分
         # 「跑完了」「挂了」「被冻了」，不必解析文本。

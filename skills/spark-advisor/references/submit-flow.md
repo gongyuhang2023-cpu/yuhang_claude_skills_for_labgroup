@@ -121,3 +121,14 @@ python scripts/advise.py wait <JobID> --max-wait <秒>
 
 ⚠️ 这只保证如实展示，**挡不住所有撞卡**：检查完到作业真正被调度之间，别人可能
 才开始裸跑，或排队作业才被派上。
+
+## 用到 NAS 上的数据库（db-cache）
+
+库在 NAS 上时（`software find` 的 `location` 是 `nas` 或 `mixed`），`gen-sbatch` 加 `--stage <库路径>`，可以写多个：
+
+- 生成的脚本开头会有 `D1=$(db-cache use <库路径>)`、`D2=...`，命令里用 `$D1`、`$D2`。`current` 在生成时就换成实际版本。
+- 只 stage 要用的文件或目录，别把整个库都取下来。清单里没有的文件会被拒绝；压缩包不会自动解开。
+- `submit` 时，没缓存的先交一个 1 核 2G 的取库作业，主作业用 `--dependency=afterok:<取库作业号>` 等它完成，并马上登记，免得排队期间缓存被清掉；已经缓存的直接提交。
+- `submit --check-only` 只看计划（会不会先取库、依赖哪个作业），不取库、不提交。
+- **总闸不变**：先把资源和计划给用户看，用户明确同意才 submit。
+- 手写的脚本也要用 `db-cache use` 登记，不然缓存可能被清掉。缓存规矩见 `software.md`。
