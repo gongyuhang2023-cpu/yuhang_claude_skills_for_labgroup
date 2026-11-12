@@ -16,15 +16,17 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ## Skills 列表
 
-### `git-auto-sync` — 一键 Git 同步
+### `git-auto-sync` — 选择 Gitea / GitHub 同步
 
-**用途**：对话中说"提交代码"、"git 保存并推送"即可触发，自动完成 `add → commit → push`。
+**用途**：说“保存并推到 Gitea”“只推 GitHub”即可按选定目标执行；支持项目级默认目标与双推。用户只要求提交时只做本地提交。
 
-**额外功能**：
-- 若项目根目录存在 `项目目录.md`，自动更新时间戳和变更日志
-- 科研实验项目一致性检测（检测 protocol/实验计划等关键文件变更时给出提醒）
+**功能**：
+- `--detect` 只读查看远程和目标；`--to gitea` / `--to github` 临时定向推送
+- `--push-only` 只推已有提交，不带上未提交修改；多个目标逐项报告结果
+- 首次接入会按 [Gitea 指引](skills/git-auto-sync/references/gitea-first-use.md) 配置账号、个人私有空仓库和认证；已有 GitHub 工作流可继续使用
+- 若项目已有 `项目目录.md`，保留目录时间戳与变更日志维护功能
 
-**依赖**：无（纯 Python 标准库 + git）
+**依赖**：Python 3.10+、Git 和本人已配置的 Git 凭据；适用于 Windows / macOS / Linux。安装与更新后先只读检测，不自动同步项目。
 
 ---
 
@@ -302,9 +304,12 @@ skills/
 │       └── category_rules.md      ← 自动分类标签规则
 ├── git-auto-sync/
 │   ├── SKILL.md
-│   └── scripts/
-│       ├── sync.py
-│       └── update_directory.py
+│   ├── scripts/
+│   │   ├── sync.py
+│   │   └── update_directory.py
+│   └── references/
+│       ├── gitea-first-use.md      ← 首次登录、建空仓库、认证与推送
+│       └── project-directory.md   ← 项目目录维护
 ├── meeting_mind/                  ← 会议录制引擎（线上 + 面对面，self-contained）
 │   ├── SKILL.md                   ← 完整工作流（Phase 1-4：参数确认 / 后台录制 / 转录 / AI 解读）
 │   ├── README.md                  ← 安装 + 使用 + 隐私说明

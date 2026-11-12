@@ -115,11 +115,18 @@
     {
       "name": "git-auto-sync",
       "icon": "sync",
-      "purpose": "一句话完成提交与推送，并维护项目目录索引",
+      "purpose": "选择 Gitea 或 GitHub 提交与推送，支持双推，并引导首次接入 Gitea",
       "notes": {
-        "date": "2026-03-10",
-        "headline": "首次发布"
-      }
+        "date": "2026-11-12",
+        "headline": "可以选择 Gitea 或 GitHub，并引导首次接入 Gitea",
+        "changes": [
+          "新增 --to gitea / github，可临时只推一个平台；设置 sync.targets 后可按项目选择日常单推或双推",
+          "新增首次使用 Gitea 指引：登录自己的账号、建立个人私有空仓库、配置认证并验证连接；安装与更新后会主动询问是否需要接入",
+          "新增只读 --detect 和 --push-only；无新修改也能推已有提交，目标不明确时在暂存前停止"
+        ]
+      },
+      "care_install": "安装后先读 SKILL.md，在我要同步的项目中只读运行 scripts/sync.py --detect；未指定项目先问目录。没有 Gitea 远程时问我是否需要首次接入，需要则按 references/gitea-first-use.md 带我配置；已经接入可跳过，只想用 GitHub 也尊重。安装本身不提交或推送项目。",
+      "care_update": "把新增 references/ 一并带上；保留个人配置、已有 remote、sync.targets 和凭据，个人定制版不要直接覆盖。更新后先按实际安装路径在我的项目中只读运行 --detect；尚未配置 Gitea 时询问是否需要首次接入，按 references/gitea-first-use.md 引导，已有配置或只用 GitHub 可跳过。更新本身不提交或推送项目。"
     }
   ]
 }
