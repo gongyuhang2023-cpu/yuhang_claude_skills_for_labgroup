@@ -56,17 +56,20 @@
       "path": "skill",
       "install": "readme",
       "icon": "review",
-      "purpose": "把方案、代码或数据结论交给服务器上的 Claude Code 独立审核，只审不改；修复后在同一会话复审",
-      "care": "本机已有不是从这个仓库装的个人版 duet，就保留个人版，不要用共享版覆盖。",
-      "care_install": "第一次使用照 skill/references/onboarding.md 接入。",
+      "purpose": "让另一家 AI 在你自己的 Linux 用户下审核方案、代码和结论，只看不改；电脑上缺另一家时，交给 spark 上你自己的 Linux 用户来审",
+      "care": "本机已有不是从这个仓库装的个人版 duet，就保留个人版，不要用共享版覆盖。默认交给另一家审；另一家用不了时，只有我同意才改用同一家审，并在结果里标明。送审前先给我看要送的文件清单：默认不带数据、密钥和大文件。审核只读，不会替我运行程序验证。",
+      "care_install": "照 skill/references/onboarding.md 安装 duet 和审核规则 spark-audit（在同一个仓库的 spark-audit/）。我在 spark 上用 AI 的话：两个都装在 spark 上我的用户下，Claude Code 和 Codex 都要能找到。我只在自己电脑上用的话：电脑上装 duet；电脑上没有 Claude Code 的，还要登录 spark，在我 spark 的 Linux 用户下也装上 duet 和 spark-audit。",
       "notes": {
-        "date": "2026-10-22",
-        "headline": "在 Codex 沙箱里连不上时说清原因和做法",
+        "date": "2026-11-12",
+        "headline": "审核改在你自己的 Linux 用户下运行，不用再登记电脑",
         "changes": [
-          "在 Codex 默认沙箱里送审、连接被拦下（报 Operation not permitted）时，直接提示经逐条批准在沙箱外重跑同一条命令，不再在沙箱里反复重试后放弃",
-          "连接失败时附上 SSH 的原始报错，原因一眼可见"
+          "Claude 写的交给 Codex 审，Codex 写的交给 Claude 审，都在你自己的 Linux 用户下运行",
+          "电脑上缺另一家时，会把这次要审的文件送到 spark，交给你 spark 上自己的 Linux 用户里的 AI 审，结果存在你 spark 上的 ~/duet/",
+          "不用再登记电脑、开文件服务和反向隧道，更新时 AI 会帮你把旧的拆掉",
+          "改完可以在同一个记录里接着复审"
         ]
-      }
+      },
+      "care_update": "这是 2.0 大版本，审核改在本人自己的 Linux 用户下运行。先照 skill/references/upgrade.md 停掉并删掉旧版的设备桥接：只读文件服务、反向隧道，Windows 上还有开机自启项 SparkReviewDevice；旧的审核记录和 config.json 保留。然后照 skill/references/onboarding.md 装新版：我在 spark 上用 AI 的，在 spark 上更新 duet 并装上 spark-audit；我只在电脑上用的，在电脑上更新 duet，电脑上没有 Claude Code 的，再登录 spark，在我 spark 的 Linux 用户下装 duet 和 spark-audit。"
     },
     {
       "name": "meeting_mind",
