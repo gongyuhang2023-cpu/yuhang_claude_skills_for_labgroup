@@ -60,7 +60,7 @@
       "care": "本机已有不是从这个仓库装的个人版 duet，就保留个人版，不要用共享版覆盖。默认交给另一家审；另一家用不了时，只有我同意才改用同一家审，并在结果里标明。送审前先给我看要送的文件清单：默认不带数据、密钥和大文件。审核只读，不会替我运行程序验证。",
       "care_install": "照 skill/references/onboarding.md 安装 duet 和审核规则 spark-audit（在同一个仓库的 spark-audit/）。我在 spark 上用 AI 的话：两个都装在 spark 上我的用户下，Claude Code 和 Codex 都要能找到。我只在自己电脑上用的话：电脑上装 duet；电脑上没有 Claude Code 的，还要登录 spark，在我 spark 的 Linux 用户下也装上 duet 和 spark-audit。",
       "notes": {
-        "date": "2026-11-12",
+        "date": "2026-11-13",
         "headline": "审核改在你自己的 Linux 用户下运行，不用再登记电脑",
         "changes": [
           "Claude 写的交给 Codex 审，Codex 写的交给 Claude 审，都在你自己的 Linux 用户下运行",
