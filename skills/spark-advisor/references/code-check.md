@@ -1,11 +1,10 @@
 # 服务器上的项目：代码推了没、推到 Gitea
 
-> 什么时候读：用户问「服务器上的代码推了没」「这个项目还要不要留在服务器上」「我的脚本用的数据库是哪个版本」「把服务器上的项目推到 Gitea」时。
-> 本机上的项目用 git-auto-sync；这里只管**服务器上**的项目。
+> 什么时候读：用户问「服务器上的代码推了没」「这个项目还要不要留在服务器上」「把服务器上的项目推到 Gitea」时。
+> 本机上的项目用 git-auto-sync；这里只管**服务器上**的项目。脚本用的是哪个版本的数据库、锁版本，看 `database.md`。
 
 逻辑在 `scripts/remote_project.py`，引擎经 ssh 交给服务器上的 `python3` 执行。它以用户自己的身份运行，从不 `--force`，令牌不经过它：
 
-    python scripts/advise.py versions <项目目录>                                        # 只查脚本用的公共数据库是哪个版本（不跑 git，快）
     python scripts/advise.py project check <项目目录>                                   # 只看不动
     python scripts/advise.py project ignore <项目目录> --add data/ results/ [--yes]     # 把数据目录写进 .gitignore
     python scripts/advise.py project push <项目目录> -m "<说明>"                         # 预演：要提交的文件、大小、plan_id
@@ -24,7 +23,7 @@
   - `results/` 不强制忽略：小的结果表可以进 git，单个超过 50 MB 的照样拦；大的结果按 `cold-data.md` 搬到 NAS。
   - 用 `gen-sbatch` 跑过作业的项目，`logs/` 里全是作业日志：第一次推之前用 `project ignore` 把它写进 `.gitignore`。日志照样留在服务器上。
 - 嵌套的仓库、属主是 root 的文件（git 会因为 dubious ownership 拒绝）、git 身份（`user.name` / `user.email`）有没有配。
-- **用到的公共数据库**：脚本里写的 `/opt/bio/db/<库>/<版本|current>`，以及登录环境里指向它的变量，都解析成实际版本。`current` 和变量解析出来的是**今天**的版本，不一定是当初出结果时用的；写论文以出结果那天的作业日志为准。
+- **用到的公共数据库**（`db_refs`）：规则和 `database scan` 一样，`current` 和默认变量解析出来的是**今天**的版本。核对版本、锁版本用 `database check` / `lock` / `pin`，见 `database.md`。
 - 有没有环境说明文件（environment.yml / pixi.lock / requirements.txt 等）。
 - `todo` 列出要做的事。
   - 项目能不能离开服务器，看 `code_safe`：有远端，没有没提交的改动和没推的提交，别的分支和 stash 也都推了。

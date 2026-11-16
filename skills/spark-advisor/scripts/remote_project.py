@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """服务器上的项目：代码推了没、推到 Gitea。
 
-advise.py project … 经 ssh 用 `python3 -I - <参数>` 把本文件送到服务器上执行（纯标准库）。
+advise.py project … 经 ssh 用 `python3 -I - <参数>` 把本文件送到服务器上执行（纯标准库）；
+查脚本用到的公共数据库用 db_project.py（advise.py 把它和本文件打成一个包一起送过来）。
 只以本人身份动本人的仓库；绝不 --force；令牌不经过这里（缺凭据时 git 直接失败，不卡住等输入）。
 写操作（ignore / push / init）不带 --yes 只预演；push 预演给出 plan_id，带 --yes 时核对 plan_id 没变才动手
 （预演到确认之间，作业可能又往仓库里写了东西）。
@@ -14,6 +15,8 @@ import re
 import subprocess
 import sys
 
+import db_project
+
 BIG = 50 << 20                     # 单个文件超过它就拦：数据放 NAS，不进 git
 WARN_TOTAL = 90 << 20              # 一次推送接近 100 MB 时提醒（站点前面的代理可能限制单次上传）
 # 必须写进 .gitignore 的目录 -> 拦下时的理由。results/ 不在里面：小的结果表可以进 git，大文件由 BIG 拦
@@ -21,14 +24,6 @@ DATA_DIRS = {"data": "数据放 NAS，目录写进 .gitignore", "_data": "数据
              "logs": "作业日志不进 git，目录写进 .gitignore（日志照样留在服务器上）"}
 SECRET_RE = re.compile(r"(^|/)(\.env(\.[^/]*)?|id_(rsa|ed25519|ecdsa|dsa)|[^/]*\.pem|[^/]*\.key|\.netrc|"
                        r"\.git-credentials|credentials(\.json)?|[^/]*token[^/]*\.txt)$", re.I)
-INVENTORY = "/opt/bio/var/inventory.json"
-DB_ROOT = "/opt/bio/db"
-DB_RE = re.compile(re.escape(DB_ROOT) + r"/([A-Za-z0-9_.+-]+)/([A-Za-z0-9_.+-]+)")
-SCRIPT_EXT = {".sh", ".bash", ".py", ".r", ".rmd", ".qmd", ".smk", ".nf", ".sbatch", ".slurm", ".yaml",
-              ".yml", ".toml", ".cfg", ".config", ".ipynb", ".pl", ".mk"}
-SCRIPT_NAMES = {"Snakefile", "Makefile", "nextflow.config"}
-PRUNE = {".git", ".snakemake", "work", "node_modules", "__pycache__", ".pixi", "envs", "_data", "data",
-         "results", "logs", ".ipynb_checkpoints"}
 ENV_SPECS = ("environment.yml", "environment.yaml", "pixi.toml", "pixi.lock", "requirements.txt",
              "renv.lock", "conda-lock.yml", "pyproject.toml", "DESCRIPTION")
 
@@ -147,55 +142,13 @@ def unpushed_blobs(top, upstream):
     return big, total, commits_out.splitlines() if commits_rc == 0 else []
 
 
-def scan_db_refs(top):
-    """脚本里用到的公共数据库：直接写的 /opt/bio/db/<库>/<版本|current>，和登录环境里指向它的变量。"""
-    env_vars = {}
-    try:
-        p = subprocess.run(["bash", "-lc", "env"], capture_output=True, text=True, timeout=20)
-        for ln in p.stdout.splitlines():
-            k, _, v = ln.partition("=")
-            if v.startswith(DB_ROOT + "/") and re.fullmatch(r"[A-Z_][A-Z0-9_]*", k):
-                env_vars[k] = v
-    except Exception:
-        pass
-    var_re = re.compile(r"\$\{?(%s)\b" % "|".join(map(re.escape, env_vars))) if env_vars else None
-    hits = {}
-    for dirpath, dirnames, filenames in os.walk(top):
-        dirnames[:] = [d for d in dirnames if d not in PRUNE and not os.path.islink(os.path.join(dirpath, d))]
-        for fn in filenames:
-            if fn not in SCRIPT_NAMES and os.path.splitext(fn)[1].lower() not in SCRIPT_EXT:
-                continue
-            full = os.path.join(dirpath, fn)
-            try:
-                if os.path.getsize(full) > 1 << 20:
-                    continue
-                with open(full, encoding="utf-8", errors="replace") as f:
-                    for no, line in enumerate(f, 1):
-                        refs = [m.group(0) for m in DB_RE.finditer(line)]
-                        if var_re:
-                            refs += ["$" + m.group(1) for m in var_re.finditer(line)]
-                        for r in refs:
-                            h = hits.setdefault(r, [])
-                            if len(h) < 5:
-                                h.append("%s:%d" % (os.path.relpath(full, top), no))
-            except OSError:
-                continue
-    try:
-        with open(INVENTORY, encoding="utf-8") as f:
-            dbs = json.load(f).get("dbs", [])
-    except Exception:
-        dbs = []
-    res = []
-    for ref, where in sorted(hits.items()):
-        path = env_vars.get(ref[1:], "") if ref.startswith("$") else ref
-        real = os.path.realpath(path) if path else ""
-        rec = next((d for d in dbs if real == d.get("path") or real.startswith(d.get("path", "\0") + "/")), None)
-        res.append({"ref": ref, "points_to": path or None, "resolved": real or None,
-                    "db": rec.get("name") if rec else None, "version": rec.get("version") if rec else None,
-                    "is_current_link": "/current" in path, "where": where})
-    note = ("current 和变量解析出来的是今天的版本，不一定是当初出结果时用的版本；"
-            "写论文时以出结果那天的作业日志为准") if any(r["is_current_link"] or r["ref"].startswith("$") for r in res) else None
-    return res, note
+def db_refs(top):
+    """脚本里用到的公共数据库（规则同 database scan）：字面路径、变量、db-cache use、调用了绑定工具却没设变量。"""
+    facts = db_project.gather_facts()
+    sc = db_project.scan(top, facts)
+    note = ("current 和默认变量指向今天的版本，以后会变；查版本、锁版本用 database scan / check / lock / pin"
+            if any(r.get("uses_current") for r in sc["refs"]) else None)
+    return sc["refs"], note
 
 
 def find_nested_and_root(top, limit=40000):
@@ -245,7 +198,7 @@ def cmd_check(p):
             res["error"] = "git 拒绝了这个目录（属主不是你）：" + se.strip()[-200:]
         res["env_specs"] = [s for s in ENV_SPECS if os.path.exists(os.path.join(top_in, s))]
         res["data_dirs"] = [d for d in DATA_DIRS if os.path.isdir(os.path.join(top_in, d))]
-        res["db_refs"], res["db_note"] = scan_db_refs(top_in)
+        res["db_refs"], res["db_note"] = db_refs(top_in)
         res["next"] = "还不是 git 仓库：先在 Gitea 网页上建一个私有库，再 project init <路径> --remote <网址>"
         out(res)
     top = so.strip()
@@ -274,7 +227,7 @@ def cmd_check(p):
             ignored = git(top, "check-ignore", "-q", d + "/")[0] == 0
             data_dirs.append({"dir": d + "/", "ignored": ignored})
     nested, root_owned = find_nested_and_root(top)
-    db_refs, db_note = scan_db_refs(top)
+    refs, db_note = db_refs(top)
     res.update({
         "path": tilde(top), "branch": branch, "detached": branch is None, "remotes": remotes, **rs,
         "upstream_remote": rs["upstream"].split("/", 1)[0] if rs.get("upstream") else None,
@@ -288,7 +241,7 @@ def cmd_check(p):
         "push_size_estimate_mb": round((pending + total) / 2**20, 1),
         "data_dirs": data_dirs, "nested_repos": nested, "root_owned": root_owned,
         "identity": identity(top), "env_specs": [s for s in ENV_SPECS if os.path.exists(os.path.join(top, s))],
-        "db_refs": db_refs, "db_note": db_note,
+        "db_refs": refs, "db_note": db_note,
     })
     todo = []
     if not remotes:
@@ -322,13 +275,6 @@ def cmd_check(p):
     res["code_safe"] = bool(remotes) and not res["detached"] and not files and not commits and not others \
         and not stash and not rs.get("remote_error")
     out(res)
-
-
-def cmd_versions(p):
-    """只查脚本里用到的公共数据库是哪个版本：不跑 git、不联网，比 check 快。"""
-    top = project_dir(p)
-    refs, note = scan_db_refs(top)
-    out({"path": tilde(top), "db_refs": refs, "db_note": note})
 
 
 def cmd_ignore(p, patterns, yes):
@@ -447,8 +393,6 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check")
     c.add_argument("path")
-    v = sub.add_parser("versions")
-    v.add_argument("path")
     ig = sub.add_parser("ignore")
     ig.add_argument("path")
     ig.add_argument("--add", nargs="+", required=True)
@@ -468,8 +412,6 @@ def main():
         out({"error": "不要用 root 跑"}, 2)
     if a.cmd == "check":
         cmd_check(a.path)
-    elif a.cmd == "versions":
-        cmd_versions(a.path)
     elif a.cmd == "ignore":
         cmd_ignore(a.path, a.add, a.yes)
     elif a.cmd == "push":

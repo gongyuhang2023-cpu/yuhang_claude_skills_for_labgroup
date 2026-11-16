@@ -1,6 +1,6 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件和数据库（查有没有装、申请安装、NAS 上的库取到本地缓存：software）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；查明脚本用的数据库版本（versions）；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、NAS 上的数据库、把库取到本地、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件（查有没有装、申请安装：software）；公共数据库（database）：查有哪些版本、自己把库装进 NAS 公共库、申请、NAS 上的库取到本地缓存、给项目锁定数据库版本（databases.lock.json）、个人下载的库比对后放进公共库；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、自己装数据库、下载数据库到公共区、NAS 上的数据库、把库取到本地、数据库版本、锁定数据库版本、脚本用的哪个版本的库、我自己下的库放进公共区、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
 ---
 
 # spark-advisor — 共享 GPU 服务器顾问
@@ -12,7 +12,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 出任何推荐、写 sbatch、查软件、清理或搬数据之前，先跑 `python scripts/advise.py rules`（只查、只推服务器上的代码不用）。它读服务器面板的 `/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库（`/opt/bio/db`）、sbatch 模板和**此刻**的空闲资源。
 
 - 与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
-- 生成 sbatch 时**优先用共享软件和共享数据库**（如 `$CHECKVDB`），不要让用户自建环境或另下一份数据库。
+- 生成 sbatch 时**优先用共享软件和共享数据库**，不要让用户自建环境或另下一份数据库。数据库写带版本号的路径（`$CHECKVDB` 这类默认变量指向 current，会变），见 `references/database.md`。
 - 一次会话读一次即可；要看最新的空闲资源用 `status`。
 
 ## ⛔ 红线与总闸（动手前必看）
@@ -36,14 +36,16 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 服务器忙不忙 | `status`：人话汇总 GPU 空/忙、可调度内存、空闲核、队列；`disk.hint` 有内容就转达 | — |
 | spark 排不上、用 Colab 跑、用 Google 云跑 | `spark-colab`（在 spark 上运行） | `references/colab.md` |
 | 绑定 Google 账号、绑定云盘、Colab 授权过期 | `spark-colab login` | `references/colab-first-login.md` |
-| 服务器上有没有装 X、缺数据库、申请安装 | `software find` / `request` / `vote` | `references/software.md` |
-| 要用 NAS 上的数据库、把库取到本地 | `gen-sbatch --stage` / `db-cache` | `references/software.md` |
+| 服务器上有没有装某个工具、申请装软件 | `software find` / `request` / `vote` | `references/software.md` |
+| 有没有某个数据库、有哪些版本、缺数据库、自己装一个库、申请装库 | `database find` → `plan` → `install` / `request` | `references/database.md` |
+| 要用 NAS 上的数据库、把库取到本地 | `gen-sbatch --stage` / `db-cache` | `references/database.md` |
 | 磁盘不够、服务器上腾空间 | 按顺序：`project check` → `cleanup scan` → `cleanup cold` | `references/storage.md` |
 | 这几个环境和公共区重复，能删吗 | `cleanup scan` + 智能判断 | `references/cleanup.md` |
 | 把 X 搬到 NAS、从 NAS 搬回来、我搬过什么 | `cleanup apply --action archive` / `restore` / `archived` | `references/cold-data.md` |
 | 服务器上的代码推了没、推到 Gitea | `project check` / `push` / `init` | `references/code-check.md` |
 | 这个项目还要不要留在服务器上 | `project check` → `cleanup scan`（项目专用的环境）→ 搬到 NAS | `references/storage.md` |
-| 查明脚本里用的数据库是哪个版本 | `versions`（把 `current` 和数据库变量解析成实际版本） | `references/code-check.md` |
+| 脚本用的是哪个版本的库、锁定数据库版本 | `database scan` / `check` / `lock` / `pin` | `references/database.md` |
+| 我自己下了一份库：能不能放进公共区、能不能删 | `database compare` → `adopt` | `references/database.md` |
 | 删掉的文件还能找回吗 | — | `references/storage.md` |
 | 某个包能不能在 aarch64 装 | — | `references/env-notes.md` |
 

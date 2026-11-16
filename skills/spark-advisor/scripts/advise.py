@@ -33,10 +33,15 @@ Subcommands:
                     only safety net there is.
   rules             the server's own rules + shared software/databases + live free
                     resources (the panel's /ai.md) -- the single source of truth
-  software find/    look up a shared tool / database / existing install request on the
-  request/vote      panel; draft a request and submit it (or +1 one) only with --yes.
-                    Must run from the user's own computer: the panel identifies people
-                    by the Tailscale account of the device that sends the request.
+  software find/    look up a shared tool / existing tool request on the panel; draft a
+  request/vote      request and submit it (or +1 one) only with --yes. Must run from the
+                    user's own computer: the panel identifies people by the Tailscale
+                    account of the device that sends the request.
+  database ...      shared databases: find (every version, where it lives, how it was
+                    installed, cache state); plan/install/status (self-install into the
+                    NAS public library via the server's db-install, dry run first);
+                    scan/check/lock/pin (the project's databases.lock.json, see
+                    db_project.py); adopt/compare (a personal copy); request/vote.
   cleanup scan/     relay to the server command `spark-cleanup` (runs as the user, dry
   refs/apply        by default): personal envs / database copies that duplicate the
                     shared ones, with tier, references, in-use checks and real space
@@ -869,9 +874,9 @@ def cmd_rules(cfg):
     return 0
 
 
-# ----------------------------- software: 查公共软件 / 数据库，申请安装 -----------------------------
+# ----------------------------- software: 查公共工具，申请安装 -----------------------------
 # 数据来自面板 /api/software。申请按来源设备的 Tailscale 账号认人，所以只能从你自己的电脑发；
-# 提交和 +1 都是全组看得见的动作 —— 不带 --yes 只出草稿，用户同意后才真的发。
+# 提交和 +1 都是全组看得见的动作 —— 不带 --yes 只出草稿，用户同意后才真的发。数据库在下面的 database 段。
 
 REQ_STATUS_CN = {"pending": "待处理", "accepted": "已接受，安装中", "installed": "已安装", "rejected": "未采纳"}  # 同面板
 
@@ -955,52 +960,40 @@ def cmd_software_find(cfg, name, check_arch=False):
             tools.append((r, t.get("package") or "", {
                 "package": t.get("package"), "version": t.get("version"), "env": t.get("env"),
                 "commands": cmds[:10], "n_commands": len(t.get("exposed") or [])}))
-    dbs = []
-    for x in inv.get("dbs", []):
-        aliases = [v.strip() for v in (x.get("aliases") or "").split(",") if v.strip()]
-        nr = _rank(q, [x.get("name")], [])
-        ar = sorted(((_rank(q, [v], []), v) for v in aliases), key=lambda z: (z[0], z[1]))
-        matched = ar[0][1] if ar and ar[0][0] < 9 else None
-        vr = _rank(q, [], [x.get("version")])
-        # Every name match precedes every alias match; version-only matches follow.
-        r = nr if nr < 9 else (10 + ar[0][0] if matched else (20 + vr if vr < 9 else 99))
-        if r < 99:
-            dbs.append((r, x.get("name") or "", {"name": x.get("name"), "version": x.get("version"),
-                "path": x.get("path"), "current": bool(x.get("current")), "size": x.get("size"),
-                "location": x.get("location"), "nas": x.get("nas", ""),
-                "aliases": x.get("aliases", ""), "matched_alias": matched if nr >= 9 else None}))
-    reqs = [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
-             "status": r.get("status"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
-             "user": r.get("user"), "votes": len(r.get("votes") or []),
-             "voted_by_me": d.get("me") in (r.get("votes") or []), "note": r.get("note")}
-            for r in d.get("requests", []) if q in str(r.get("name") or "").lower()]
     out = {"query": name, "me": d.get("me"),
            "tools": [x[2] for x in sorted(tools, key=lambda x: (x[0], x[1]))][:10],
-           "dbs": [x[2] for x in sorted(dbs, key=lambda x: (x[0], x[1]))][:10],
-           "requests": reqs[:10], "page": panel_url(cfg, "/software")}
-    if out["tools"] or out["dbs"]:
-        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名和"
-                        "数据库变量。cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。"
-                        "数据库写带版本号的路径（结果才可复现）。")
-    nas_dbs = [x for x in out["dbs"] if x.get("nas") or x.get("location") in ("nas", "mixed")]
-    if nas_dbs:
-        cache = _soft(lambda: json.loads(ssh_run(cfg, "/usr/local/bin/db-cache list --json")))
-        for x in nas_dbs:
-            prefix = "/scratch/db-cache/" + x["name"] + "/" + x["version"] + "/"
-            x["cache_status"] = ("查询失败" if cache is None else
-                "已缓存（部分或全部，按文件确认）" if any(e.get("status") == "ready" and e.get("path", "").startswith(prefix)
-                    for e in cache.get("items", [])) else "未缓存")
-            x["cache_usage"] = ('db-cache fetch ' + x["path"] + '/<清单中的文件或目录> --wait; '
-                'D1=$(db-cache use ' + x["path"] + '/<清单中的文件或目录>)')
-        out["usage"] += (" NAS 共享库用 db-cache fetch <库路径> [--wait] 取到 /scratch/db-cache，"
-                         "作业开头 D1=$(db-cache use <库路径>) 登记使用。gen-sbatch --stage <库路径> 可重复，"
-                         "用户同意 submit 后自动先取库再带 afterok 依赖；缓存状态见 dbs.cache_status。"
-                         "nas 也可能是下载包或归档，只能取 .files.tsv 的 NAS 条目；不自动解包。")
-    if check_arch or not (out["tools"] or out["dbs"]):
+           "requests": _requests(d, q, "tool")[:10], "page": panel_url(cfg, "/software")}
+    if out["tools"]:
+        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名。"
+                        "cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。")
+    n_db = sum(1 for x in inv.get("dbs", []) if _db_rank(q, x)[0] < 99)
+    if n_db:
+        out["dbs_hint"] = "公共区还有和「%s」相关的数据库（%d 个版本）：查库用 database find %s" % (name.strip(), n_db, name.strip())
+    if check_arch or not out["tools"]:
         out["arch"] = _conda_arch(name.strip())
     if d.get("me") is None:
         out["warning"] = "面板没认出这台电脑（没登记或不在 Tailscale 上）：能查，但不能提交申请。"
     return out
+
+
+def _requests(d, q, kind):
+    return [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
+             "status": r.get("status"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
+             "user": r.get("user"), "votes": len(r.get("votes") or []),
+             "voted_by_me": d.get("me") in (r.get("votes") or []), "note": r.get("note"),
+             **({"available_versions": r.get("available_versions") or []} if kind == "db" else {})}
+            for r in d.get("requests", []) if r.get("kind") == kind and q in str(r.get("name") or "").lower()]
+
+
+def _db_rank(q, x):
+    """-> (排序键, 命中的别名)。库名命中排最前，其次别名（搜 UHGV 能找到包含它的 virodb），只命中版本号的排最后。"""
+    aliases = [v.strip() for v in (x.get("aliases") or "").split(",") if v.strip()]
+    nr = _rank(q, [x.get("name")], [])
+    ar = sorted(((_rank(q, [v], []), v) for v in aliases), key=lambda z: (z[0], z[1]))
+    matched = ar[0][1] if ar and ar[0][0] < 9 else None
+    vr = _rank(q, [], [x.get("version")])
+    r = nr if nr < 9 else (10 + ar[0][0] if matched else (20 + vr if vr < 9 else 99))
+    return r, (matched if nr >= 9 else None)
 
 
 def cmd_software_request(cfg, kind, name, version, source, reason, yes):
@@ -1019,7 +1012,7 @@ def cmd_software_request(cfg, kind, name, version, source, reason, yes):
                                          "page": panel_url(cfg, "/software#request")}
 
 
-def cmd_software_vote(cfg, rid, yes):
+def cmd_software_vote(cfg, rid, yes, kind="tool"):
     """只加票、不撤票：面板的 +1 是开关，已经投过再发一次就撤掉了，所以先查一次。撤票让用户在网页上点。"""
     if _on_server(cfg):
         return 3, {"error": "现在是在服务器上运行，面板会认错人。请让用户在网页上点「我也需要」。",
@@ -1031,6 +1024,9 @@ def cmd_software_vote(cfg, rid, yes):
     r = next((x for x in d.get("requests", []) if x.get("id") == rid), None)
     if not r:
         return 2, {"error": "没有第 %d 条申请" % rid}
+    if r.get("kind") != kind:
+        return 2, {"error": "第 %d 条是%s申请：用 %s vote %d" % (
+            rid, "数据库" if r.get("kind") == "db" else "工具", "database" if r.get("kind") == "db" else "software", rid)}
     me, voters = d.get("me"), r.get("votes") or []
     info = {"request": rid, "name": r.get("name"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
             "user": r.get("user"), "votes": len(voters)}
@@ -1192,13 +1188,25 @@ def write_archive_list(cfg, payload):
     return payload
 
 
-# 服务器上的项目：代码推了没、推 Gitea。逻辑在 remote_project.py，经 ssh 交给服务器上的 python3 -I - 执行
-PROJECT_SCRIPT = os.path.join(HERE, "remote_project.py")
+# 服务器上的项目：代码推了没、推 Gitea。逻辑在 remote_project.py，经 ssh 交给服务器上的 python3 -I - 执行；
+# 它查数据库引用要用 db_project.py，两个文件打成一个包一起送过去（服务器上没有本 skill 的文件）。
+def _source(name):
+    with open(os.path.join(HERE, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def _bundle(main, *modules):
+    """给 `python3 -I -` 的 stdin：先从源码建好 modules（import 得到），再跑 main。"""
+    parts = ["import sys as _sys, types as _types"]
+    for m in modules:
+        parts.append("_m = _types.ModuleType(%r)\nexec(compile(%r, %r, 'exec'), _m.__dict__)\n_sys.modules[%r] = _m\ndel _m"
+                     % (m, _source(m + ".py"), m + ".py", m))
+    parts.append(_source(main))
+    return "\n".join(parts)
 
 
 def cmd_project(cfg, argv, timeout=180):
-    with open(PROJECT_SCRIPT, encoding="utf-8") as f:
-        script = f.read()
+    script = _bundle("remote_project.py", "db_project")
     remote = "GIT_TERMINAL_PROMPT=0 python3 -I - " + " ".join(shlex.quote(a) for a in argv)
     rc, out, err = ssh_try(cfg, remote, timeout=timeout, stdin_data=script)
     if rc == 255 and not out.strip():
@@ -1210,6 +1218,456 @@ def cmd_project(cfg, argv, timeout=180):
         return rc, json.loads(out)
     except ValueError:
         return 1, {"error": "remote_project 的输出不是 JSON", "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]}
+
+
+# ----------------------------- database: 公共数据库 -----------------------------
+# 查（面板 /api/software）、自己装进 NAS 公共库（服务器的 db-install：plan 预演 → 用户同意 → submit）、
+# 项目的数据库清单 databases.lock.json（db_project.py：项目在本机就在本机扫，否则送到服务器上扫）、
+# 个人副本的比对与收编、申请。会写东西的默认只预演。
+
+DB_ROOT = "/opt/bio/db"
+DB_INSTALL = "/usr/local/bin/db-install"
+DB_CACHE = "/usr/local/bin/db-cache"
+CACHE_ROOT = "/scratch/db-cache"
+NAS_MIN_BYTES = 2 * 10 ** 12          # 同服务器：NAS 装完至少剩 2 TB
+LOCAL_MIN_BYTES = 350 * 10 ** 9       # 同服务器：本地至少留 350 GB，不够就取不进缓存
+RECIPES = ("generic", "gtdbtk", "bakta", "checkv", "genomad")
+LOCATION_CN = {"local": "本地", "nas": "NAS", "mixed": "两边都有"}
+VERIFICATION_CN = {"official": "已和官方校验值核对", "self": "上游没有校验值，只核对了下载完整",
+                   "local-copy": "本地副本，未与官方核对"}
+COMPAT_CN = {"pass": "公共工具读得了", "fail": "公共工具读不了", "untested": "没测出来（判断不了）"}
+INSTALL_STATUS_CN = {"running": "安装中", "success": "装好了", "failed": "失败", "exists": "公共区已有，没有装",
+                     "pending": "排队中", "submitted": "已提交"}
+_DB_PROJECT = None
+
+
+def _db_project():
+    """按路径载入 db_project.py：ws 经 PC 引擎调用时 sys.path 里没有本目录，不能直接 import。"""
+    global _DB_PROJECT
+    if _DB_PROJECT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("db_project", os.path.join(HERE, "db_project.py"))
+        _DB_PROJECT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_DB_PROJECT)
+    return _DB_PROJECT
+
+
+def _server(cfg, command, timeout=60, stdin_data=None):
+    """在服务器上跑一条命令：本机就是服务器时直接跑，否则经 ssh。-> (rc, stdout, stderr)"""
+    if not _on_server(cfg):
+        return ssh_try(cfg, command, timeout=timeout, stdin_data=stdin_data)
+    try:
+        r = subprocess.run(["bash", "-c", command], capture_output=True, timeout=timeout,
+                           input=stdin_data.encode("utf-8") if stdin_data is not None else None,
+                           stdin=subprocess.DEVNULL if stdin_data is None else None)
+    except subprocess.TimeoutExpired:
+        return 255, "", f"timed out after {timeout}s"
+    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+
+
+def _gb(n):
+    try:
+        return round(int(n) / 1e9, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _size(n):
+    """给人看的大小（10^3 进位，同本 skill 其他地方的 GB）：不足 1 MB 用 KB，不足 1 GB 用 MB，其余用 GB。"""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return None
+    div, unit = (1e9, "GB") if abs(n) >= 10 ** 9 else (1e6, "MB") if abs(n) >= 10 ** 6 else (1e3, "KB")
+    return "%.1f %s" % (n / div, unit)
+
+
+def _size_bytes(s):
+    """meta 的 size：du -sh 的写法（84G、348M、1.4T），也认纯字节数。读不出返回 None。"""
+    s = str(s or "").strip()
+    if re.fullmatch(r"[0-9]+", s):
+        return int(s)
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTP])(?:i?B)?", s, re.I)
+    return int(float(m.group(1)) * 1024 ** ("KMGTP".index(m.group(2).upper()) + 1)) if m else None
+
+
+def _row_bytes(x):
+    """面板行（每个版本一行，带 meta 的键）的大小：优先 size_bytes（字节数），没有再解析 size。"""
+    try:
+        return int(x.get("size_bytes"))
+    except (TypeError, ValueError):
+        return _size_bytes(x.get("size"))
+
+
+def _db_install(cfg, argv, timeout=300):
+    """调服务器的 db-install（--json）。成功 -> (0, dict)；它的报错是 stderr 上的一行 JSON。"""
+    rc, out, err = _server(cfg, DB_INSTALL + " " + " ".join(shlex.quote(a) for a in argv) + " --json", timeout)
+    if rc == 0:
+        try:
+            return 0, json.loads(out)
+        except ValueError:
+            return 1, {"error": "db-install 的输出不是 JSON", "stdout": out.strip()[-400:]}
+    if rc == 127 or "No such file or directory" in err and DB_INSTALL in err:
+        return 4, {"error": "服务器上还没有 db-install（需要管理员部署）"}
+    for line in reversed(err.strip().splitlines()):
+        try:
+            d = json.loads(line)
+            if isinstance(d, dict) and d.get("error"):
+                return 1, {"error": d["error"]}
+        except ValueError:
+            continue
+    if rc == 255 and not out.strip():
+        return 255, {"error": "ssh 没成功：" + err.strip()[-300:]}
+    return (rc or 1), {"error": (err or out).strip()[-400:] or "db-install 失败"}
+
+
+def _db_remote(cfg, argv, timeout=180):
+    """把 db_project.py 送到服务器上执行一个子命令，原样带回 JSON 和退出码。"""
+    remote = "GIT_TERMINAL_PROMPT=0 python3 -I - " + " ".join(shlex.quote(a) for a in argv)
+    rc, out, err = _server(cfg, remote, timeout, _source("db_project.py"))
+    if rc == 255 and not out.strip():
+        return 255, {"error": "ssh 没成功：" + err.strip()[-300:]}
+    try:
+        return rc, json.loads(out)
+    except ValueError:
+        return (rc or 1), {"error": "db_project 的输出不是 JSON", "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]}
+
+
+def db_facts(cfg, pairs=(), fingerprints=False):
+    """服务器上的库信息（公共库清单、current 指向、登录环境的数据库变量、工具版本、指纹），给本机扫描用。
+    ws 的 ws_forward.py 也经 PC 引擎调这个函数。"""
+    if _on_server(cfg):
+        return _db_project().gather_facts(pairs, fingerprints)
+    argv = ["facts"] + [x for n, v in pairs for x in ("--pair", n + "/" + v)] + (["--fingerprints"] if fingerprints else [])
+    rc, out, err = _server(cfg, "python3 -I - " + " ".join(shlex.quote(a) for a in argv),
+                           600 if fingerprints else 90, _source("db_project.py"))
+    try:
+        d = json.loads(out)
+        if isinstance(d, dict) and "catalog" in d:
+            return d
+    except ValueError:
+        pass
+    return {"schema": 1, "catalog": None, "current": {}, "env": {}, "tools": {}, "fingerprints": {}, "db_check": None,
+            "errors": ["服务器上的库信息取不到：" + ((err or out).strip()[-300:] or "rc=%s" % rc)]}
+
+
+def _install_method(x):
+    via, who = x.get("via") or "admin", x.get("installed_by") or x.get("added_by") or ""
+    if via == "request" and x.get("request_id"):
+        return "申请 #%s" % x["request_id"] + ("（%s）" % who if who else "")
+    if via == "self":
+        return "自助（%s）" % who if who else "自助"
+    return "管理员直接装"
+
+
+def _cache_state(cfg):
+    """-> (缓存清单 | None, 缓存所在盘的剩余字节 | None)。一次服务器调用拿全。"""
+    cmd = (DB_CACHE + " list --json; echo; echo '===FREE==='; python3 -c "
+           + shlex.quote("import os;s=os.statvfs(%r);print(s.f_bavail*s.f_frsize)" % CACHE_ROOT))
+    rc, out, err = _server(cfg, cmd, 60)
+    head, _, tail = out.partition("===FREE===")
+    try:
+        cache = json.loads(head)
+    except ValueError:
+        cache = None
+    try:
+        free = int(tail.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        free = None
+    return cache, free
+
+
+def cmd_db_find(cfg, name):
+    q = name.strip().lower()
+    if not q:
+        return 2, {"error": "名字不能为空"}
+    try:
+        d = _http_json(panel_url(cfg, "/api/software"))
+    except Exception as e:
+        return 1, {"error": f"面板连不上（{panel_url(cfg)}）：{e}", "hint": "确认这台电脑连着 Tailscale"}
+    rows, groups = (d.get("inventory") or {}).get("dbs", []), {}
+    for x in rows:                     # 哪些库命中（别名可能只写在某个版本的 meta 里）
+        r, alias = _db_rank(q, x)
+        if r < 99:
+            g = groups.setdefault(x.get("name") or "", {"rank": r, "matched_alias": alias, "rows": []})
+            g["rank"] = min(g["rank"], r)
+            g["matched_alias"] = g["matched_alias"] or alias
+    for x in rows:                     # 命中的库列出全部版本
+        if (x.get("name") or "") in groups:
+            groups[x.get("name") or ""]["rows"].append(x)
+    need_cache = any(x.get("location") in ("nas", "mixed") or x.get("nas") for g in groups.values() for x in g["rows"])
+    cache, free = _cache_state(cfg) if need_cache else (None, None)
+    dbs = []
+    for nm, g in sorted(groups.items(), key=lambda kv: (kv[1]["rank"], kv[0]))[:10]:
+        versions = []
+        for x in sorted(g["rows"], key=lambda x: _vkey(x.get("version")), reverse=True):
+            loc = x.get("location") or ("mixed" if x.get("nas") else "local")
+            v = {"version": x.get("version"), "path": x.get("path") or "%s/%s/%s" % (DB_ROOT, nm, x.get("version")),
+                 "current": bool(x.get("current")), "location": loc, "location_cn": LOCATION_CN.get(loc, loc),
+                 "size": _size(_row_bytes(x)), "size_bytes": _row_bytes(x),
+                 "install_method": _install_method(x), "via": x.get("via") or "admin",
+                 "request_id": x.get("request_id") or None, "installed_by": x.get("installed_by") or x.get("added_by") or None,
+                 "verification": x.get("verification") or None,
+                 "verification_cn": VERIFICATION_CN.get(x.get("verification") or "", ""),
+                 "compat": x.get("compat") or None, "compat_cn": COMPAT_CN.get(x.get("compat") or "", ""),
+                 "compat_tool": x.get("compat_tool") or None, "fingerprint": x.get("fingerprint") or None,
+                 "layout": x.get("layout") or None}
+            if loc in ("nas", "mixed"):
+                prefix = "%s/%s/%s/" % (CACHE_ROOT, nm, x.get("version"))
+                ready = cache is not None and any(e.get("status") == "ready" and str(e.get("path", "")).startswith(prefix)
+                                                  for e in cache.get("items", []))
+                v["cache_status"] = ("查询失败（不等于没缓存）" if cache is None else
+                                     "已缓存（部分或全部，以 db-cache path 为准）" if ready else "未缓存")
+                # 同 db-cache 的规则：剩余 − 还缺的（包按解开后的大小）− 其中最大的一个包 ≥ 350 GB（解开期间包要先放在本地）。
+                # 面板只给整版大小：打包的按 3 倍估解开后的大小，最大的包按整版的包算（只有一个包时正好是它）
+                packed = _row_bytes(x) or 0
+                unpacked, held = (packed * 3, packed) if x.get("layout") == "archive" else (packed, 0)
+                if not ready and free is not None and packed and free - unpacked - held < LOCAL_MIN_BYTES:
+                    v["cache_hint"] = ("装好了，但本地只剩 %s：取进缓存要约 %s%s，取完会低于 350 GB 底线，"
+                                       "暂时取不进缓存，还差约 %s。可以直接读 NAS（约 100 MB/s，适合查几条记录），"
+                                       "或等本地腾出空间" % (
+                                           _size(free), _size(unpacked),
+                                           "（打包存放：解开后的大小按 3 倍估，解开期间还要先放下约 %s 的包）" % _size(held)
+                                           if held else "", _size(LOCAL_MIN_BYTES + unpacked + held - free)))
+            versions.append(v)
+        cur = next((v["version"] for v in versions if v["current"]), None)
+        dbs.append({"name": nm, "current_version": cur, "aliases": (g["rows"][0].get("aliases") or ""),
+                    "matched_alias": g["matched_alias"], "versions": versions})
+    names = {n.lower() for n in groups}
+    installs = [dict(i, status_cn=INSTALL_STATUS_CN.get(i.get("status"), i.get("status")))
+                for i in d.get("db_installs") or []
+                if (q in str(i.get("name") or "").lower() or str(i.get("name") or "").lower() in names)
+                and i.get("status") in ("running", "failed")]
+    out = {"query": name, "me": d.get("me"), "dbs": dbs, "requests": _requests(d, q, "db")[:10],
+           "installs": installs[:10], "page": panel_url(cfg, "/software"),
+           "local_free_gb": _gb(free) if free is not None else None}
+    if dbs:
+        out["usage"] = ("脚本里写带版本号的路径 %s/<名>/<版本>，结果才可复现；current 和默认变量（如 $GTDBTK_DATA_PATH）"
+                        "会随公共区更新而变，只在第一次挑版本时用。项目用到的库用 database lock 写进 databases.lock.json。"
+                        "NAS 上的库用 gen-sbatch --stage <库路径> 先取进本地缓存。" % DB_ROOT)
+    else:
+        out["next"] = ("公共区没有：用户可以自己装进 NAS 公共库（database plan <名> --url <官方下载地址> 预演），"
+                       "也可以申请（database request --name <名>）。先看 requests 里是不是已经有人申请过。")
+    if d.get("me") is None:
+        out["warning"] = "面板没认出这台电脑（没登记或不在 Tailscale 上）：能查，但不能提交申请。"
+    return 0, out
+
+
+def _install_argv(name, version, urls, recipe, request):
+    return ([name] + (["--version", version] if version else []) + ["--url"] + list(urls) +
+            (["--recipe", recipe] if recipe else []) + (["--request", str(request)] if request else []))
+
+
+def _plan_view(p):
+    spec = p.get("spec") or {}
+    name, version = spec.get("name"), p.get("version")
+    nas, local = p.get("nas") or {}, p.get("local_cache") or {}
+    files = [{"name": f.get("name"), "url": f.get("url"), "bytes": f.get("bytes"), "size": _size(f.get("bytes")),
+              "expanded_size": _size(f.get("bytes") if f.get("expanded_bytes") is None else f.get("expanded_bytes")),
+              "checksums": ["%s（%s）" % (c.get("algorithm"), c.get("source")) for c in f.get("checksums") or []]}
+             for f in p.get("files") or []]
+    out = {"name": name, "version": version, "recipe": p.get("recipe"), "request": spec.get("request_id") or None,
+           "files": files, "plan_sha256": p.get("plan_sha256"),
+           "verification": "official" if files and all(f["checksums"] for f in files) else "self",
+           "nas": {"free": _size(nas.get("free_bytes")), "estimate": _size(nas.get("estimate_bytes")),
+                   "after_install": _size(nas.get("remaining_bytes")), "minimum": _size(nas.get("minimum_bytes") or NAS_MIN_BYTES),
+                   "allowed": bool(nas.get("allowed"))},
+           "local_cache": {"free": _size(local.get("free_bytes")), "cache": _size(local.get("estimated_cache_bytes")),
+                           "minimum": _size(local.get("minimum_bytes") or LOCAL_MIN_BYTES), "allowed": bool(local.get("allowed"))}}
+    if p.get("same_version"):
+        out.update(status="exists", path="%s/%s/%s" % (DB_ROOT, name, version),
+                   next="公共区已经有 %s %s：直接用这个路径，不用装" % (name, version))
+        return out
+    if p.get("other_versions"):
+        out["other_versions"] = [{"version": v, "path": "%s/%s/%s" % (DB_ROOT, name, v)}
+                                 for v in sorted(p["other_versions"], key=_vkey, reverse=True)]
+        out["ask_user"] = ("公共区已经有 %s 的 %s：先问用户是用已有的版本，还是另装 %s" %
+                           (name, "、".join(x["version"] for x in out["other_versions"]), version))
+    if not out["nas"]["allowed"]:
+        out.update(status="blocked", error="NAS 装完只剩约 %s，低于 2 TB 底线，装不了：告诉用户，请管理员处理 NAS 空间" %
+                   out["nas"]["after_install"])
+        return out
+    out["status"] = "ready"
+    if not out["local_cache"]["allowed"]:
+        out["cache_note"] = ("装得上，但装好后本地剩余不足 350 GB，暂时取不进缓存（本地剩 %s，这个库取进缓存约 %s）："
+                             "可以先直接读 NAS，或等本地腾出空间" % (out["local_cache"]["free"], out["local_cache"]["cache"]))
+    if out["verification"] == "self":
+        out["verification_note"] = "有文件在上游找不到校验值：只能核对下载完整，登记为 verification=self"
+    # 用服务器校验过的 spec 拼命令：版本、配方都写明，submit 重算出的 plan_sha256 不变
+    full = ["database", "install"] + _install_argv(name, version, spec.get("urls") or [], spec.get("recipe"),
+                                                   spec.get("request_id")) + ["--expected-plan", p.get("plan_sha256") or "", "--yes"]
+    out["install_command"] = " ".join(shlex.quote(a) for a in full)
+    out["next"] = ("把计划给用户看（库名、版本、文件和大小、校验值来源、NAS 余量%s）；用户明确同意后运行 install_command。"
+                   "安装以用户的名义交一个 Slurm 作业（2 核 4G）下载、核对、登记" % ("、要不要另装" if out.get("ask_user") else ""))
+    return out
+
+
+def cmd_db_plan(cfg, name, version, urls, recipe, request):
+    argv = _install_argv(name, version, urls, recipe, request)
+    rc, p = _db_install(cfg, ["plan"] + argv)
+    if rc:
+        return rc, {"error": "服务器没有接受这次安装：" + str(p.get("error")),
+                    "hint": "版本推断不了就加 --version；KEGG 这类要订阅的库不收；只接受公网 https 地址"}
+    return 0, _plan_view(p)
+
+
+def cmd_db_install(cfg, name, version, urls, recipe, request, expected, yes):
+    argv = _install_argv(name, version, urls, recipe, request)
+    if not yes:
+        rc, p = _db_install(cfg, ["plan"] + argv)
+        if rc:
+            return rc, {"error": "服务器没有接受这次安装：" + str(p.get("error"))}
+        view = _plan_view(p)
+        view.update(executed=False, plan_matches=(p.get("plan_sha256") == expected) if expected else None)
+        return 0, view
+    if not expected or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return 2, {"error": "--yes 要带 --expected-plan <database plan 给出的 plan_sha256>"}
+    rc, r = _db_install(cfg, ["submit"] + argv + ["--expected-plan", expected])
+    if rc:
+        msg = str(r.get("error"))
+        if "plan changed" in msg:
+            return 1, {"error": "预演之后上游文件或空间情况变了（plan_sha256 对不上），没有提交：重新 database plan 给用户看",
+                       "submitted": False}
+        if "NAS space" in msg:
+            return 1, {"error": "NAS 装完会低于 2 TB 底线，没有提交", "submitted": False}
+        return rc, {"error": "提交失败：" + msg, "submitted": False}
+    if r.get("status") == "exists":
+        return 0, {"status": "exists", "submitted": False, "path": r.get("path"),
+                   "note": "公共区已经有这个版本，没有提交安装：直接用 path"}
+    return 0, {"status": "submitted", "submitted": True, "job_id": r.get("id"), "name": name,
+               "version": (r.get("spec") or {}).get("version") or version,
+               "next": "database status %s 看进度（下载、核对、登记都在作业里，可能要几个小时）；装好后 database find %s" %
+                       (r.get("id"), name)}
+
+
+def cmd_db_status(cfg, job_id):
+    if job_id and not re.fullmatch(r"[0-9]+", job_id):
+        return 2, {"error": "作业号只能是数字"}
+    rc, d = _db_install(cfg, ["status"] + ([job_id] if job_id else []), timeout=60)
+    if rc:
+        return rc, d
+    jobs = []
+    for j in d.get("jobs") or []:
+        j = dict(j, status_cn=INSTALL_STATUS_CN.get(j.get("status"), j.get("status")), mine=j.get("user") in (None, cfg.get("user")))
+        if j.get("status") == "success" and j.get("current_switched"):
+            j["note"] = "已经设成这个库的 current"
+        jobs.append(j)
+    jobs.sort(key=lambda j: str(j.get("time") or "9999"), reverse=True)   # 新的在前；只在队列里、还没有事件的算最新
+    jobs.sort(key=lambda j: not j["mine"])                                # 本人的在前（稳定排序，保留上面的先后）
+    out = {"jobs": jobs[:30], "scheduler": d.get("scheduler")}
+    if d.get("scheduler") != "available":
+        out["note"] = "队列查不了（%s）：历史记录里的「安装中」不代表作业还在跑" % (d.get("scheduler_error") or "原因未知")
+    if job_id and not jobs:
+        out["note"] = "没有作业 %s 的安装记录：作业还没开始，或者号写错了" % job_id
+    return 0, out
+
+
+def _adopt_view(p, name, version, path):
+    v = p.get("version")
+    out = {"name": name, "requested_version": version, "version": v, "path": path,
+           "size": _size((p.get("spec") or {}).get("bytes")), "plan_sha256": p.get("plan_sha256"),
+           "nas": {"after_install": _size((p.get("nas") or {}).get("remaining_bytes")),
+                   "allowed": bool((p.get("nas") or {}).get("allowed"))},
+           "local_cache_allowed": bool((p.get("local_cache") or {}).get("allowed"))}
+    if p.get("same_version"):
+        out.update(status="exists", public_path="%s/%s/%s" % (DB_ROOT, name, v),
+                   next="公共区已经有 %s %s（同一份）：不用收编，脚本改用这个路径（database pin），之后可以删个人副本" % (name, v))
+        return out
+    if v != version:
+        out["naming"] = ("和已登记的官方版本对不上：会登记成 %s，面板标「本地副本，未与官方核对」"
+                         "（只有和 verification=official 的版本整份指纹一致时才沿用官方版本号）" % v)
+    if not out["nas"]["allowed"]:
+        out.update(status="blocked", error="NAS 收编后会低于 2 TB 底线，收不了")
+        return out
+    out["status"] = "ready"
+    out["next"] = ("给用户看（放进 NAS 公共库后叫 %s，大小约 %s）；用户同意后：database adopt %s %s --path %s "
+                   "--expected-plan %s --yes。收编在用户自己的 Slurm 作业里打包传给服务端，原目录不动；"
+                   "作业里会逐个文件和这次预演核对，作业结束前别改这个目录" %
+                   (v, out["size"], name, version, shlex.quote(path), p.get("plan_sha256")))
+    return out
+
+
+ADOPT_PLAN_WAIT = 45     # 预演作业交上去后最多等这么久：小于 AI 调命令的常见超时，算完就直接返回预演
+
+
+def cmd_db_adopt(cfg, name, version, path, expected, yes, plan_job=False, result=None):
+    """收编个人副本。预演和提交都由服务器上的 db_project 做：预演超过 1 GB 的目录放进低优先级作业（--plan-job），
+    提交用服务器上保存的预演原文（db-install adopt-submit 只做轻量核对，逐个文件的校验在安装作业里）。"""
+    p = server_path(path)
+    if yes:
+        if not expected or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return 2, {"error": "--yes 要带 --expected-plan <database adopt 预演给出的 plan_sha256>"}
+        rc, r = _db_remote(cfg, ["adopt-submit", name, version, "--path", p, "--expected-plan", expected], timeout=900)
+        if rc:
+            msg = str(r.get("error"))
+            if "plan changed" in msg:
+                return 1, {"error": "预演之后空间情况或目录变了（plan_sha256 对不上），没有提交：重新预演给用户看",
+                           "submitted": False}
+            if any(k in msg for k in ("changed since plan", "file count", "bytes", "owner", "belong")):
+                return 1, {"error": "目录在预演之后变了（文件数、总大小或属主和预演不一致），没有提交：重新预演给用户看",
+                           "detail": msg, "submitted": False}
+            return rc, {"error": msg if "预演" in msg else "提交失败：" + msg, "submitted": False}
+        if r.get("status") == "exists":
+            return 0, {"status": "exists", "submitted": False, "path": r.get("path"), "note": "公共区已经有这一份，没有提交"}
+        return 0, {"status": "submitted", "submitted": True, "job_id": r.get("id"),
+                   "next": "database status %s 看进度。提交时服务器只做了轻量核对；安装作业里会逐个文件和预演的指纹核对，"
+                           "对不上就失败、不登记，所以作业结束前别改这个目录。登记好之后脚本改用公共路径，"
+                           "再按 database.md 的条件删个人副本" % r.get("id")}
+    argv = ["adopt-plan", name, version, "--path", p, "--partition", cfg.get("partition", "main")]
+    if plan_job:
+        argv += ["--plan-job", "--wait", str(ADOPT_PLAN_WAIT)]
+    if result:
+        argv += ["--result", result]
+    rc, r = _db_remote(cfg, argv, timeout=ADOPT_PLAN_WAIT + 240 if plan_job else 900)
+    if r.get("plan"):
+        view = _adopt_view(r["plan"], name, version, p)
+        view.update(executed=False, preview=("作业 %s 里做的" % r["job_id"]) if r.get("job_id") else "当场做的")
+        return 0, view
+    if r.get("error"):
+        return (rc or 1), {"error": "服务器没有接受这次收编：" + str(r["error"]), "job_id": r.get("job_id"),
+                           "log": r.get("log"), "hint": "目录里不能有链接、特殊文件或不属于你的文件"}
+    return rc, r       # 大目录：作业计划（等用户同意后 --plan-job），或作业还没算完（之后 --result 取）
+
+
+def cmd_db_compare(cfg, path, name, version, yes, result):
+    argv = ["compare", server_path(path), name] + ([version] if version else []) + (["--yes"] if yes else []) + \
+        (["--result", result] if result else []) + ["--partition", cfg.get("partition", "main")]
+    return _db_remote(cfg, argv, timeout=900)
+
+
+def cmd_db_project(cfg, op, path, dbs=(), yes=False, plan_id=None):
+    """scan / check / lock / pin：项目目录在本机就在本机做（改的是用户平时改代码的那份），否则送到服务器上做。"""
+    dp = _db_project()
+    local = os.path.expanduser(local_path(path))
+    if _on_server(cfg) or os.path.isdir(local):
+        return dp.project_op(op, local, lambda pairs, fp: db_facts(cfg, pairs, fp), dbs, yes, plan_id,
+                             jobs_fn=dp.project_jobs if _on_server(cfg) else None,
+                             display=None if _on_server(cfg) else (lambda top: top))
+    argv = [op, server_path(path)] + [x for d in dbs for x in ("--db", d)] + (["--yes"] if yes else []) + \
+        (["--plan-id", plan_id] if plan_id else [])
+    return _db_remote(cfg, argv, timeout=900 if op in ("check", "lock", "pin") else 300)
+
+
+def cmd_database(cfg, a):
+    c = a.dbcmd
+    if c == "find":
+        return cmd_db_find(cfg, a.name)
+    if c == "plan":
+        return cmd_db_plan(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe, a.request)
+    if c == "install":
+        return cmd_db_install(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe, a.request,
+                              a.expected_plan, a.yes)
+    if c == "status":
+        return cmd_db_status(cfg, a.id)
+    if c == "adopt":
+        return cmd_db_adopt(cfg, a.name, a.version, a.path, a.expected_plan, a.yes, a.plan_job, a.result)
+    if c == "compare":
+        return cmd_db_compare(cfg, a.dir, a.name, a.version, a.yes, a.result)
+    if c in ("scan", "check", "lock", "pin"):
+        return cmd_db_project(cfg, c, a.path, getattr(a, "db", []), getattr(a, "yes", False), getattr(a, "plan_id", None))
+    if c == "request":
+        return cmd_software_request(cfg, "db", a.name, a.version, a.source, a.reason, a.yes)
+    return cmd_software_vote(cfg, a.id, a.yes, kind="db")
 
 
 def disk_hint(cfg):
@@ -2269,14 +2727,13 @@ def main():
     sub.add_parser("status")
     sub.add_parser("rules")
 
-    # 公共软件 / 数据库：查、申请、+1。提交类动作不带 --yes 只出草稿
+    # 公共工具：查、申请、+1。提交类动作不带 --yes 只出草稿
     sw = sub.add_parser("software")
     swsub = sw.add_subparsers(dest="swcmd", required=True)
     swf = swsub.add_parser("find")
     swf.add_argument("name")
     swf.add_argument("--arch", action="store_true", help="同时查 bioconda / conda-forge 有没有 ARM 构建")
     swr = swsub.add_parser("request")
-    swr.add_argument("--kind", choices=["tool", "db"], required=True)
     swr.add_argument("--name", required=True)
     swr.add_argument("--version", default="")
     swr.add_argument("--source", default="")
@@ -2285,6 +2742,51 @@ def main():
     swv = swsub.add_parser("vote")
     swv.add_argument("id", type=int)
     swv.add_argument("--yes", action="store_true")
+
+    # 公共数据库：查、自己装进 NAS 公共库、项目锁版本、个人副本、申请。会写东西的不带 --yes 只预演
+    db = sub.add_parser("database")
+    dbsub = db.add_subparsers(dest="dbcmd", required=True)
+    dbp = {}
+    for nm in ("find", "plan", "install", "status", "adopt", "compare", "scan", "check", "lock", "pin",
+               "request", "vote"):
+        dbp[nm] = dbsub.add_parser(nm)
+        dbp[nm].add_argument("--json", action="store_true", help="输出总是 JSON；写上也行")
+    dbp["find"].add_argument("name")
+    for nm in ("plan", "install"):
+        dbp[nm].add_argument("name")
+        dbp[nm].add_argument("--version", default="", help="不写时只从网址里唯一明确的版本号推断")
+        dbp[nm].add_argument("--url", action="append", nargs="+", required=True, help="官方下载地址（公网 https），可写多个")
+        dbp[nm].add_argument("--recipe", choices=RECIPES, default=None, help="内置配方；不写按库名选")
+        dbp[nm].add_argument("--request", default="", help="对应面板上的申请编号")
+    dbp["install"].add_argument("--expected-plan", default=None, help="database plan 给出的 plan_sha256")
+    dbp["install"].add_argument("--yes", action="store_true", help="真的提交安装作业。不带只重新预演")
+    dbp["status"].add_argument("id", nargs="?")
+    dbp["adopt"].add_argument("name")
+    dbp["adopt"].add_argument("version")
+    dbp["adopt"].add_argument("--path", required=True, help="本人目录（服务器上的绝对路径）")
+    dbp["adopt"].add_argument("--plan-job", action="store_true",
+                              help="目录超过 1 GB：把预演交给低优先级作业（要用户同意）")
+    dbp["adopt"].add_argument("--result", default=None, help="取预演作业的结果（作业号）")
+    dbp["adopt"].add_argument("--expected-plan", default=None)
+    dbp["adopt"].add_argument("--yes", action="store_true")
+    dbp["compare"].add_argument("dir", help="本人目录（服务器上的路径）")
+    dbp["compare"].add_argument("name")
+    dbp["compare"].add_argument("version", nargs="?")
+    dbp["compare"].add_argument("--yes", action="store_true", help="目录大时交一个低优先级作业去算")
+    dbp["compare"].add_argument("--result", default=None, help="取那个作业的结果（作业号）")
+    for nm in ("scan", "check", "lock", "pin"):
+        dbp[nm].add_argument("path", help="项目目录：在本机就扫本机，否则是服务器上的路径")
+    for nm in ("lock", "pin"):
+        dbp[nm].add_argument("--db", action="append", default=[], metavar="名=版本", help="指定锁哪个版本，可重复")
+        dbp[nm].add_argument("--yes", action="store_true")
+        dbp[nm].add_argument("--plan-id", default=None)
+    dbp["request"].add_argument("--name", required=True)
+    dbp["request"].add_argument("--version", default="")
+    dbp["request"].add_argument("--source", default="")
+    dbp["request"].add_argument("--reason", default="")
+    dbp["request"].add_argument("--yes", action="store_true", help="真的提交（全组可见）。不带只出草稿")
+    dbp["vote"].add_argument("id", type=int)
+    dbp["vote"].add_argument("--yes", action="store_true")
 
     # 清理和公共区重复的个人安装：转给服务器上的 spark-cleanup
     cl = sub.add_parser("cleanup")
@@ -2313,10 +2815,6 @@ def main():
     cln = clsub.add_parser("note", help="给搬走的东西写备注（只存在本机）")
     cln.add_argument("path")
     cln.add_argument("text")
-
-    # 查明脚本里用的公共数据库是哪个版本（current 和数据库变量解析成实际版本）；只读、不跑 git
-    vs = sub.add_parser("versions")
-    vs.add_argument("path")
 
     # 服务器上的项目：代码推了没、推 Gitea（remote_project.py 经 ssh 在服务器上执行）
     pj = sub.add_parser("project")
@@ -2447,7 +2945,8 @@ def main():
     # 验收测试的保险：子 agent 拿着真的 ssh 跑，光靠嘱咐不够，这里直接拒绝一切真动手。
     # 开关是环境变量，或 skill 目录里的 .no-yes 文件（子 agent 的命令拿不到我们设的环境变量）
     testing = os.environ.get("SPARK_ADVISOR_NO_YES") or os.path.exists(os.path.join(HERE, "..", ".no-yes"))
-    if testing and (getattr(args, "yes", False) or args.cmd in ("submit", "debug-start", "debug-run")):
+    if testing and (getattr(args, "yes", False) or getattr(args, "plan_job", False)
+                    or args.cmd in ("submit", "debug-start", "debug-run")):
         die("测试模式（SPARK_ADVISOR_NO_YES / .no-yes）：不执行 --yes、提交作业或调试会话")
 
     # these bootstrap first-run config, so they must NOT require an existing config
@@ -2467,10 +2966,14 @@ def main():
             emit(cmd_software_find(cfg, args.name, args.arch))
             return
         if args.swcmd == "request":
-            rc, payload = cmd_software_request(cfg, args.kind, args.name, args.version, args.source,
+            rc, payload = cmd_software_request(cfg, "tool", args.name, args.version, args.source,
                                                args.reason, args.yes)
         else:
             rc, payload = cmd_software_vote(cfg, args.id, args.yes)
+        emit(payload)
+        sys.exit(rc)
+    if args.cmd == "database":
+        rc, payload = cmd_database(cfg, args)
         emit(payload)
         sys.exit(rc)
     if args.cmd == "cleanup":
@@ -2503,10 +3006,6 @@ def main():
             argv = ["apply", server_path(args.path), "--action", args.action] + \
                    (["--env"] if args.env else []) + yes
             rc, payload = cmd_cleanup(cfg, argv, timeout=1800)
-        emit(payload)
-        sys.exit(rc)
-    if args.cmd == "versions":
-        rc, payload = cmd_project(cfg, ["versions", server_path(args.path)])
         emit(payload)
         sys.exit(rc)
     if args.cmd == "project":
