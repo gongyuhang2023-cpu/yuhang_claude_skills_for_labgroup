@@ -1047,8 +1047,13 @@ DIR_HASH_CODE = r'''
 import hashlib, json, os, re, stat, sys, time
 
 def sha256_file(path):
+    """自己的文件用 O_NOATIME 读：比对不把文件记成「刚读过」（spark-cleanup dbscan 按最近被读提醒）。"""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOATIME", 0))
+    except PermissionError:
+        fd = os.open(path, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()

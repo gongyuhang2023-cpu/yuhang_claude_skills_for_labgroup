@@ -1,6 +1,6 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件（查有没有装、申请安装：software）；公共数据库（database）：查有哪些版本、自己把库装进 NAS 公共库、申请、NAS 上的库取到本地缓存、给项目锁定数据库版本（databases.lock.json）、个人下载的库比对后放进公共库；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、自己装数据库、下载数据库到公共区、NAS 上的数据库、把库取到本地、数据库版本、锁定数据库版本、脚本用的哪个版本的库、我自己下的库放进公共区、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件（查有没有装、申请安装：software）；公共数据库（database）：查有哪些版本、自己把库装进 NAS 公共库、申请、NAS 上的库取到本地缓存、给项目锁定数据库版本（databases.lock.json）、整理 home 里的数据库（tidy：找出所有副本，比对后删掉或放进公共库）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、自己装数据库、下载数据库到公共区、NAS 上的数据库、把库取到本地、数据库版本、锁定数据库版本、脚本用的哪个版本的库、我自己下的库放进公共区、整理我 home 里的数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
 ---
 
 # spark-advisor — 共享 GPU 服务器顾问
@@ -45,7 +45,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 服务器上的代码推了没、推到 Gitea | `project check` / `push` / `init` | `references/code-check.md` |
 | 这个项目还要不要留在服务器上 | `project check` → `cleanup scan`（项目专用的环境）→ 搬到 NAS | `references/storage.md` |
 | 脚本用的是哪个版本的库、锁定数据库版本 | `database scan` / `check` / `lock` / `pin` | `references/database.md` |
-| 我自己下了一份库：能不能放进公共区、能不能删 | `database compare` → `adopt` | `references/database.md` |
+| 整理 home 里的数据库；我自己下了一份库：能不能放进公共区、能不能删 | `database tidy` → `compare` → `adopt` / `cleanup apply --db` | `references/database.md` |
 | 删掉的文件还能找回吗 | — | `references/storage.md` |
 | 某个包能不能在 aarch64 装 | — | `references/env-notes.md` |
 

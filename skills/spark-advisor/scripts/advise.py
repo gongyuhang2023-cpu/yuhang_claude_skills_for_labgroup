@@ -41,7 +41,9 @@ Subcommands:
                     installed, cache state); plan/install/status (self-install into the
                     NAS public library via the server's db-install, dry run first);
                     scan/check/lock/pin (the project's databases.lock.json, see
-                    db_project.py); adopt/compare (a personal copy); request/vote.
+                    db_project.py); tidy (every database-like directory in the user's home,
+                    via the server's spark-cleanup dbscan); adopt/compare (a personal copy);
+                    request/vote.
   cleanup scan/     relay to the server command `spark-cleanup` (runs as the user, dry
   refs/apply        by default): personal envs / database copies that duplicate the
                     shared ones, with tier, references, in-use checks and real space
@@ -1635,6 +1637,59 @@ def cmd_db_compare(cfg, path, name, version, yes, result):
     return _db_remote(cfg, argv, timeout=900)
 
 
+TIDY_NEXT = {
+    "verify": ["database compare {p} {name} {version}",
+               "对上了：cleanup apply {p} --action remove --db {name} 先预演，用户同意再加 --yes。脚本里还写着这个路径："
+               "先 database pin 改成公共版本路径，或者用 --action link（换成指向公共版本的链接，脚本不用改）"],
+    "close": ["先把差的几个文件（diff）给用户看；用户同意后，把它们换成公共版本 /opt/bio/db/{name}/{version}/ 里的同名文件、"
+              "删掉多出来的",
+              "database compare {p} {name} {version}",
+              "对上了：cleanup apply {p} --action remove --db {name} 先预演，用户同意再加 --yes（脚本里还写着这个路径："
+              "先 database pin，或者用 --action link）"],
+    "ask_public": ["database compare {p} {name} 看差在哪",
+                   "问用户这份是什么、还用不用；要放进 NAS 公共库就 database adopt {name} <版本> --path {p}"
+                   "（对不上官方版本会登记成 <版本>-local-<用户名>）"],
+    "ask_other": ["问用户这是什么：官方发布的库先 database find <库名> 看公共区有没有，没有就 database adopt <库名> <版本> "
+                  "--path {p} 放进 NAS 公共库；用自己的数据建的索引就留着"],
+}
+
+
+def cmd_db_tidy(cfg, min_gb=None):
+    """home 里所有像数据库的目录（服务器上的 spark-cleanup dbscan，只看不动），每一项加上 spark-advisor 的下一步。"""
+    rc, r = cmd_cleanup(cfg, ["dbscan"] + (["--min-gb", str(min_gb)] if min_gb is not None else []), timeout=1500)
+    if "items" not in r:
+        if "invalid choice" in str(r.get("error", "")) + str(r.get("stderr", "")):
+            return 4, {"error": "服务器上的 spark-cleanup 还没有 dbscan（需要管理员部署新版）"}
+        return (rc or 1), r
+    counts, frees = {}, 0
+    for it in r["items"]:
+        s, m = it.get("suggest") or {}, it.get("match") or {}
+        key = "ask_public" if s.get("action") == "ask" and m else "ask_other" if s.get("action") == "ask" else s.get("action")
+        it["next"] = [x.format(p=it["path_display"], name=m.get("name", ""), version=m.get("version", ""))
+                      for x in TIDY_NEXT.get(key, [])]
+        it["size"], it["frees"] = _size(it["bytes"]["total"]), _size(it["bytes"]["private"])
+        counts[it["category"]] = counts.get(it["category"], 0) + 1
+        if s.get("action") in ("verify", "close") and not it.get("inside"):
+            frees += it["bytes"]["private"]
+    groups = {}
+    for it in r["items"]:
+        if it.get("category") == "other_db":
+            g = groups.setdefault(it.get("group") or it["path_display"], {"items": 0, "bytes": 0, "looks_like": set()})
+            g["items"] += 1
+            g["bytes"] += it["bytes"]["total"]
+            g["looks_like"].update(it.get("looks_like") or [])
+    r["summary"] = {"by_category": counts, "verify_frees": _size(frees),
+                    "other_db_groups": [{"group": k, "items": v["items"], "size": _size(v["bytes"]),
+                                         "looks_like": sorted(v["looks_like"])}
+                                        for k, v in sorted(groups.items(), key=lambda kv: -kv[1]["bytes"])],
+                    "note": "verify / close 的几项核对校验值对上了才删（close 先补齐差的几个小文件）；frees 已扣掉和别处共用的硬链接。"
+                            "inside 不为空的在另一项里面，先处理外面那项。认不出的库按 other_db_groups 一组问一次"}
+    if not r.get("scan_complete"):
+        r["warning"] = "home 太大，服务器在时限内没扫完：只是一部分"
+    r["disk"] = disk_hint(cfg)
+    return 0, r
+
+
 def cmd_db_project(cfg, op, path, dbs=(), yes=False, plan_id=None):
     """scan / check / lock / pin：项目目录在本机就在本机做（改的是用户平时改代码的那份），否则送到服务器上做。"""
     dp = _db_project()
@@ -1663,6 +1718,8 @@ def cmd_database(cfg, a):
         return cmd_db_adopt(cfg, a.name, a.version, a.path, a.expected_plan, a.yes, a.plan_job, a.result)
     if c == "compare":
         return cmd_db_compare(cfg, a.dir, a.name, a.version, a.yes, a.result)
+    if c == "tidy":
+        return cmd_db_tidy(cfg, a.min_gb)
     if c in ("scan", "check", "lock", "pin"):
         return cmd_db_project(cfg, c, a.path, getattr(a, "db", []), getattr(a, "yes", False), getattr(a, "plan_id", None))
     if c == "request":
@@ -2747,7 +2804,7 @@ def main():
     db = sub.add_parser("database")
     dbsub = db.add_subparsers(dest="dbcmd", required=True)
     dbp = {}
-    for nm in ("find", "plan", "install", "status", "adopt", "compare", "scan", "check", "lock", "pin",
+    for nm in ("find", "plan", "install", "status", "adopt", "compare", "tidy", "scan", "check", "lock", "pin",
                "request", "vote"):
         dbp[nm] = dbsub.add_parser(nm)
         dbp[nm].add_argument("--json", action="store_true", help="输出总是 JSON；写上也行")
@@ -2769,6 +2826,7 @@ def main():
     dbp["adopt"].add_argument("--result", default=None, help="取预演作业的结果（作业号）")
     dbp["adopt"].add_argument("--expected-plan", default=None)
     dbp["adopt"].add_argument("--yes", action="store_true")
+    dbp["tidy"].add_argument("--min-gb", type=float, default=None, help="只列至少这么大的目录（默认 0.5 GB）")
     dbp["compare"].add_argument("dir", help="本人目录（服务器上的路径）")
     dbp["compare"].add_argument("name")
     dbp["compare"].add_argument("version", nargs="?")
@@ -2793,12 +2851,14 @@ def main():
     clsub = cl.add_subparsers(dest="clcmd", required=True)
     cls = clsub.add_parser("scan")
     cls.add_argument("--path", action="append", default=[])
+    cls.add_argument("--db", default=None, help="每日清单以外的数据库副本：写公共库的库名")
     clr = clsub.add_parser("refs")
     clr.add_argument("path")
     cla = clsub.add_parser("apply")
     cla.add_argument("path")
     cla.add_argument("--action", choices=["remove", "link", "archive"], required=True)
     cla.add_argument("--env", action="store_true", help="和 --action archive 一起用：删环境前先原样打包到 NAS")
+    cla.add_argument("--db", default=None, help="每日清单以外的数据库副本：写公共库的库名")
     cla.add_argument("--yes", action="store_true", help="真的执行。不带只预演")
     clc = clsub.add_parser("cold", help="大、而且很久没改过的目录")
     clc.add_argument("--min-gb", type=float, default=None)
@@ -2982,7 +3042,8 @@ def main():
             emit(cmd_cleanup_note(cfg, args.path, args.text))
             return
         if args.clcmd == "scan":
-            argv = ["scan"] + [x for p in args.path for x in ("--path", server_path(p))]
+            argv = ["scan"] + [x for p in args.path for x in ("--path", server_path(p))] + \
+                   (["--db", args.db] if args.db else [])
             rc, payload = cmd_cleanup(cfg, argv, timeout=600)
             annotate_gaps(payload)
         elif args.clcmd == "refs":
@@ -3004,7 +3065,7 @@ def main():
             rc, payload = cmd_cleanup(cfg, argv, timeout=120 * len(args.cmds) + 60)
         else:
             argv = ["apply", server_path(args.path), "--action", args.action] + \
-                   (["--env"] if args.env else []) + yes
+                   (["--env"] if args.env else []) + (["--db", args.db] if args.db else []) + yes
             rc, payload = cmd_cleanup(cfg, argv, timeout=1800)
         emit(payload)
         sys.exit(rc)

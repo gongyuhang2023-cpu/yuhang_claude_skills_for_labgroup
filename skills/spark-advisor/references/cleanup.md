@@ -4,6 +4,8 @@
 
 服务器每天扫描各人的 home，把和公共工具或数据库**同名**的个人 conda / pixi 环境、数据库副本，列在面板「我的重复安装」里。
 
+数据库副本按名字认，会漏：整理数据库先用 `database tidy`（见 `database.md` 第 6 节）。清单以外的副本，`scan --path` 和 `apply` 要加 `--db <公共库名>`。
+
 清理逻辑在服务器命令 `spark-cleanup` 里。它的特点：
 - 以用户自己的身份运行，只动他自己的 home。
 - 默认只看不动。
@@ -14,6 +16,7 @@
     python scripts/advise.py cleanup refs P                                   # 只看哪里用到了它
     python scripts/advise.py cleanup verify [P] --cmd 命令…                    # 公共版的这些命令能不能启动（只看不动）
     python scripts/advise.py cleanup apply P --action remove                  # 预演删除
+    python scripts/advise.py cleanup apply P --action remove|link --db <库名>  # 每日清单以外的数据库副本
     python scripts/advise.py cleanup apply P --action archive --env           # 预演：先原样打包到 NAS 再删
     python scripts/advise.py cleanup apply P --action … --yes                 # 真执行
 
