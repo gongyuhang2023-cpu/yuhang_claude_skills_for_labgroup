@@ -12,7 +12,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 出任何推荐、写 sbatch、查软件、清理或搬数据之前，先跑 `python scripts/advise.py rules`（只查、只推服务器上的代码不用）。它读服务器面板的 `/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库（`/opt/bio/db`）、sbatch 模板和**此刻**的空闲资源。
 
 - 与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
-- 生成 sbatch 时**优先用共享软件和共享数据库**，不要让用户自建环境或另下一份数据库。数据库写带版本号的路径（`$CHECKVDB` 这类默认变量指向 current，会变），见 `references/database.md`。
+- 生成 sbatch 时，临时查看优先用共享工具箱；正式分析需要复现时用 `env-store` 项目环境（见 `references/project-envs.md`）。数据库优先用共享版本，不要另下一份数据库。数据库写带版本号的路径（`$CHECKVDB` 这类默认变量指向 current，会变），见 `references/database.md`。
 - 一次会话读一次即可；要看最新的空闲资源用 `status`。
 
 ## ⛔ 红线与总闸（动手前必看）
@@ -47,6 +47,8 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 脚本用的是哪个版本的库、锁定数据库版本 | `database scan` / `check` / `lock` / `pin` | `references/database.md` |
 | 整理 home 里的数据库；我自己下了一份库：能不能放进公共区、能不能删 | `database tidy` → `compare` → `adopt` / `cleanup apply --db` | `references/database.md` |
 | 删掉的文件还能找回吗 | — | `references/storage.md` |
+| 正式分析要复现、项目环境、pixi 锁、环境构建或取回 | `env init/build/status/find/check` → `gen-sbatch --env` → `submit` | `references/project-envs.md` |
+| 已有 pixi.lock 的项目收编进公共环境库、清掉项目重复环境 | `env adopt --dir <项目> [-e ENV]` → 改作业脚本 → 验证一次 → `cleanup` | `references/project-envs.md`「收编已有项目」 |
 | 某个包能不能在 aarch64 装 | — | `references/env-notes.md` |
 
 子命令只是让意图更确定，不是唯一入口：用户说人话时按上表判断即可。

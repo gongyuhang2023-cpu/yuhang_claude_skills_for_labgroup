@@ -125,3 +125,9 @@ python scripts/advise.py wait <JobID> --max-wait <秒>
 ## 用到 NAS 上的数据库
 
 库在 NAS 上时（`database find` 的 `location_cn` 是 NAS 或两边都有），`gen-sbatch` 加 `--stage <库路径>`（可以写多个），先取进本地缓存再跑。怎么写、提交时会多一个取库作业、缓存的规矩，见 `database.md`「取进本地缓存」。
+
+## 正式分析使用项目环境
+
+需要固定工具版本时先读 `project-envs.md`：`env init` → 编辑依赖并 lock → `env build` →
+`gen-sbatch --env` → `env check` → `submit`。可以同时传数据库 `--stage`；提交时环境取回、
+正在构建的环境和数据库缓存依赖合并，主作业提交后立即 pin 环境。`--check-only` 不交任何作业。

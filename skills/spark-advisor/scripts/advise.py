@@ -37,6 +37,7 @@ Subcommands:
   request/vote      request and submit it (or +1 one) only with --yes. Must run from the
                     user's own computer: the panel identifies people by the Tailscale
                     account of the device that sends the request.
+  env ...           project environments: init/build/adopt/status/find/check via env-store
   database ...      shared databases: find (every version, where it lives, how it was
                     installed, cache state); plan/install/status (self-install into the
                     NAS public library via the server's db-install, dry run first);
@@ -1727,6 +1728,373 @@ def cmd_database(cfg, a):
     return cmd_software_vote(cfg, a.id, a.yes, kind="db")
 
 
+# ----------------------------- 项目环境（env-store） -----------------------------
+
+def env_call(cfg, argv, timeout=60):
+    """env-store 的错误 JSON 在 stderr；保留退出码，不改变 ssh_run 的默认行为。"""
+    rc, out, err = ssh_try(cfg, "/usr/local/bin/env-store " + shlex.join(argv + ["--json"]), timeout=timeout)
+    raw = (err if rc and err.strip() else out).strip()
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        result = {"schema": 1, "status": "error", "error": "无法解析 env-store JSON：" + raw[:300]}
+    if not isinstance(result, dict) or result.get("schema") != 1 or not result.get("status"):
+        result = {"schema": 1, "status": "error", "error": "env-store 返回的不是 schema 1 JSON 对象"}
+    result["returncode"] = rc
+    if err.strip():
+        result["stderr"] = err.strip()
+    if rc:
+        result.setdefault("error", "env-store 调用失败")
+        result["next"] = {3: "环境已存档，请用 env-store fetch <fp> --wait 取回。",
+                          4: "环境正在构建或取回，请等待返回的作业号完成。",
+                          5: "环境失败或不存在；有存档先 fetch，没有存档才 env build。"}.get(
+                              rc, "env-store 调用失败，请查看 error 和 stderr；连接失败时先恢复连接。")
+    return result
+
+
+def env_error(result):
+    return bool(result.get("returncode") or result.get("error")) or result.get("status") in ("error", "failed", "unknown", "not_found")
+
+
+def env_has_archive(status):
+    return bool(status.get("archived")) and not status.get("archive_problem")
+
+
+# env-store status 带着完整的 meta（每个包、原样的 pixi.lock 文本），塞进输出会让 AI 白白读几十 KB。
+# 嵌进结果时只留判断用得上的字段；完整记录在服务器上用 env-store status <fp> --json 看。
+ENV_STATUS_KEEP = ("schema", "status", "fp", "state", "local", "archived", "archive_pending", "archive_problem",
+                   "job", "stale", "queue_available", "jobs", "last_used", "last_user", "use_sh", "created",
+                   "creator", "source", "conda", "pypi", "bytes", "ready_at", "restored_at", "returncode",
+                   "next", "error", "stderr", "detail", "summary")
+
+
+def env_compact(status):
+    if not isinstance(status, dict):
+        return status
+    out = {k: status[k] for k in ENV_STATUS_KEEP if k in status}
+    if "envs" in status:  # status without fp lists every environment
+        out["envs"] = {fp: env_compact(e) for fp, e in status["envs"].items()} if isinstance(status["envs"], dict) else status["envs"]
+    return out
+
+
+def env_restore_hint(fp):
+    return ("环境已有存档，不重建；请用 env-store fetch %s --wait 取回，"
+            "或直接 submit 交主作业，由 submit 自动取回。" % fp)
+
+
+def env_project(cfg, path):
+    path = server_path(path)
+    if any(c in path for c in "\r\n\0"):
+        die("环境项目路径不能包含换行或 NUL")
+    if path.startswith("~/"):
+        code = "import json,os,sys; print(json.dumps(os.path.expanduser(sys.argv[1])))"
+        path = json.loads(ssh_run(cfg, "python3 -c " + shlex.quote(code) + " " + shlex.quote(path)))
+    if not path.startswith("/"):
+        die("环境项目目录必须是服务器上的绝对路径，或带引号的 '~/project'")
+    return path
+
+
+def env_fp(value):
+    # 契约没有规定指纹长度；只限制为可安全嵌入脚本的单个 token。
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+        die("无效环境 fp：" + str(value))
+    return value
+
+
+def env_args(project, environment):
+    if not environment or any(c in environment for c in "\r\n\0"):
+        die("无效环境名")
+    return [project, "-e", environment]
+
+
+def env_plan_summary(plan):
+    def count(value):
+        return value if isinstance(value, int) else len(value or [])
+    conda, pypi = count(plan.get("conda")), count(plan.get("pypi"))
+    return {"fp": plan.get("fp"), "packages": conda + pypi, "conda": conda, "pypi": pypi,
+            "estimated_size": _size(plan.get("estimated_bytes")),
+            "warnings": plan.get("warnings", []), "rejections": plan.get("rejections", []),
+            "note": "计划允许构建" if plan.get("allowed") else "计划拒收，未提交构建"}
+
+
+_ENV_INIT = r'''
+import json, os, subprocess, sys
+p = json.load(sys.stdin)
+manifest = os.path.join(p['project'], 'pixi.toml')
+exists = os.path.lexists(manifest)
+result = {'schema': 1, 'status': 'preview', 'project': p['project'], 'exists': exists,
+          'written': False, 'lock_run': False}
+if not exists:
+    result['content'] = p['content']
+if p['yes']:
+    if not exists:
+        try:
+            with open(manifest, 'x', encoding='utf-8', newline='\n') as f:
+                f.write(p['content'])
+            result['written'] = True
+        except FileExistsError:
+            result['exists'] = True
+    try:
+        proc = subprocess.run(['/usr/local/bin/pixi', 'lock'], cwd=p['project'],
+                              capture_output=True, text=True)
+        result.update(status='locked' if proc.returncode == 0 else 'error', lock_run=True,
+                      lock={'returncode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr})
+    except OSError as e:
+        result.update(status='error', error=str(e))
+print(json.dumps(result, ensure_ascii=False))
+'''
+
+
+_ENV_ADOPT_INSPECT = r'''
+import json, os, subprocess, sys
+p = json.load(sys.stdin)
+path = os.path.join(p['project'], '.pixi', 'envs', p['environment'])
+local = {'path': path, 'exists': os.path.lexists(path), 'size_kib': None, 'du_status': 'not_needed'}
+if local['exists']:
+    try:
+        proc = subprocess.run(['du', '-s', '-k', '--', path], capture_output=True, text=True, timeout=10)
+        if proc.returncode:
+            local.update(du_status='error', warning='du 查询失败：' + proc.stderr.strip()[:300])
+        else:
+            local.update(size_kib=int(proc.stdout.split()[0]), du_status='ok')
+    except subprocess.TimeoutExpired:
+        local.update(du_status='timeout', warning='du 超过 10 秒，项目环境体积未知；不影响收编。')
+    except (OSError, ValueError, IndexError) as e:
+        local.update(du_status='error', warning='du 无法取得体积：' + str(e)[:300])
+print(json.dumps({'schema': 1, 'status': 'ok',
+                  'manifest_exists': os.path.isfile(os.path.join(p['project'], 'pixi.toml')),
+                  'lock_exists': os.path.isfile(os.path.join(p['project'], 'pixi.lock')),
+                  'project_environment': local}, ensure_ascii=False))
+'''
+
+
+def cmd_env_adopt(cfg, a):
+    project = env_project(cfg, a.dir)
+    env_args(project, a.environment)
+    if a.environment in (".", "..") or any(c in a.environment for c in "/\\"):
+        die("无效环境名：必须是 .pixi/envs 下的单个目录名")
+    rc, out, err = ssh_try(cfg, "python3 -c " + shlex.quote(_ENV_ADOPT_INSPECT), timeout=30,
+                          stdin_data=json.dumps({"project": project, "environment": a.environment}))
+    try:
+        inspection = json.loads(out)
+    except ValueError:
+        inspection = None
+    if rc or not isinstance(inspection, dict) or inspection.get("status") != "ok":
+        return 1, {"summary": {"note": "项目只读检查失败，未提交"}, "submitted": False,
+                   "error": err.strip()[:300] or out.strip()[:300] or "无法解析项目检查结果",
+                   "next": "恢复连接并确认项目目录可读后，重试 env adopt。"}
+    local = inspection["project_environment"]
+    local["size"] = _size(local["size_kib"] * 1024) if local["size_kib"] is not None else None
+    if not inspection["manifest_exists"] or not inspection["lock_exists"]:
+        missing = [name for name, key in (("pixi.toml", "manifest_exists"), ("pixi.lock", "lock_exists"))
+                   if not inspection[key]]
+        return 1, {**inspection, "summary": {"note": "缺少 " + "、".join(missing) + "，未收编"},
+                   "submitted": False, "next": "在服务器项目目录先用 pixi lock 生成 v7 锁；"
+                   "没有 pixi.toml 时先用 env init --dir <项目> 初始化，确认后加 --yes。"}
+    rc, result = cmd_env_build(cfg, a, project=project, adopt=True)
+    result["project_environment"] = local
+    if local.get("warning"):
+        result.setdefault("warnings", []).append(local["warning"])
+    if local["exists"]:
+        fp = result.get("plan", {}).get("fp") or "<fp>"
+        result["next"] += (" 待锁获准且库中环境 ready 后，按顺序："
+                           "1. 用 gen-sbatch --env %s -e %s 重新生成作业脚本，或将现有脚本的环境激活改为 "
+                           "ENV1=$(env-store use %s) || exit 3 加 source \"$ENV1\"；"
+                           "2. 跑一次作业，确认结果没有变化；"
+                           "3. 再运行 cleanup scan --path %s，用 cleanup 清掉该项目环境。"
+                           "spark-cleanup 会识别与项目环境库完全重复的包，删除前逐个先问；"
+                           "pixi run 以后需要时会自己重装。" %
+                           (shlex.quote(project), shlex.quote(a.environment), shlex.quote(fp), shlex.quote(local["path"])))
+    else:
+        result["next"] += " 项目中不存在所选 .pixi/envs 环境，无需清理。"
+    return rc, result
+
+
+def cmd_env(cfg, a):
+    c = a.envcmd
+    if c == "check":
+        return cmd_env_check(cfg, a.script)
+    if c == "adopt":
+        return cmd_env_adopt(cfg, a)
+    if c == "init":
+        project = env_project(cfg, a.dir)
+        name = a.name or os.path.basename(project.rstrip("/")) or "project"
+        content = ('[workspace]\nname = ' + json.dumps(name, ensure_ascii=False) + '\n'
+                   'channels = ["conda-forge", "bioconda"]\nplatforms = ["linux-aarch64"]\n\n'
+                   '[tasks]\nsmoke = "echo smoke-ok"\n')
+        raw = ssh_run(cfg, "python3 -c " + shlex.quote(_ENV_INIT), timeout=600,
+                      stdin_data=json.dumps({"project": project, "content": content, "yes": a.yes}))
+        try:
+            result = json.loads(raw)
+        except ValueError:
+            die("无法解析环境初始化结果：" + raw.strip()[:300])
+        result["next"] = ("已有 pixi.toml，绝不覆盖。" if result.get("exists") else "最小工作区如 content 所示。") + \
+            "在服务器项目目录用 pixi add <包> 编辑依赖；确认后 env init --dir <目录> --yes 执行 pixi lock。"
+        return (1 if env_error(result) else 0), result
+    if c == "find":
+        result = env_call(cfg, ["find", a.package])
+        return (1 if env_error(result) else 0), {**result, "summary": "包查询：" + a.package}
+    if c == "status":
+        if a.dir:
+            fp_result = env_current_fp(cfg, env_project(cfg, a.dir), a.environment)
+            fp = fp_result["fp"]
+        else:
+            fp = env_fp(a.fp) if a.fp else None
+        result = env_call(cfg, ["status"] + ([fp] if fp else []))
+        state_cn = {"ready": "本地可用", "archived": "仅 NAS 存档", "building": "构建中",
+                    "restoring": "取回中", "failed": "上次失败"}
+        result = env_compact(result)
+        result["summary"] = state_cn.get(result.get("state"), "环境状态查询；完整记录在服务器上用 env-store status <fp> --json 看")
+        return (1 if env_error(result) else 0), result
+    return cmd_env_build(cfg, a)
+
+
+def cmd_env_build(cfg, a, project=None, adopt=False):
+    project = project or env_project(cfg, a.dir)
+    argv = env_args(project, a.environment)
+    plan = env_call(cfg, ["plan"] + argv)
+    result = {"plan": plan, "summary": env_plan_summary(plan), "submitted": False}
+    if env_error(plan) or not plan.get("allowed"):
+        result["next"] = ("按 rejections 修正 pixi.toml 并用 pixi lock 更新 v7 锁：仅允许指定 channel 和 wheel；"
+                          "移除 git、sdist 和本地路径依赖，再运行 env build。")
+        return 1, result
+    fp = env_fp(plan.get("fp"))
+    status = env_call(cfg, ["status", fp])
+    result["environment_status"] = env_compact(status)
+    if adopt and not env_error(status) and status.get("state") == "ready":
+        result["summary"]["note"] = "已在库中，本地可用，未提交构建"
+        result["next"] = "可用 gen-sbatch --env 生成引用此 fp 的作业脚本。"
+        return 0, result
+    if status.get("state") == "archived" or (status.get("state") == "failed" and env_has_archive(status)):
+        if adopt:
+            result["summary"]["note"] = "已在库中，有存档，未提交构建"
+        result["next"] = env_restore_hint(fp)
+        return 0, result
+    # 不存在的 fp 会返回非零；仍由 submit 原子地复核存在性和存档状态。
+    if env_error(status) and status.get("returncode") not in (1, 5):
+        result["next"] = status.get("next", "查询环境状态失败，请先核查 env status。")
+        return 1, result
+    if a.yes:
+        expected = plan.get("plan_sha256")
+        if not expected:
+            die("env-store plan 缺少 plan_sha256，不能提交")
+        built = env_call(cfg, ["submit"] + argv + ["--expected-plan", expected] +
+                         (["--wait"] if a.wait else []), timeout=86400 if a.wait else 120)
+        result.update(result=built, submitted=built.get("status") == "submitted" or (built.get("status") == "ready" and bool(built.get("id"))),
+                      next="用 env status 查询环境状态；ready 后可以生成作业脚本。")
+        if built.get("status") == "archived":
+            if adopt:
+                result["summary"]["note"] = "已在库中，有存档，未提交构建"
+            result["next"] = env_restore_hint(fp)
+        elif adopt and built.get("status") in ("exists", "ready") and not result["submitted"]:
+            result["summary"]["note"] = "已在库中，未提交构建"
+        elif env_error(built):
+            result["next"] = built.get("next", "构建提交失败，请查看 result。")
+        return (1 if env_error(built) else 0), result
+    result["next"] = "确认计划后加 --yes 提交本人名下的 Slurm 构建作业；可加 --wait 等待。"
+    return 0, result
+
+
+def env_current_fp(cfg, project, environment):
+    argv = env_args(project, environment)
+    result = env_call(cfg, ["fp"] + argv)
+    if env_error(result) or not result.get("fp"):
+        plan = env_call(cfg, ["plan"] + argv)
+        die("环境锁不合格，请更新锁后 env build：" + json.dumps(plan, ensure_ascii=False))
+    env_fp(result["fp"])
+    return result
+
+
+def script_envs(script):
+    entries = []
+    for line in script.splitlines():
+        if not re.match(r"^# ENV-STORE(?:\s|$)", line):
+            continue
+        try:
+            value = json.loads(line[len("# ENV-STORE"):].strip())
+        except ValueError:
+            die("无效 # ENV-STORE JSON 标记：" + line)
+        if (not isinstance(value, dict) or not isinstance(value.get("project"), str)
+                or not value["project"].startswith("/")
+                or any(c in value["project"] for c in "\r\n\0")
+                or not isinstance(value.get("env"), str)):
+            die("# ENV-STORE 标记须包含 fp、服务器绝对 project 路径和 env")
+        env_fp(value.get("fp"))
+        env_args(value["project"], value["env"])
+        if value not in entries:
+            entries.append(value)
+    return entries
+
+
+def cmd_env_check(cfg, script_path):
+    try:
+        with open(local_path(script_path), encoding="utf-8") as f:
+            entries = script_envs(f.read())
+    except (OSError, UnicodeDecodeError) as e:
+        die("读不了作业脚本：" + str(e))
+    checks = []
+    for entry in entries:
+        current = env_call(cfg, ["fp"] + env_args(entry["project"], entry["env"]))
+        status = env_call(cfg, ["status", entry["fp"]])
+        changed = current.get("fp") != entry["fp"]
+        state = status.get("state")
+        missing = state not in ("ready", "archived", "building", "restoring")
+        notes = []
+        if env_error(current) or not current.get("fp"):
+            notes.append("当前锁无法计算 fp，请修正锁后 env build。")
+        elif changed:
+            notes.append("锁已改变：env build 重建并重新 gen-sbatch；或明确确认继续使用旧 fp 复现旧结果。")
+        if state == "archived" or (state == "failed" and env_has_archive(status)):
+            notes.append(env_restore_hint(entry["fp"]))
+        elif state == "restoring" and (not status.get("job") or status.get("stale")):
+            notes.append("取回作业已过期；请 fetch，或 submit 自动重新取回。")
+        elif state == "building" and (not status.get("job") or status.get("stale")):
+            missing = True
+            notes.append("构建作业已过期，请重新 env build。")
+        elif missing:
+            notes.append(status.get("next") if status.get("returncode") in (3, 4, 5)
+                         else "脚本环境从未构建或已失败，请先 env build。")
+        checks.append({**entry, "current": current, "environment_status": env_compact(status),
+                       "changed": changed, "ok": not changed and not missing and not env_error(status),
+                       "notes": notes or ["锁与脚本一致。"]})
+    ok = all(e["ok"] for e in checks)
+    return (0 if ok else 1), {"environments": checks, "ok": ok,
+                             "summary": "环境检查通过" if ok else "环境需要处理，见各标记 notes"}
+
+
+def env_submit_plan(cfg, entries):
+    plan = []
+    seen = set()
+    for entry in entries:
+        fp = entry["fp"]
+        if fp in seen:
+            continue
+        seen.add(fp)
+        status = env_call(cfg, ["status", fp])
+        state = status.get("state")
+        will_fetch = (state == "archived" or (state == "failed" and env_has_archive(status)) or
+                      (state == "restoring" and (not status.get("job") or status.get("stale"))))
+        if env_error(status) or (state not in ("ready", "building", "restoring") and not will_fetch):
+            hint = status.get("next") if status.get("returncode") in (3, 4, 5) else "没有可用存档，请先 env build。"
+            die("环境 %s 不可用（%s），%s：%s" %
+                (fp, state or "unknown", hint, json.dumps(status, ensure_ascii=False)))
+        if state == "building" and (not status.get("job") or status.get("stale")):
+            die("环境 %s 的构建作业已过期，请重新 env build；不使用过期作业号做依赖。" % fp)
+        if state in ("building", "restoring") and not will_fetch:
+            env_job_id(status.get("job"))
+        if state == "ready" and status.get("local") is False:
+            die("环境 %s 报 ready 但本地不存在，请核查状态；有存档先 fetch，没有存档才 env build" % fp)
+        plan.append({**entry, "state": state, "status": env_compact(status), "will_fetch": will_fetch})
+    return plan
+
+
+def env_job_id(value):
+    value = str(value) if value is not None else ""
+    if not re.fullmatch(r"[0-9]+", value):
+        die("环境作业号缺失或无效，未提交主作业：" + value)
+    return value
+
+
 def disk_hint(cfg):
     """本地盘还剩多少、你的 home 多大（spark-status --json）；剩余低于 /ai.md 的 300 GB 线就提示可以 cleanup。
     只给 status 子命令用：cmd_status 还被 recommend / gen-sbatch / debug-start 调用，别拖慢它们。"""
@@ -2145,7 +2513,7 @@ LOW_PRIORITY_NICE = 100000
 
 
 def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None,
-                   low_priority=False, stage=None):
+                   low_priority=False, stage=None, env=None, environment="default", keep_toolbox=False):
     # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
     # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
@@ -2200,6 +2568,19 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
         path = entry["path"]
         L += ["# DB-CACHE-STAGE " + json.dumps(path, ensure_ascii=True),
               "D%d=$(db-cache use %s)" % (i, shlex.quote(path))]
+    if env:
+        project = env_project(cfg, env)
+        current = env_current_fp(cfg, project, environment)
+        marker = {"fp": current["fp"], "project": project, "env": environment}
+        L += ["# ENV-STORE " + json.dumps(marker, ensure_ascii=True),
+              "ENV1=$(env-store use %s) || exit 3" % current["fp"], 'source "$ENV1"']
+        if not keep_toolbox:
+            L += ["# 只使用锁定环境的工具；去掉工具箱的两个 PATH 项。",
+                  '_env_path=()', 'IFS=":" read -r -a _env_parts <<< "$PATH"',
+                  'for _env_part in "${_env_parts[@]}"; do',
+                  '  case "$_env_part" in /opt/bio/bin|/opt/bio/compat) ;; *) _env_path+=("$_env_part");; esac',
+                  'done', 'export PATH="$(IFS=":"; echo "${_env_path[*]}")"',
+                  'unset _env_path _env_parts _env_part']
     if is_gpu:
         # 没写 --mem 的按 lua 兜底的 96000M 算：第一次跑、没估计正是最需要自限的时候
         floor_gib = round(cfg.get("gpu_floor_gb", 96) * 1000 / 1024, 2)
@@ -2250,6 +2631,30 @@ def script_stages(script):
     return [json.loads(m) for m in re.findall(r"^# DB-CACHE-STAGE (.+)$", script, re.M)]
 
 
+def env_script_dependency(script):
+    values = []
+    for value in re.findall(r"^#SBATCH\s+(?:--dependency(?:=|\s+)|-d(?:=|\s*))(.*)$", script, re.M):
+        try:
+            words = shlex.split(value, comments=True)
+        except ValueError:
+            die("无法解析脚本依赖，请手动合并依赖后再提交。")
+        if len(words) != 1 or "?" in words[0]:
+            die("脚本依赖含 ? 或格式不支持，请把用户依赖与环境依赖手动合并后再提交。")
+        values.append(words[0])
+    # 和 sbatch 一样，重复指定时取最后一条；上面仍检查每条的 OR 运算。
+    return values[-1] if values else None
+
+
+def env_dependency_note(entries):
+    jobs = [str(e["status"]["job"]) for e in entries
+            if e["state"] == "building" and not e["will_fetch"]]
+    jobs += [str(e["fetch"]["id"]) for e in entries
+             if e.get("fetch", {}).get("status") == "building" and e["fetch"].get("id")]
+    logs = "、".join("env-store-%s.log" % job for job in dict.fromkeys(jobs)) or "env-store-<作业>.log"
+    return ("环境依赖使用 --kill-on-invalid-dep=yes；构建或取回依赖失败时，Slurm 自动取消主作业，"
+            "避免主作业一直排队并 pin 环境。若冒烟测试失败，请查看构建日志 %s。" % logs)
+
+
 def cmd_submit(cfg, script_path, check_only=False):
     script_path = local_path(script_path)
     if not os.path.exists(script_path):
@@ -2262,6 +2667,16 @@ def cmd_submit(cfg, script_path, check_only=False):
     stages = cache_plan(cfg, script_stages(script))
     plan = {"stage": stages, "will_fetch": [e["path"] for e in stages if not e["cached"]],
             "dependency": "afterok:<fetch-job-ids>" if any(not e["cached"] for e in stages) else None}
+    envs = env_submit_plan(cfg, script_envs(script))
+    needs_env_dependency = any(e["will_fetch"] or e["state"] in ("building", "restoring") for e in envs)
+    user_dependency = env_script_dependency(script) if needs_env_dependency else None
+    if envs:
+        plan["environments"] = envs
+        plan["env_will_fetch"] = [e["fp"] for e in envs if e["will_fetch"]]
+        if needs_env_dependency:
+            plan["dependency"] = ",".join(filter(None, [user_dependency, "afterok:<fetch/build/restore-job-ids>"]))
+            plan["kill_on_invalid_dep"] = True
+            plan["dependency_note"] = env_dependency_note(envs)
     if check_only:
         return {"check_only": True, **plan, "sbatch_script": script, "submitted": False}
     dependencies = []
@@ -2270,6 +2685,38 @@ def cmd_submit(cfg, script_path, check_only=False):
         value = ssh_run(cfg, "/usr/local/bin/db-cache fetch " + shlex.quote(entry["path"])).strip()
         if re.fullmatch(r"[0-9]+", value): dependencies.append(value)
         elif value != entry["local"]: die("无法解析 db-cache fetch 结果：" + value)
+    db_fetch_jobs = list(dependencies)
+    env_fetch_jobs = []
+    env_dependencies = []
+    for entry in envs:
+        if entry["will_fetch"]:
+            fetched = env_call(cfg, ["fetch", entry["fp"]], timeout=120)
+            entry["fetch"] = fetched
+            if fetched.get("status") in ("submitted", "building", "restoring") and not env_error(fetched):
+                job = env_job_id(fetched.get("id"))
+                env_fetch_jobs.append(job)
+                dependencies.append(job)
+                env_dependencies.append(job)
+            elif fetched.get("status") != "ready" or env_error(fetched):
+                die("环境取回失败，未提交主作业；" + fetched.get("next", "请核查存档后重新 fetch；没有存档才 env build。") +
+                    "：" + json.dumps(fetched, ensure_ascii=False))
+        elif entry["state"] in ("building", "restoring"):
+            job = env_job_id(entry["status"].get("job"))
+            dependencies.append(job)
+            env_dependencies.append(job)
+    dependencies = list(dict.fromkeys(dependencies))
+    dependency = "afterok:" + ":".join(dependencies) if dependencies else None
+    if env_dependencies:
+        dependency = ",".join(filter(None, [user_dependency, dependency]))
+    if needs_env_dependency:
+        # fetch 可能已经变 ready；此时没有环境依赖，保持脚本自己的依赖。
+        if not env_dependencies and dependency and user_dependency:
+            dependency = user_dependency + "," + dependency
+        plan.update(dependency=dependency or user_dependency, kill_on_invalid_dep=bool(env_dependencies))
+        if env_dependencies:
+            plan["dependency_note"] = env_dependency_note(envs)
+        else:
+            plan.pop("dependency_note", None)
     # --chdir 的目标和它下面的 logs/ 必须在作业启动前就存在：Slurm 打不开 --output
     # 指定的文件时，作业直接失败，而且失败信息本身也没地方写。
     created = None
@@ -2278,17 +2725,31 @@ def cmd_submit(cfg, script_path, check_only=False):
         wd = m.group(1)
         ssh_run(cfg, f"mkdir -p {shlex.quote(wd)}/logs")
         created = f"{wd}/logs"
-    command = "sbatch" + (" --dependency=afterok:" + ":".join(dependencies) if dependencies else "")
+    command = "sbatch" + (" --dependency=" + shlex.quote(dependency) if dependency else "")
+    if env_dependencies:
+        command += " --kill-on-invalid-dep=yes"
     out = ssh_run(cfg, command, stdin_data=script)
     result = {"submitted": out.strip(), "as_user": cfg["user"]}
-    result.update(plan, fetch_jobs=dependencies)
-    if stages:
+    result.update(plan, fetch_jobs=db_fetch_jobs)
+    if envs:
+        result["env_fetch_jobs"] = env_fetch_jobs
+        result["env_dependency_jobs"] = list(dict.fromkeys(env_dependencies))
+    if stages or envs:
         match = re.search(r"Submitted batch job ([0-9]+)", out)
         if not match: die("无法解析主作业号，不能登记缓存使用：" + out)
         # Pin queued jobs immediately, including files whose fetch hasn't finished.
         for entry in stages:
             ssh_run(cfg, "sudo -n -u dbcache /usr/local/bin/db-cache _worker pin " +
                     shlex.quote(entry["path"]) + " " + match.group(1))
+        for entry in envs:
+            pinned = _soft(env_call, cfg, ["pin", entry["fp"], "--job", match.group(1)])
+            if pinned is None:
+                pinned = {"status": "error", "error": "pin 调用失败，请按主作业号核查并重试 pin"}
+            entry["pin"] = pinned
+            if env_error(pinned) or pinned.get("status") != "pinned":
+                # 主作业已提交，保留 JobID 和全部副作用供调用者处理。
+                result.setdefault("warnings", []).append("环境 pin 失败：%s；主作业 %s 已提交，请核查并重试 pin，勿重复提交主作业。" %
+                                                        (entry["fp"], match.group(1)))
     if created:
         result["ensured_dir"] = created
     return result
@@ -2846,6 +3307,28 @@ def main():
     dbp["vote"].add_argument("id", type=int)
     dbp["vote"].add_argument("--yes", action="store_true")
 
+    ep = sub.add_parser("env", help="项目只读环境：init/build/adopt/status/find/check")
+    eps = ep.add_subparsers(dest="envcmd", required=True)
+    for nm in ("init", "build", "adopt", "status", "find", "check"):
+        parser = eps.add_parser(nm)
+        parser.add_argument("--json", action="store_true", help="输出总是 JSON；写上也行")
+        if nm in ("init", "build", "adopt", "status"):
+            parser.add_argument("--dir", required=nm != "status", help="服务器上的项目目录")
+        if nm in ("build", "adopt", "status"):
+            parser.add_argument("-e", dest="environment", default="default")
+        if nm in ("init", "build", "adopt"):
+            parser.add_argument("--yes", action="store_true")
+        if nm == "init":
+            parser.add_argument("--name")
+        elif nm in ("build", "adopt"):
+            parser.add_argument("--wait", action="store_true")
+        elif nm == "status":
+            parser.add_argument("fp", nargs="?")
+        elif nm == "find":
+            parser.add_argument("package")
+        else:
+            parser.add_argument("script")
+
     # 清理和公共区重复的个人安装：转给服务器上的 spark-cleanup
     cl = sub.add_parser("cleanup")
     clsub = cl.add_subparsers(dest="clcmd", required=True)
@@ -2924,6 +3407,10 @@ def main():
                         "排到所有人的普通作业之后。默认不加" % LOW_PRIORITY_NICE)
 
     g.add_argument("--stage", action="append", default=[], help="NAS 库文件/目录；可重复，提交时先取库")
+
+    g.add_argument("--env", help="服务器项目目录；使用其 pixi.lock 对应的只读环境")
+    g.add_argument("-e", dest="environment", default="default")
+    g.add_argument("--keep-toolbox", action="store_true", help="激活项目环境后保留工具箱 PATH")
 
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
@@ -3018,7 +3505,13 @@ def main():
                       args.gpu_pool_gb, args.gpu_floor_gb))
         return
 
+    if args.cmd == "env" and args.envcmd == "status" and args.fp and args.dir:
+        ap.error("env status 的 fp 和 --dir 不能同时指定")
     cfg = load_config()
+    if args.cmd == "env":
+        rc, payload = cmd_env(cfg, args)
+        emit(payload)
+        sys.exit(rc)
     if args.cmd == "rules":
         return cmd_rules(cfg)
     if args.cmd == "software":
@@ -3093,7 +3586,8 @@ def main():
         emit(cmd_recommend(cfg, args.tool, args.gpu, args.mem_guess, args.cpus, args.time))
     elif args.cmd == "gen-sbatch":
         emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
-                            args.out, args.workdir, low_priority=args.low_priority, stage=args.stage))
+                            args.out, args.workdir, low_priority=args.low_priority, stage=args.stage,
+                            env=args.env, environment=args.environment, keep_toolbox=args.keep_toolbox))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script, check_only=args.check_only))
     elif args.cmd == "wait":

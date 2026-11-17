@@ -73,7 +73,8 @@ print(d['latest_version'], sorted({f.get('attrs',{}).get('subdir') for f in d['f
 
 ## 建议用法
 - **先查公共区有没有**（`software find`），有就直接用 `/opt/bio/bin` 里的。
-- 要自己装：照 `/ai.md`，命令行工具用 `pixi global install`，项目要钉版本就在项目里 `pixi init` / `pixi add`；纯 Python 依赖可以用 venv。别裸依赖系统 Python。
+- 正式分析需要复现：读 `project-envs.md`，用 `env init/build` 与 `gen-sbatch --env`；不要向只读环境 pip install。
+- 临时个人安装：照 `/ai.md`，命令行工具用 `pixi global install`，项目要钉版本就在项目里 `pixi init` / `pixi add`；纯 Python 依赖可以用 venv。别裸依赖系统 Python。
 - 装包优先 pip wheel（要 aarch64 的），没有 wheel 再考虑源码编译。docker 普通用户用不了。
 
 ## 陈旧提示
