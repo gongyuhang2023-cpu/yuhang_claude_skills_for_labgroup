@@ -15,6 +15,20 @@
   ],
   "skills": [
     {
+      "name": "lab-frontier",
+      "icon": "flow",
+      "purpose": "开通实验室「每日前沿」，聊简报、收藏条目、更新课题和运行配置",
+      "needs": [
+        "需 spark 账号",
+        "需要 spark 账号，并通过 spark-advisor 配好 SSH 连接"
+      ],
+      "care_install": "装完按 SKILL.md 的『首次设置』走完",
+      "notes": {
+        "date": "2026-11-19",
+        "headline": "在面板开通每日前沿"
+      }
+    },
+    {
       "name": "spark-advisor",
       "icon": "server",
       "purpose": "判断任务在本机还是服务器运行，推荐资源参数并提交作业；spark 排不上时把小任务放到 Google Colab；查询公共资源、自己装数据库并锁定版本、用项目环境锁定软件版本、清理空间、管理服务器上的项目",
