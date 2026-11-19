@@ -24,8 +24,8 @@
 
 1. **代码推了没**：`advise.py project check <项目>`。查没提交、没推、大文件、数据目录没忽略，以及用到的数据库版本（只查版本用 `database scan`）。能不能离开服务器看 `code_safe`。详见 `code-check.md`。
    项目本身多大：只读的 `du -s --si <项目>`，或搬运预演里的 `plan.bytes`（`check` 不报大小）。
-2. **和公共区重复的环境**：`advise.py cleanup scan`。完全重复的删掉；部分重复的按规则判断换不换。详见 `cleanup.md`。
-   问的是某一个项目留不留时，它专用的环境也算进来（`created_from` 是这个项目的 `environment.yml`，或 `refs` 都在项目里）：环境常比项目目录本身还大。默认的 scan 只列和公共区重名的环境，别的用 `scan --path <环境>` 查。项目搬走、环境也没别的项目在用时，环境用 `--env` 一起打包。
+2. **项目环境的副本**：`advise.py cleanup scan --path <环境>` 看引用和占用，再用项目锁与 env-store 验证是否能重建。详见 `cleanup.md`。
+   盘点单个项目时也查它专用的环境（看 `created_from` 和 `refs`）。归档项目前，确认环境的引用和占用，再按清理流程安排旧 conda 环境的归档。
 3. **冷数据**：`advise.py cleanup cold`。大、而且很久没动的目录，搬到 NAS 归档。详见 `cold-data.md`。
 4. **搬走之后**：原处留一张 `<目录名>.ON_NAS.txt` 说明文件；`advise.py cleanup archived` 列出搬走的全部东西，并在本机重写个人清单 `references/nas-archive.local.md`。
 

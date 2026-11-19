@@ -1,38 +1,41 @@
-# 查公共工具与自助安装
+# 把课题工具锁进项目
 
-## 先查公共工具
+## 1. 先看服务器规则
 
-先运行 `python scripts/advise.py rules`，看服务器 `/ai.md` 对这个工具有没有专门安排。iPHoP 等有专门安排的工具按服务器规则处理。流程涉及把用户数据放进共享盘时，先征得用户同意。
+运行 `python scripts/advise.py rules`，查看工具是否有专门安排（例如 iPHoP）。有专门安排时照服务器规则处理。公共 R 可直接用 `/opt/bio/bin/R` 或 `/opt/bio/bin/Rscript`。`/opt/spark-sys` 专供服务器服务使用。课题脚本使用各自的项目环境。
 
-没有专门安排时，再走下面的通用流程。用户说「申请安装」或「请管理员装」时，告诉用户缺工具可以自己建项目环境，缺数据库可以自己装进 NAS 公共库，都不用等管理员。然后按工具或数据库的流程继续。
+## 2. 查推荐配方
 
-`python scripts/advise.py software find <工具名>` 按包名、环境名和命令名搜索公共工具。
-`tools` 会列出匹配的包、版本和常用命令。也可以在面板「公共资源 → 公共工具」里搜。
-安装前，在 Spark 上以用户身份运行 `which -a <工具>` 查实际命令。它能查到 PATH 上的个人安装和公共工具，`software find` 的工具清单只覆盖公共区。发现已有个人版本时，先核对它是否满足需求。
-用 `--arch` 同时查询 Conda 的构建。公共工具没有匹配时会自动查询构建。
+运行 `python scripts/advise.py software find <工具名>`。按工具名、环境名、命令名或兼容命令名精确匹配。查看 `recipes` 里的版本、依赖约束、频道、命令、绑定的数据库和备注。对应的 `next[].steps` 给出锁定步骤。命中多个配方时，按脚本实际需要选定工具。
 
-## 用已有的工具
+目录正常且没有匹配配方时，查看 Conda 的 `linux-aarch64` 和 `noarch` 构建。`noarch` 的依赖仍须由 ARM64 锁解析验证。各 Conda 渠道确认缺少构建后再看 PyPI。用 PyPI 前核对项目主页、wheel 支持的 Python 版本和平台。渠道查询失败时先补查，再选包。有数据库绑定时，用 `database find` 核对工具和库的版本及格式。
 
-登录后 `/opt/bio/bin` 已在 PATH，直接敲命令。用 `which -a <命令>` 查看实际用的是哪一份。
-`gen-sbatch` 默认生成登录 shell 脚本，也可以直接用命令名。cron 等非登录环境可用 `/opt/bio/bin/<命令>`。
-需要固定版本时，把依赖写进项目环境。
+`recipe_errors` 会点名格式有误的工具和字段，其余配方可以继续用。面板不可用、目录格式错误或所需工具的配方有误时，按提示重查 `software recipes` 和 `rules`。也可在 Spark 只读查看 `/opt/bio/share/recipes.json`，核对版本、频道和全部依赖后再写锁。
 
-## 缺工具时建项目环境
+迁移时用 `software scan` 找脚本里的工具箱调用。被 Spark 系统命令盖住的裸命令会自动排除，剩余裸命令按原作业的 PATH 和激活步骤核对。显式工具箱路径照常计入。见 [工具箱迁移步骤](toolbox-migration.md)。
 
-临时试用也走项目环境。相同的配方可以复用已构建环境，版本会写进锁文件。
+## 3. 锁进项目
 
-1. 看 `software find` 的 `arch` 和 `availability`，确定要加入配方的依赖。Conda 有 `linux-aarch64` 构建时选对应的 Conda 包。
-   只有 `noarch` 时，包本身适用于 ARM64，依赖仍以 `/usr/local/bin/pixi lock` 能否解析成功为准。若因缺少 ARM64 构建而解析失败，把缺少的依赖告诉用户。
-   如果 Conda 查询有失败，且没有渠道查到构建，先用 `software find <名> --arch` 重查。重查仍失败时，到失败渠道的 Anaconda 项目页核对包名和构建。仍无法确认时，告诉用户哪些结果未知，等确认后再选依赖。
-   各 Conda 渠道都明确没有可用构建时，才看 `pypi`。PyPI 的同名项目可能是另一个工具。先核对 `summary` 和主页或项目链接，确认是用户要的工具，并核对 wheel 支持的 Python 版本。
-   若只找到旧版 wheel，按返回的版本选择。env-store 接受 wheel，拒收 sdist 和 Git 依赖。没有可用构建就把查询结果告诉用户。
-2. 对已存在的 Spark 项目目录运行 `env init --dir <项目目录>`。缺配方时，给用户看预览，确认后用 `env init --dir <项目目录> --yes` 写最小配方并生成初始锁。已有配方就沿用。目录缺失时先确认 Spark 项目落点，目录就绪后重跑。
-3. 在 Spark 项目目录用 `/usr/local/bin/pixi add --no-install <包名>` 更新配方和锁。PyPI 依赖用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。把示例 `tasks.smoke` 换成真正检查工具的短命令，例如 `<工具> --version`。已有真实测试时沿用。编辑后运行 `/usr/local/bin/pixi lock` 更新锁。把 `pixi.toml`、`pixi.lock` 和项目代码放在一起。
-4. 用 `env build --dir <项目目录>` 看构建计划，用户同意后加 `--yes --wait` 构建。
+对已有 Spark 项目目录先用 `env init --dir <项目目录>` 预览。缺配方时，经用户同意加 `--yes` 初始化。合用多个工具时先比较各配方的依赖、频道顺序和备注。兼容的可以合并。CheckV 与 Bakta 这类冲突组合按 [多环境 manifest 示例](project-envs.md#一个项目的多个环境) 分为具名环境，各自列全频道和版本。下面的命令是分别加到合适环境的示例。一个项目已经用具名 feature 时，在 Pixi 命令中指定 `--feature <名字>` 或编辑对应 TOML 段，再核对整份锁。
 
-完整参数与示例见 [项目环境](project-envs.md)。使用 ws 时按 SKILL.md 的入口规则用 `ws_forward.py`。
+`dependencies` 的值可以是版本字符串，也可以是含 `version` 和可选 `channel` 的表。用 `/usr/local/bin/pixi add --no-install` 写入约束。先把本地频道按配方要求加入选定环境的频道列表。带 `channel` 的依赖用 `channel::包名+版本约束` 指定包来源，例如 Bakta 的 BLAST。
 
-## 在作业里用项目环境
+```bash
+/usr/local/bin/pixi add --no-install gtdbtk==2.5.2 'python=3.12.*'
+/usr/local/bin/pixi add --no-install bakta==1.12.2 'file:///opt/bio/channel::blast==2.17.0' python==3.12.16 diamond==2.2.8 pyhmmer==0.12.3
+```
 
-用 `gen-sbatch --env <项目目录>` 加上任务所需的 `--name`、`--workdir`、资源和 `--command` 等参数生成脚本，`--workdir` 写服务器上的绝对路径。脚本会激活锁定的环境，计算命令直接用环境里的工具。
-用 `env check <脚本>` 核对，然后按提交流程让用户确认并用 `submit --script <脚本>` 交作业。
+PyPI wheel 用 `/usr/local/bin/pixi add --no-install --pypi <包名和版本约束>`。按 `project-envs.md` 设置顶层 `[tasks].smoke`，或沿用已覆盖所选环境的测试。运行 `/usr/local/bin/pixi lock`，将 `pixi.toml` 和 `pixi.lock` 与项目代码放在一起。公共库用 `databases.lock.json` 固定版本。
+
+## 4. 在作业里用
+
+按 [项目环境流程](project-envs.md) 用 `env build --dir <项目目录> -e <环境>` 看各所需环境的计划。经用户同意后加 `--yes --wait` 构建。用 `gen-sbatch --env <项目目录> --workdir <Spark 项目绝对路径>` 生成脚本。单环境用 `-e`，多个环境用重复的 `--env-step`。用 `env check` 核对脚本中的环境，再预演提交。
+
+## 5. 临时查看文件或试用工具
+
+“当前项目”是用户已指定承载本次分析的目录，空目录也可以是项目。已有构建时优先复用该项目环境，用 `env-store use <fp>` 取得激活脚本路径。`source` 后用 `command -v <工具>` 确认命令来自该 fp 的环境，再运行秒级查看命令。未指定项目时可复用自己的 scratch 项目，例如 Spark 上的 `/home/<用户>/Workspace/Projects/scratch`，按需加工具和更新锁。作业的日志放在项目的 `logs/`。
+
+查公共库和本地文件的目录、大小、格式或少量表头可直接做。还没确定库或版本路径时先跑 `database find <库名>`。FASTA 全量计数以本次总读入量达到 1,000,000,000 字节为排队参考线。低于这条线且确认几秒可完成时可以直接做。共享存储、全量解压或磁盘负载使耗时拿不准时，走 Slurm。
+
+小任务没有现成环境时，可以一次展示全程计划。例如用 CheckV 检查小 FASTA，把固定数据库版本、写配方及锁、按计划构建环境、生成脚本、提交和查看结果写在一起。附拟写文件、完整输入输出路径和作业资源及预计时长。环境指纹和作业号以前一步的实际结果为准。[同意规则](../SKILL.md#同意规则)
+

@@ -41,7 +41,7 @@ JOB_WAITING = ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "
 BOUND_TOOLS = {"gtdbtk": ("GTDBTK_DATA_PATH", "gtdbtk", ()),
                "bakta": ("BAKTA_DB", "bakta", ("--db", "-d")),
                "checkv": ("CHECKVDB", "checkv", ("-d",))}
-# 库的版本要和公共工具对得上（compat）：库名 -> 公共工具名
+# 服务端兼容检查（compat）：库名 -> 检查所用工具名
 BOUND_DBS = {"gtdbtk": "gtdbtk", "bakta": "bakta", "checkv": "checkv", "genomad": "genomad"}
 
 SCRIPT_EXT = {".sh", ".bash", ".zsh", ".py", ".r", ".rmd", ".qmd", ".smk", ".nf", ".sbatch", ".slurm", ".yaml",

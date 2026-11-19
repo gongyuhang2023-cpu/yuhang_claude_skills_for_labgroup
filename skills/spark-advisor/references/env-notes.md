@@ -10,7 +10,7 @@
 - GPU：GB10（统一内存，无独立显存框），驱动 580，**CUDA 13.0**
 - 系统 Python 3.12、gcc 13.3（可从源码编译）
 - **docker 普通用户用不了**：装了，但用户不在 docker 组（2026-10-14 核实，`/ai.md` 也这么写）
-- **公共软件优先**：`/opt/bio/bin` 里有大量工具，`micromamba` 也是公共的。缺工具时先看 `/ai.md`，通用安装流程使用 `/usr/local/bin/pixi` 建项目环境。
+- **课题工具由项目提供**：先看 `/ai.md` 的专门安排，再查配方，用 `/usr/local/bin/pixi` 更新项目锁。
 
 ### ⚠ 「查不到」≠「没装」——非交互 ssh 的 PATH 是残缺的
 
@@ -22,7 +22,7 @@
 |---|---|---|
 | conda | `~/miniforge3/bin/conda` | `source ~/miniforge3/etc/profile.d/conda.sh` 后再用 |
 | **R / Rscript** | **公共区**：`/opt/bio/bin/Rscript`（R 4.5；2026-10-08 起学生 conda 环境里的 R 已移除，`/usr/bin/R` 不存在） | 绝对路径直接调，非交互可用 |
-| 各类生信工具 | 公共区 `/opt/bio/bin/<命令>`（非交互 ssh 的 PATH 里没有它）；个人装的常在项目内 `<project>/_data/envs/<name>/bin/` | 同上，绝对路径 |
+| 各类生信工具 | 项目的 `pixi.lock` 和 env-store 环境 | 通过 `gen-sbatch --env` 生成作业，使用环境里的命令 |
 
 **先查 `env-profile.local.json` 的 `system.conda` / `system.r` 字段**（`probe-env` 会连
 conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下结论。
@@ -37,11 +37,11 @@ conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下�
 **尚未验证（用到再测，别假设有）**：
 - `fpocket`、`rdkit=2020.09`（老版本）、`unidock`
 - 原因：这些常走 conda-forge，而系统没 conda；aarch64 可得性没实测过。
-- 做法：真要用时先在家目录装 miniforge，再 `conda search --platform linux-aarch64 <pkg>` 确认；或找预编译 aarch64 包 / 用 gcc 13.3 自己编译。
+- 做法：先用 `software find` 查推荐配方或 ARM64 构建，再用该项目的锁验证依赖能否解析。
 
 ## 生信工具链（细菌基因组注释）—— 2026-08-06 实测
 
-**结论先行：aarch64 对这条链基本不是障碍。整个 conda 环境 44 秒装成，13 个工具逐个 `--version` 实测可跑。**
+**当时 ARM64 的 conda 环境 44 秒装成，13 个工具逐个 `--version` 实测可跑。** 当前使用版本查 `software find`。
 
 > ★ 这条**订正了一个错误预期**。动手前的判断是"prokka/bakta 这类可能在 aarch64 上装不上"，
 > 并据此把"环境风险"列为不上服务器的理由之一。**实际不成立** —— 主流生信工具要么是
@@ -54,7 +54,7 @@ conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下�
 `aragorn` · `infernal` · `tRNAscan-SE` · `ncbi-datasets-cli` · `csvtk` · `ncbi-amrfinderplus`
 
 **❌ 唯一撞到的真实限制**：`bakta 1.12.0` 依赖 `blast>=2.17.0`，而 **aarch64 没有该版本的构建**
-（只有 linux-64）→ mamba 直接解不出来。**用 `bakta 1.11.4`。**
+（只有 linux-64）。**该次验证使用 `bakta 1.11.4`。**
 
 **⚠️ `bakta 1.11.4` 必须钉 `pyhmmer<0.11`**（实测 `0.10.15` 可用）。
 `pyhmmer 0.12.x` 把 `hit.name` 从 `bytes` 改成 `str`，bakta 会在
@@ -72,9 +72,9 @@ print(d['latest_version'], sorted({f.get('attrs',{}).get('subdir') for f in d['f
 ```
 
 ## 建议用法
-- **先读服务器规则**（`rules`），再用 `software find` 查公共区。已有工具可以直接用 `/opt/bio/bin` 里的。
-- 正式分析需要复现：读 `project-envs.md`，用 `env init/build` 与 `gen-sbatch --env`；不要向只读环境 pip install。
-- 临时试用也用项目环境。先预览 `env init --dir <项目目录>`，缺配方时经确认加 `--yes` 初始化，再用 `/usr/local/bin/pixi add --no-install <包名>` 更新配方和锁，最后用 `env build` 预演构建。详见 `software.md` 和 `project-envs.md`。
+- **先读服务器规则**（`rules`），再用 `software find` 查推荐配方和构建。
+- 课题分析统一用 `env init/build` 与 `gen-sbatch --env`，依赖变更写回配方和锁。见 `project-envs.md`。
+- 临时试用优先用当前项目环境，项目外用自己的 scratch 项目。补依赖时按 `software.md` 的推荐配方写入全部约束和频道，再按 `project-envs.md` 预演构建。
 - 纯 Python 依赖写进项目环境。确认是所需项目且有适用的 wheel 后，用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。docker 普通用户用不了。
 
 ## 陈旧提示

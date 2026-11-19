@@ -33,7 +33,9 @@ Subcommands:
                     only safety net there is.
   rules             the server's own rules + shared software/databases + live free
                     resources (the panel's /ai.md) -- the single source of truth
-  software find     look up a shared tool or find ARM64 packages for a project environment
+  software find     look up a recipe or find ARM64 packages for a project environment
+  software scan     find toolbox calls in scripts on Spark
+  software recipes  export the recipe catalog as JSON
   env ...           project environments: init/build/adopt/status/check via env-store
   database ...      shared databases: find (every version, where it lives, how it was
                     installed, cache state); plan/install/status (self-install into the
@@ -940,12 +942,18 @@ def _conda_arch(name):
             if not isinstance(files, list):
                 raise ValueError("Conda 响应缺少有效的构建清单")
             best = {}
+            versions = [v for v in d.get("versions") or [] if isinstance(v, str) and v]
+            if d.get("latest_version"):
+                versions.append(d["latest_version"])
             for f in files:
                 sub = (f.get("attrs") or {}).get("subdir")
                 v = f.get("version")
+                if not v:
+                    continue
+                versions.append(v)
                 if sub in ("linux-aarch64", "noarch") and (sub not in best or _vkey(v) > _vkey(best[sub])):
                     best[sub] = v
-            out[ch] = {"exists": True, "latest": d.get("latest_version"),
+            out[ch] = {"exists": True, "latest": max(versions, key=_vkey, default=None),
                        "linux-aarch64": best.get("linux-aarch64"), "noarch": best.get("noarch")}
         except urllib.error.HTTPError as e:
             out[ch] = {"exists": False} if e.code == 404 else {"error": f"HTTP {e.code}"}
@@ -999,17 +1007,126 @@ def _on_server(cfg):
     return host == cfg.get("node") or os.path.isdir("/opt/bio/sbin")
 
 
-def cmd_software_find(cfg, name, check_arch=False):
+class SoftwarePanelError(ValueError):
+    pass
+
+
+def software_inventory(cfg):
+    try:
+        response = _http_json(panel_url(cfg, "/api/software"))
+    except (OSError, IncompleteRead) as e:
+        raise SoftwarePanelError(f"面板连不上，无法读取软件清单 ({type(e).__name__})。") from e
+    except ValueError as e:
+        raise SoftwarePanelError("面板的软件清单响应无法解析。") from e
+    inv = response.get("inventory") if isinstance(response, dict) else None
+    if not isinstance(inv, dict) or (inv.get("error") and "recipes" not in inv):
+        raise SoftwarePanelError("面板已响应，但未提供可用的软件清单。")
+    return response, inv
+
+
+def cmd_software_on_spark(cfg, paths=()):
+    import software_scan
+
+    _, inv = software_inventory(cfg)
+    catalog = software_scan.recipe_catalog(inv.get("recipes"))
+    paths = [server_path(path) for path in paths]
+    if _on_server(cfg):
+        return software_scan.spark_operation(paths, catalog)
+    script = _bundle("software_scan.py", "run_record")
+    script += "\n_rc, _output = spark_operation(_sys.argv[1:], %r)\nprint(json.dumps(_output, ensure_ascii=True))\n_sys.exit(_rc)\n" % catalog
+    remote = " ".join(["python3", "-I", "-", *(shlex.quote(path) for path in paths)])
+    try:
+        rc, out, _ = ssh_try(cfg, remote, timeout=180, stdin_data=script)
+    except (OSError, subprocess.SubprocessError):
+        return 1, {"error": "无法连接 Spark 或读取操作超时。"}
+    if rc == 255:
+        return rc, {"error": "无法连接 Spark 执行软件扫描或导出。"}
+    try:
+        return rc, json.loads(out)
+    except ValueError:
+        return rc or 1, {"error": "Spark 未返回软件目录或扫描结果，请检查连接和路径后重试。"}
+
+
+SOFTWARE_RULES_STEP = "先运行 rules 查这个工具是否有专门安排。有就按服务器规则处理。没有专门安排时，再继续下面的步骤。"
+RECIPE_RETRY = "先重查 software recipes 并核对服务器规则。确认所需版本、频道和全部依赖后再写项目锁。"
+
+
+def project_tool_steps(add_steps):
+    return [
+        SOFTWARE_RULES_STEP,
+        "对已存在的 Spark 项目目录运行 env init --dir <项目目录>，预览配方。",
+        "缺 pixi.toml 时，确认后运行 env init --dir <项目目录> --yes，写出配方并生成初始锁。",
+        *add_steps,
+        SMOKE_TEST_STEP,
+        "运行 env build --dir <项目目录> 看构建计划，确认后加 --yes --wait 构建。",
+        "环境就绪后，用 gen-sbatch --name <作业名> --mem-gb <GB> --workdir <Spark 项目绝对路径> "
+        "--env <项目目录> --command '<命令>' 生成脚本。",
+    ]
+
+
+def recipe_lock_steps(recipe):
+    steps = []
+    channels = " ".join(shlex.quote(ch) for ch in recipe["channels"])
+    first, *remaining = recipe["channels"] or [None]
+    if first and first.startswith("file://"):
+        steps.append("在 Spark 项目目录让本地频道排在配方其余频道之前。若尚未添加，运行 "
+                     f"`/usr/local/bin/pixi workspace channel add --no-install --prepend {shlex.quote(first)}`。"
+                     f"其余频道按配方顺序保留或补齐：{' '.join(remaining)}。"
+                     "本地频道已存在时，在 pixi.toml 调整频道顺序后再解析依赖。")
+    elif channels:
+        steps.append("在 Spark 项目目录核对配方所列频道，先补齐缺少的频道。按配方顺序选入缺少的频道："
+                     f"`/usr/local/bin/pixi workspace channel add --no-install {channels}`。"
+                     "若已有频道的优先级与配方不同，先按配方顺序调整 pixi.toml 的频道列表，再解析依赖。")
+    specs = []
+    for name, dep in recipe["dependencies"].items():
+        version, channel = (dep["version"], dep.get("channel")) if isinstance(dep, dict) else (dep, None)
+        separator = "" if version.startswith(("=", "<", ">", "!", "~")) else "="
+        spec = (channel + "::" if channel else "") + name + separator + version
+        quoted = shlex.quote(spec)
+        specs.append("'" + spec + "'" if channel and quoted == spec else quoted)
+    steps.append("在 Spark 项目目录运行 `/usr/local/bin/pixi add --no-install " + " ".join(specs) + "`，写入全部约束并更新锁。")
+    if recipe["db"]:
+        steps.append(f"用 database find {shlex.quote(recipe['db'])} 核对库版本，在 databases.lock.json 里锁定所选版本。")
+    return steps
+
+
+def cmd_software_find(cfg, name):
+    import software_scan
+
     q = name.strip().lower()
     if not q:
         return {"error": "名字不能为空"}
+    if software_scan.SERVER_TOOLS in q:
+        return {"error": "请输入要锁进项目环境的课题工具名。"}
+    public_r = {"r": "R", "rscript": "Rscript", "/opt/bio/bin/r": "R", "/opt/bio/bin/rscript": "Rscript"}
+    if q in public_r:
+        return {"query": name, "tools": [{"package": "r", "env": "r", "commands": ["R", "Rscript"], "n_commands": 2}],
+                "usage": f"使用公共 R，直接运行 /opt/bio/bin/{public_r[q]}。"}
     try:
-        d = _http_json(panel_url(cfg, "/api/software"))
-    except Exception as e:
-        return {"error": f"面板连不上（{panel_url(cfg)}）：{e}", "hint": "确认这台电脑连着 Tailscale"}
-    inv = d.get("inventory") or {}
+        d, inv = software_inventory(cfg)
+        catalog = software_scan.recipe_catalog(inv.get("recipes"))
+    except (SoftwarePanelError, software_scan.CatalogError) as e:
+        return {"query": name, "error": str(e), "next": [RECIPE_RETRY]}
+    issues = {"recipe_errors": catalog["recipe_errors"]} if "recipe_errors" in catalog else {}
+    matches = []
+    for recipe in catalog["recipes"]:
+        r = _rank(q, [recipe["tool"], recipe["env"]], recipe["commands"] + recipe["compat"])
+        if r <= 1:
+            matches.append((r, recipe["tool"], recipe))
+    page = panel_url(cfg, "/software")
+    if matches:
+        ranked = [recipe for _, _, recipe in sorted(matches, key=lambda m: m[:2])]
+        return {"query": name, "me": d.get("me"), "page": page, "recipes": ranked,
+                "environment_tip": "合并工具前核对各配方的 dependencies、channels 和 notes。版本或频道优先级冲突时，按 references/project-envs.md 拆具名环境。",
+                "next": [dict(tool=recipe["tool"], steps=project_tool_steps(recipe_lock_steps(recipe)))
+                         for recipe in ranked], **issues}
+    if any(q == issue["tool"].lower() for issue in issues.get("recipe_errors", ())):
+        return {"query": name, "error": "所查工具的推荐配方有误。", "next": [RECIPE_RETRY], **issues}
+
     tools = []
     for t in inv.get("tools", []):
+        if software_scan.SERVER_TOOLS in json.dumps(t, ensure_ascii=False):
+            continue
         r = _rank(q, [t.get("package"), t.get("env")], t.get("exposed") or [])
         if r < 9:
             cmds = sorted(t.get("exposed") or [], key=lambda c: _rank(q, [], [c]))
@@ -1018,59 +1135,48 @@ def cmd_software_find(cfg, name, check_arch=False):
                 "commands": cmds[:10], "n_commands": len(t.get("exposed") or [])}))
     out = {"query": name, "me": d.get("me"),
            "tools": [x[2] for x in sorted(tools, key=lambda x: (x[0], x[1]))][:10],
-           "page": panel_url(cfg, "/software")}
+           "page": page, **issues}
     if out["tools"]:
-        out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名。"
-                        "cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。")
+        out["usage"] = "工具清单可用于核对名称。按构建查询结果把课题工具锁进项目环境。"
     n_db = sum(1 for x in inv.get("dbs", []) if _db_rank(q, x)[0] < 99)
     if n_db:
         out["dbs_hint"] = "公共区还有和「%s」相关的数据库（%d 个版本）：查库用 database find %s" % (name.strip(), n_db, name.strip())
-    if check_arch or not out["tools"]:
-        arch = out["arch"] = _conda_arch(name.strip())
-        pkg = shlex.quote(q)
-        failed = [ch for ch in CONDA_CHANNELS if "exists" not in arch.get(ch, {})]
-        add_step = "在 Spark 项目目录用 /usr/local/bin/pixi add --no-install <包名> 更新配方和锁。"
-        if any(r.get("linux-aarch64") for r in arch.values()):
-            out["availability"] = "Conda 有 linux-aarch64 构建。"
-            add_step = f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁。"
-        elif any(r.get("noarch") for r in arch.values()):
-            out["availability"] = ("Conda 找到 noarch 构建。包本身适用于 ARM64，"
-                                   "依赖可能缺少 ARM64 构建，以 /usr/local/bin/pixi lock 能否解析成功为准。")
-            add_step = (f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁，以 ARM64 锁能否解析成功为准。"
-                        "若因缺少 ARM64 构建而解析失败，把缺少的依赖告诉用户。")
-        elif failed:
-            out["availability"] = f"Conda 渠道查询失败（{'、'.join(failed)}），可用构建未知。"
-            out["next"] = [f"software find {pkg} --arch",
-                           "重查仍失败时，到失败渠道的 Anaconda 项目页核对包名和构建。"
-                           "仍无法确认时，告诉用户哪些结果未知，等确认后再选依赖。"]
+    exact_packages = {entry["package"] for rank, _, entry in tools if rank <= 1 and entry["package"]}
+    package = next(iter(exact_packages)) if len(exact_packages) == 1 else name.strip()
+    arch = out["arch"] = _conda_arch(package)
+    pkg = shlex.quote(package.lower())
+    failed = [ch for ch in CONDA_CHANNELS if "exists" not in arch.get(ch, {})]
+    add_step = "在 Spark 项目目录用 /usr/local/bin/pixi add --no-install <包名> 更新配方和锁。"
+    if any(r.get("linux-aarch64") for r in arch.values()):
+        out["availability"] = "Conda 有 linux-aarch64 构建。"
+        add_step = f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁。"
+    elif any(r.get("noarch") for r in arch.values()):
+        out["availability"] = ("Conda 找到 noarch 构建。包本身适用于 ARM64，"
+                               "依赖可能缺少 ARM64 构建，以 /usr/local/bin/pixi lock 能否解析成功为准。")
+        add_step = (f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁，以 ARM64 锁能否解析成功为准。"
+                    "若因缺少 ARM64 构建而解析失败，把缺少的依赖告诉用户。")
+    elif failed:
+        out["availability"] = f"Conda 渠道查询失败（{'、'.join(failed)}），可用构建未知。"
+        out["next"] = [f"software find {pkg} --arch",
+                       "重查仍失败时，到失败渠道的 Anaconda 项目页核对包名和构建。"
+                       "仍无法确认时，告诉用户哪些结果未知，等确认后再选依赖。"]
+    else:
+        pypi = out["pypi"] = _pypi_arch(package)
+        if pypi.get("wheel"):
+            out["availability"] = ("PyPI 有同名项目提供 Linux ARM64 或纯 Python wheel。"
+                                   "先核对简介和主页或项目链接，确认是用户要的工具，再核对 wheel 支持的 Python 版本。")
+            dep = shlex.quote(package.lower() + "==" + pypi["version"])
+            add_step = ("先核对 PyPI 简介和主页或项目链接，确认是用户要的工具且 wheel 支持项目的 Python 版本，"
+                        f"再在 Spark 项目目录用 /usr/local/bin/pixi add --no-install --pypi {dep} 更新配方和锁。")
+        elif pypi.get("error"):
+            out["availability"] = "PyPI 查询失败，暂时无法确认是否有可用 wheel。"
         else:
-            pypi = out["pypi"] = _pypi_arch(name.strip())
-            if pypi.get("wheel"):
-                out["availability"] = ("PyPI 有同名项目提供 Linux ARM64 或纯 Python wheel。"
-                                       "先核对简介和主页或项目链接，确认是用户要的工具，再核对 wheel 支持的 Python 版本。")
-                dep = shlex.quote(q + "==" + pypi["version"])
-                add_step = ("先核对 PyPI 简介和主页或项目链接，确认是用户要的工具且 wheel 支持项目的 Python 版本，"
-                            f"再在 Spark 项目目录用 /usr/local/bin/pixi add --no-install --pypi {dep} 更新配方和锁。")
-            elif pypi.get("error"):
-                out["availability"] = "PyPI 查询失败，暂时无法确认是否有可用 wheel。"
-            else:
-                out["availability"] = "Conda 未找到 ARM64 或 noarch 构建，PyPI 未找到 Linux ARM64 或纯 Python wheel。"
-        if not out["tools"] and "next" not in out:
-            out["next"] = [
-                "对已存在的 Spark 项目目录运行 env init --dir <项目目录>，预览配方。",
-                "缺 pixi.toml 时，确认后运行 env init --dir <项目目录> --yes，写出配方并生成初始锁。",
-                add_step,
-                SMOKE_TEST_STEP,
-                "运行 env build --dir <项目目录> 看构建计划，确认后加 --yes --wait 构建。",
-                "环境就绪后，用 gen-sbatch --name <作业名> --mem-gb <GB> --workdir <Spark 项目绝对路径> "
-                "--env <项目目录> --command '<命令>' 生成脚本。",
-            ]
-            out["env_note"] = "env-store 只接受可锁定的 Conda 包和 PyPI wheel，拒收 sdist 和 Git 依赖。"
-        if not out["tools"]:
-            out["next"].insert(0, "先运行 rules 查这个工具是否有专门安排。有就按服务器规则处理。"
-                                  "没有专门安排时，再继续下面的步骤。")
-    if inv.get("error") or "inventory" not in d:
-        out["warning"] = "公共工具清单暂不可用，请稍后重查。"
+            out["availability"] = "Conda 未找到 ARM64 或 noarch 构建，PyPI 未找到 Linux ARM64 或纯 Python wheel。"
+    if "next" not in out:
+        out["next"] = project_tool_steps([add_step])
+        out["env_note"] = "env-store 只接受可锁定的 Conda 包和 PyPI wheel，拒收 sdist 和 Git 依赖。"
+    else:
+        out["next"].insert(0, SOFTWARE_RULES_STEP)
     return out
 
 
@@ -1276,7 +1382,7 @@ RECIPES = ("generic", "gtdbtk", "bakta", "checkv", "genomad")
 LOCATION_CN = {"local": "本地", "nas": "NAS", "mixed": "两边都有"}
 VERIFICATION_CN = {"official": "已和官方校验值核对", "self": "上游没有校验值，只核对了下载完整",
                    "local-copy": "本地副本，未与官方核对"}
-COMPAT_CN = {"pass": "公共工具读得了", "fail": "公共工具读不了", "untested": "没测出来（判断不了）"}
+COMPAT_CN = {"pass": "服务端兼容检查通过", "fail": "服务端兼容检查失败", "untested": "未取得检查结果"}
 INSTALL_STATUS_CN = {"running": "安装中", "success": "装好了", "failed": "失败", "exists": "公共区已有，没有装",
                      "pending": "排队中", "submitted": "已提交"}
 _DB_PROJECT = None
@@ -2646,16 +2752,28 @@ def workdir_warning(workdir):
 LOW_PRIORITY_NICE = 100000
 
 
+def env_activation_lines(variable):
+    return [f'source "${variable}"',
+            "# 课题工具由锁定的项目环境提供。",
+            '_env_path=()', 'IFS=":" read -r -a _env_parts <<< "$PATH"',
+            'for _env_part in "${_env_parts[@]}"; do',
+            '  case "$_env_part" in /opt/bio/bin|/opt/bio/compat|/opt/bio/pixi/envs/*|/opt/spark-sys|/opt/spark-sys/*) ;; *) _env_path+=("$_env_part");; esac',
+            'done', 'export PATH="$(IFS=":"; echo "${_env_path[*]}")"',
+            'unset _env_path _env_parts _env_part']
+
+
 def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None,
-                   low_priority=False, stage=None, env=None, environment="default", keep_toolbox=False):
+                   low_priority=False, stage=None, env=None, environment=None, env_steps=None):
+    if env_steps and (not env or environment is not None or command is not None):
+        die("--env-step 需要 --env <项目>。每一步已指定环境和命令，请使用这一组参数。")
+    if env_steps and any(not step_command.strip() for _, step_command in env_steps):
+        die("每个 --env-step 都需要非空命令。")
     # 纯 CPU 作业不写 --mem 会被 job_submit.lua 在提交阶段直接拒绝，
     # 生成这样的脚本只会让用户白跑一趟拿个报错。宁可在这里就拦住。
     if not mem_gb and not (gres and "gpu" in str(gres).lower()):
         die("CPU 作业必须指定 --mem-gb：服务器的 job_submit.lua 会拒绝没写 --mem 的 CPU 作业。"
             "先用 recommend 拿一个推荐值，或让用户给个估计。")
-    # 登录 shell（-l）：submit 经 ssh 提交，作业继承的是非登录环境 —— 没有 /opt/bio/bin，也没有
-    # $GTDBTK_DATA_PATH 这类数据库变量（2026-10-12 实测）。/ai.md 的写法（裸命令 + 变量）靠它才成立；
-    # 调试会话用 bash -l 也是这个原因。
+    # 登录 shell 加载站点的 Slurm 与数据库辅助命令。课题工具由项目环境提供。
     L = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --partition={cfg.get('partition', 'main')}"]
@@ -2704,24 +2822,28 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
               "D%d=$(db-cache use %s)" % (i, shlex.quote(path))]
     if env:
         project = env_project(cfg, env)
-        current = env_current_fp(cfg, project, environment)
-        marker = {"fp": current["fp"], "project": project, "env": environment}
-        L += ["# ENV-STORE " + json.dumps(marker, ensure_ascii=True),
-              "ENV1=$(env-store use %s) || exit 3" % current["fp"], 'source "$ENV1"']
-        if not keep_toolbox:
-            L += ["# 只使用锁定环境的工具；去掉工具箱的两个 PATH 项。",
-                  '_env_path=()', 'IFS=":" read -r -a _env_parts <<< "$PATH"',
-                  'for _env_part in "${_env_parts[@]}"; do',
-                  '  case "$_env_part" in /opt/bio/bin|/opt/bio/compat) ;; *) _env_path+=("$_env_part");; esac',
-                  'done', 'export PATH="$(IFS=":"; echo "${_env_path[*]}")"',
-                  'unset _env_path _env_parts _env_part']
+        names = dict.fromkeys(e for e, _ in env_steps) if env_steps else ["default" if environment is None else environment]
+        variables = {}
+        for i, selected in enumerate(names, 1):
+            current = env_current_fp(cfg, project, selected)
+            marker = {"fp": current["fp"], "project": project, "env": selected}
+            variable = variables[selected] = f"ENV{i}"
+            L += ["# ENV-STORE " + json.dumps(marker, ensure_ascii=True),
+                  f"{variable}=$(env-store use {current['fp']}) || exit 3"]
+        if not env_steps:
+            L += env_activation_lines("ENV1")
     if is_gpu:
         # 没写 --mem 的按 lua 兜底的 96000M 算：第一次跑、没估计正是最需要自限的时候
         floor_gib = round(cfg.get("gpu_floor_gb", 96) * 1000 / 1024, 2)
         L += [""] + vram_cap_block(
             mem_gb or floor_gib,
             None if mem_gb else "这趟没写 --mem，lua 兜底预留的 96000M（≈%sG）" % floor_gib)
-    L += ["", command or "# TODO: your command here", ""]
+    if env_steps:
+        for selected, step_command in env_steps:
+            L += ["", "(", *env_activation_lines(variables[selected]), step_command, ")"]
+        L.append("")
+    else:
+        L += ["", command or "# TODO: your command here", ""]
     script = "\n".join(L)
     result = {"sbatch_script": script}
     if out:
@@ -2732,10 +2854,11 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
         except OSError as e:
             die(f"写不了 --out {out}：{e}")
         result["written_to"] = out
-    warns = [w for w in (gpu_cap_warning(gres, command),
+    commands = "\n".join(step for _, step in env_steps) if env_steps else command
+    warns = [w for w in (gpu_cap_warning(gres, commands),
                          cpus_warning(gres, cpus),
                          workdir_warning(workdir),
-                         boltz_num_workers_warning(command)) if w]
+                         boltz_num_workers_warning(commands)) if w]
     if warns:
         result["warnings"] = warns
     if low_priority:
@@ -3379,7 +3502,7 @@ def main():
                   "gen-sbatch --env <项目目录>"] if sys.argv[1] == "software"
                  else ["database find <库名>", "database plan <库名> --url <官方下载地址>",
                        "database install <计划中的参数> --expected-plan <plan_sha256> --yes"])
-        emit({"ok": False, "error": "工具和数据库改为自助安装。先查询公共资源，缺工具就在项目里加依赖，缺数据库就装进 NAS 公共库。",
+        emit({"ok": False, "error": "工具和数据库支持自助安装。查推荐配方，把工具锁进项目；查公共库，把缺少的数据库装进 NAS 公共库。",
               "next": steps})
         sys.exit(2)
 
@@ -3389,12 +3512,14 @@ def main():
     sub.add_parser("status")
     sub.add_parser("rules")
 
-    # 公共工具：查共享工具和项目环境可用的构建
+    # 项目工具：查配方和可用的构建，扫描脚本里的工具箱调用
     sw = sub.add_parser("software")
     swsub = sw.add_subparsers(dest="swcmd", required=True)
     swf = swsub.add_parser("find")
     swf.add_argument("name")
-    swf.add_argument("--arch", action="store_true", help="同时查 Conda 的 ARM64 / noarch 构建，各渠道确认缺构建时查 PyPI wheel")
+    swf.add_argument("--arch", action="store_true", help="无匹配配方时查 ARM64 / noarch 构建与 PyPI wheel（也是默认行为）")
+    swsub.add_parser("recipes", help="导出推荐配方和 Spark 系统命令名单 JSON")
+    swsub.add_parser("scan", help="只读扫描 Spark 脚本里的工具箱调用").add_argument("paths", nargs="+", metavar="路径")
 
     # 公共数据库：查、自己装进 NAS 公共库、项目锁版本、个人副本。会写东西的不带 --yes 只预演
     db = sub.add_parser("database")
@@ -3476,7 +3601,7 @@ def main():
     clrs.add_argument("--yes", action="store_true")
     clj = clsub.add_parser("job", help="搬运 / 搬回作业的进度和结果")
     clj.add_argument("id")
-    clv = clsub.add_parser("verify", help="公共版的这些命令能不能启动（只看不动）")
+    clv = clsub.add_parser("verify", help="转发既有服务器验证请求")
     clv.add_argument("path", nargs="?")
     clv.add_argument("--cmd", dest="cmds", nargs="+", required=True)
     cln = clsub.add_parser("note", help="给搬走的东西写备注（只存在本机）")
@@ -3533,8 +3658,9 @@ def main():
     g.add_argument("--stage", action="append", default=[], help="NAS 库文件/目录；可重复，提交时先取库")
 
     g.add_argument("--env", help="服务器项目目录；使用其 pixi.lock 对应的只读环境")
-    g.add_argument("-e", dest="environment", default="default")
-    g.add_argument("--keep-toolbox", action="store_true", help="激活项目环境后保留工具箱 PATH")
+    g.add_argument("-e", dest="environment", help="--command 使用的环境，默认 default")
+    g.add_argument("--env-step", nargs=2, action="append", metavar=("环境", "命令"),
+                   help="与 --env 一起使用，可重复。按给出的顺序在独立环境中执行每一步。")
 
     s = sub.add_parser("submit")
     s.add_argument("--script", required=True)
@@ -3641,8 +3767,19 @@ def main():
     if args.cmd == "rules":
         return cmd_rules(cfg)
     if args.cmd == "software":
-        emit(cmd_software_find(cfg, args.name, args.arch))
-        return
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)
+        import software_scan
+
+        if args.swcmd == "find":
+            emit(cmd_software_find(cfg, args.name))
+            return
+        try:
+            rc, payload = cmd_software_on_spark(cfg, getattr(args, "paths", ()))
+        except (SoftwarePanelError, software_scan.CatalogError) as e:
+            die(str(e))
+        emit(payload)
+        sys.exit(rc)
     if args.cmd == "database":
         rc, payload = cmd_database(cfg, args)
         emit(payload)
@@ -3706,7 +3843,7 @@ def main():
     elif args.cmd == "gen-sbatch":
         emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
                             args.out, args.workdir, low_priority=args.low_priority, stage=args.stage,
-                            env=args.env, environment=args.environment, keep_toolbox=args.keep_toolbox))
+                            env=args.env, environment=args.environment, env_steps=args.env_step))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script, check_only=args.check_only))
     elif args.cmd == "wait":

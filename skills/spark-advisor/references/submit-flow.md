@@ -80,8 +80,7 @@ gen-sbatch --name <n> --gres <g> --cpus <c> --mem-gb <m> --command "<cmd>" \
 - **GPU 作业必查显存自限**：`--mem` 管不住显存（`cudaMalloc` 绕过 cgroup），只有程序自己能限。支持的工具（vLLM `--gpu-memory-utilization`）生成时直接带上；不支持的（Boltz）**明说拦不住**，靠控制输入规模 + 让程序结尾自己打印峰值。写法与机制 → `references/recommend-rules.md`「GPU 显存自限」。
 - 引擎会回 `warnings`（漏 `--cpus` / 无显存自限 / Boltz `num_workers` 死锁）——**别忽略**。
 
-**6 · 提交前确认门（强制）**：**IMPORTANT — YOU MUST** 先把资源给用户看、问一句"要现在提交吗？"、明确同意才提交。**绝不自动提交 GPU 作业。**
-→ 用户点头 → `submit --script /tmp/job.sh` → 返回 JobID。
+**6 · 提交前核对**。用户须已明确同意这次提交，授权可来自单步或整份计划。核对脚本、资源和落点符合该计划后，运行 `submit --script /tmp/job.sh` 并记录返回的 JobID。[同意规则](../SKILL.md#同意规则)
 
 **6b · 提交后立刻起监控（GPU 作业必做）**
 
