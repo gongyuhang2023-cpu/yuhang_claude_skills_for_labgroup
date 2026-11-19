@@ -14,7 +14,11 @@ python scripts/advise.py software scan '~/Workspace/Projects' '~/Workspace/tmp'
 
 输出 JSON 的 `hits` 中，每处有 `file`、`line`、`command`、`tool`、`recipe`。`recipe_source` 标出所用目录的来源。`files_scanned` 统计识别到的脚本，`skipped` 列出需要人工看的跳过项（R 脚本、软链文件）和原因；其余不是脚本的文件只在 `skipped_other` 里给出数量和少量示例路径。对于 `.R` 要人工查看 `system()` 和 `system2()`。从目录扫时跳过的缓存目录无需逐个核对。扫描覆盖 shell 脚本、sbatch、Snakefile、Nextflow 和 Python 中可静态识别的外部调用。扫描自动排除被 Spark 系统命令盖住的裸命令。对剩余裸命令，核查原作业的 PATH 和激活步骤，区分已锁入项目的命令和工具箱调用。显式工具箱路径照常计入。`tool` 和 `recipe` 为 `null` 的条目逐项确认。先处理 `errors` 中的路径或解析问题，再人工查看变量拼出的命令、包装脚本和 here-doc 内的动态执行。
 
-单列 `symlinks` 检查家目录中的整环境软链、混合 conda/mamba 环境 `bin/` 中的命令软链，以及 `~/.local/bin`、`~/bin` 的命令软链。混合环境可能用 `SHARED-TOOLS.txt` 记录来源。`hits` 的 `environment_activation` 项会列出相关环境与软链。核查 `conda activate`、`mamba activate`、`micromamba activate`、`source activate` 和 `conda run -n/-p` 的实际选择，遇到同名环境或相对路径时结合工作目录确认。扫描只读取文件和链接文本。用 `symlink_errors` 核对无法读取的目录。公共 R 不计入。
+扫描跳过有 `conda-meta/` 或 `pyvenv.cfg` 的嵌入环境及常见第三方代码目录。`skipped_envs` 给出环境数量和最多 20 个示例路径。对这些环境仍检查 `bin/` 指向工具箱的软链，命中时列入 `symlinks`，来源为 `embedded-env`。
+
+在 Spark 上，`symlinks` 还包括家目录的整环境软链（包括 `~/.pixi/envs`）、混合 conda/mamba 环境 `bin/` 和 `~/.local/bin`、`~/bin` 的工具箱软链。也会检查 `/opt/bio/var/replaced/manifest.tsv` 里本人记录的实际路径，命中时标为 `cleanup-manifest`。同一软链路径只列一次，重合时保留清理清单来源。混合环境可能用 `SHARED-TOOLS.txt` 记录来源。用 `symlink_errors` 核对读不到的目录或清单。扫描只读取文件和链接文本，公共 R 不计入。按第 4 节处理。
+
+`hits` 的 `environment_activation` 项会列出相关环境与软链。核查 `conda activate`、`mamba activate`、`micromamba activate`、`source activate` 和 `conda run -n/-p` 的实际选择，遇到同名环境或相对路径时结合工作目录确认。
 
 结合本人最近的作业核查。在 Spark 上用 `sacct -u "$USER" -S <起始日期> --format=JobID,JobName,State,WorkDir%200` 找到工作目录，再查原脚本和 `logs/*.run.json`（若有）。用 `sacct -u "$USER" -j <作业号> --batch-script` 读取已保存的提交脚本。早期作业可能返回 `NONE`，改查对应目录、脚本和日志。运行记录只识别提交脚本里直接可见的命令。若脚本又调用其他脚本，继续查看下游脚本和相关日志，即使 `tools` 为空也要查。只扫描有权限的个人文件。
 
@@ -36,7 +40,7 @@ python scripts/advise.py software scan '~/Workspace/Projects' '~/Workspace/tmp'
 
 ## 4. 清理已迁移的家目录软链
 
-1. 按 `symlinks` 列出精确的链接路径和目标，结合 `environment_activation`、脚本和近期作业确认引用。
+1. 按 `symlinks` 列出精确的链接路径和目标，包括跳过的嵌入环境 `bin/` 和清理清单中本人的条目。结合 `environment_activation`、脚本和近期作业确认引用。
 2. 用到这些软链的脚本按第 2 步迁到项目环境，并完成试跑核对。检查排队或运行中的作业，等使用者结束。
 3. 给用户看拟删除的清单，经同意后逐项确认 `test -L <路径>` 及 `readlink -- <路径>` 仍与计划相符。相对目标按链接所在目录解释。用 `rm -- <链接路径>` 只删软链本身，路径末尾不加 `/`。保留软链目标和混合环境中的其他文件。计划有变化时重新确认。
 4. 在报告中列出处理过的软链路径和相关脚本，仍待迁移或保留的链接写明原因。
