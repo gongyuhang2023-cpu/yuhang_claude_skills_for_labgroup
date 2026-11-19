@@ -359,6 +359,8 @@ def scan(paths, catalog, system_names, *, home=None, links=()):
             environments[env].append(link)
 
     hits, errors, seen, skipped = [], [], set(), {}
+    # Plain non-script files are only counted: a project tree can hold millions of them.
+    other, other_sample = set(), []
     parsers = {'shell': shell_locations, 'python': python_locations,
                'snake': snake_locations, 'nextflow': nextflow_locations}
 
@@ -368,13 +370,16 @@ def scan(paths, catalog, system_names, *, home=None, links=()):
                 skipped.setdefault(os.path.abspath(path), {'file': str(path), 'reason': '软链文件，由调用方核对目标。'})
                 return
             identity = path.resolve()
-            if identity in seen or identity in skipped:
+            if identity in seen or identity in skipped or str(identity) in other:
                 return
             kind = script_kind(path)
             if kind is None:
-                reason = ('R 脚本请人工检查 system() 和 system2()。' if path.suffix.lower() == '.r'
-                          else '脚本格式不在扫描范围内。')
-                skipped[identity] = {'file': str(path), 'reason': reason}
+                if path.suffix.lower() == '.r':
+                    skipped[identity] = {'file': str(path), 'reason': 'R 脚本请人工检查 system() 和 system2()。'}
+                else:
+                    other.add(str(identity))
+                    if len(other_sample) < 20:
+                        other_sample.append(str(path))
                 return
             seen.add(identity)
             source = path.read_text(encoding='utf-8-sig')
@@ -420,7 +425,9 @@ def scan(paths, catalog, system_names, *, home=None, links=()):
         else:
             errors.append({'file': str(path), 'error': '请检查路径是否存在且可读'})
     output = {'recipe_source': catalog['source'], 'files_scanned': len(seen), 'hits': hits,
-              'skipped': list(skipped.values()), 'errors': errors}
+              'skipped': list(skipped.values()),
+              'skipped_other': {'reason': '脚本格式不在扫描范围内。', 'count': len(other), 'sample': other_sample},
+              'errors': errors}
     if 'recipe_errors' in catalog:
         output['recipe_errors'] = catalog['recipe_errors']
     return (1 if errors else 0), output

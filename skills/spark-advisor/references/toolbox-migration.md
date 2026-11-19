@@ -12,7 +12,7 @@
 python scripts/advise.py software scan '~/Workspace/Projects' '~/Workspace/tmp'
 ```
 
-输出 JSON 的 `hits` 中，每处有 `file`、`line`、`command`、`tool`、`recipe`。`recipe_source` 标出所用目录的来源。`files_scanned` 统计识别到的脚本，`skipped` 列出遍历时跳过的文件和原因。对于 `.R` 要人工查看 `system()` 和 `system2()`。从目录扫时跳过的缓存目录无需逐个核对。扫描覆盖 shell 脚本、sbatch、Snakefile、Nextflow 和 Python 中可静态识别的外部调用。扫描自动排除被 Spark 系统命令盖住的裸命令。对剩余裸命令，核查原作业的 PATH 和激活步骤，区分已锁入项目的命令和工具箱调用。显式工具箱路径照常计入。`tool` 和 `recipe` 为 `null` 的条目逐项确认。先处理 `errors` 中的路径或解析问题，再人工查看变量拼出的命令、包装脚本和 here-doc 内的动态执行。
+输出 JSON 的 `hits` 中，每处有 `file`、`line`、`command`、`tool`、`recipe`。`recipe_source` 标出所用目录的来源。`files_scanned` 统计识别到的脚本，`skipped` 列出需要人工看的跳过项（R 脚本、软链文件）和原因；其余不是脚本的文件只在 `skipped_other` 里给出数量和少量示例路径。对于 `.R` 要人工查看 `system()` 和 `system2()`。从目录扫时跳过的缓存目录无需逐个核对。扫描覆盖 shell 脚本、sbatch、Snakefile、Nextflow 和 Python 中可静态识别的外部调用。扫描自动排除被 Spark 系统命令盖住的裸命令。对剩余裸命令，核查原作业的 PATH 和激活步骤，区分已锁入项目的命令和工具箱调用。显式工具箱路径照常计入。`tool` 和 `recipe` 为 `null` 的条目逐项确认。先处理 `errors` 中的路径或解析问题，再人工查看变量拼出的命令、包装脚本和 here-doc 内的动态执行。
 
 单列 `symlinks` 检查家目录中的整环境软链、混合 conda/mamba 环境 `bin/` 中的命令软链，以及 `~/.local/bin`、`~/bin` 的命令软链。混合环境可能用 `SHARED-TOOLS.txt` 记录来源。`hits` 的 `environment_activation` 项会列出相关环境与软链。核查 `conda activate`、`mamba activate`、`micromamba activate`、`source activate` 和 `conda run -n/-p` 的实际选择，遇到同名环境或相对路径时结合工作目录确认。扫描只读取文件和链接文本。用 `symlink_errors` 核对无法读取的目录。公共 R 不计入。
 
