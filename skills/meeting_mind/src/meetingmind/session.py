@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import teams_audio
 from .audio import AudioRecorder, SystemAudioRecorder
 from .mic import CHANNELS as _MIC_CHANNELS
 from .mic import MicRecorder
@@ -279,8 +280,14 @@ class MeetingSession:
         if self._started:
             raise RuntimeError("MeetingSession already started")
 
+        teams_device_id = None
+        if (sys.platform == "win32" and self._system_audio and not self._mic_only
+                and self._pid_override is None
+                and (self._process_keyword or "").strip().lower() in teams_audio.TEAMS_ALIASES):
+            teams_device_id = teams_audio.capture_device_id()
+
         # 1. Resolve targets first — fail fast before touching the filesystem.
-        #    System-audio mode captures the whole default output endpoint, so it
+        #    System-audio mode captures a whole render endpoint, so it
         #    needs no process/PID — and must NOT abort when no active session is
         #    found (independence from process attribution is the whole point of
         #    the fallback). Skip PID resolution entirely in that mode.
@@ -291,6 +298,8 @@ class MeetingSession:
             None if (self._system_audio or self._mic_only) else self._resolve_pid()
         )
         self._resolved_window = self._resolve_window_keyword()
+        if teams_device_id is not None and self._window_override is None:
+            self._resolved_window = MEETING_PRESETS["teams"]
 
         # 2. Build directory layout.
         self._meeting_dir = _build_meeting_dir(self._output_root, self._topic)
@@ -332,7 +341,7 @@ class MeetingSession:
             # 只是源头从 loopback 换成了麦克风。
             recorder = MicRecorder(output_path=audio_output)
         elif self._system_audio:
-            recorder = SystemAudioRecorder(output_path=audio_output)
+            recorder = SystemAudioRecorder(output_path=audio_output, teams_device_id=teams_device_id)
         else:
             assert self._resolved_pid is not None  # guaranteed by _resolve_pid()
             recorder = AudioRecorder(pid=self._resolved_pid, output_path=audio_output)
@@ -346,6 +355,9 @@ class MeetingSession:
                 self._capture = None
             raise
         self._recorder = recorder
+        if teams_device_id is not None:
+            self._audio_device_label = getattr(recorder, "device_label", None)
+            _warn(f"[session] Teams loopback capture started on {self._audio_device_label}")
 
         # 5. Optional second audio stream: the local microphone (the user's own
         #    voice), for two-stream 1:1 capture (`--mic`). A mic failure is
@@ -408,6 +420,12 @@ class MeetingSession:
             ):
                 audio_checked = True
                 if not self._recorder.has_signal:
+                    if self._audio_device_label is not None:
+                        _warn(
+                            f"[session] No Teams audio in the first 10s on {self._audio_device_label}. "
+                            "When someone is speaking, check the Teams speaker setting."
+                        )
+                        continue
                     _warn(
                         "\n⚠️  [session] 录制已 10 秒但未检测到任何音频信号！"
                         "音频捕获可能存在故障，录制结束后转录将为空。"

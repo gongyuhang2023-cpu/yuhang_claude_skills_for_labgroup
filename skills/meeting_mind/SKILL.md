@@ -4,7 +4,7 @@ description: |
   自动录制线上会议（Teams/Zoom/腾讯会议/Edge 直播等）的音频和 PPT 截图，
   会后转录文字（本机，或交给实验室服务器 spark 排队转录）并 AI 逐页解读 + 整体总结。
   当用户说"录会议"、"录个会议"、"开始录制"、"start recording a meeting"等触发。
-  系统静音/调音量不影响录制。
+  Windows Teams 可选配虚拟扬声器录音。选配后，实体扬声器的静音和音量只影响监听。
 
   录制 → 查云盘（有人传过就直接用他的转录/结果）→ Qwen3-ASR 转录 → 5 张/批并行
   sub-agent 视觉解读 → interpretation.md + summary.md → 问要不要上传实验室云盘（组会再问要不要放到实验室面板）。
@@ -52,9 +52,8 @@ description: |
    ```
    Bash: <PY> -m meetingmind list-processes
    ```
-   读输出，记下哪些进程有 `ON` 标记（活跃音频会话）。如果**没有任何
-   活跃会话**，告诉用户："当前没检测到活跃会议软件。请先打开 Teams/
-   Zoom/腾讯会议/Edge 等并进入会议，然后告诉我继续。" 然后等用户回应。
+   读输出，记下哪些进程有 `ON` 标记（活跃音频会话）。Teams 系统音频录制只需确认
+   Teams 已打开并加入会议，暂时无人发言时可以开录。进程录制若没有活跃会话，先请用户进入会议。
 
 ---
 
@@ -122,19 +121,17 @@ Bash:
              --interval <interval> \
              --threshold <threshold> \
              --output-root ~/Report/Group_Meeting \
-             <若 software=teams 则加 --system-audio> \
+             <若为 Teams 则加 --system-audio> \
              --quiet
   description: "Recording <topic> via meetingmind in background"
   run_in_background: true
 ```
 
-⚠️ **Teams 必须加 `--system-audio`**。新版 Teams（WebView2/Chromium 内核）的会议音频由
-Chromium audio-service 子进程渲染，逃出目标进程树，进程级 loopback **全程录成静音**（RMS=0，
-历史反复复现）。`--system-audio` 改录**默认输出端点的系统混音**（扬声器在放什么就录什么），
-绕开进程归属——声音在响就一定录得到。代价：会混入系统其它声音（通知等），录会前建议静音通知。
-- `<software>` = **teams** → **加** `--system-audio`
-- Zoom / 腾讯会议 / Edge 等 → **不加**（进程级 loopback 正常，音质更干净）；若录完出现音频
-  静音警告（`recording.wav` 静音），重录时再加 `--system-audio` 兜底。
+**Windows Teams 使用 `--system-audio`**（`teams`、`ms-teams`、`ms-teams.exe` 均可），避开新版 Teams 的进程归属问题。
+已按 [Teams 虚拟扬声器配置](README.md#teams-虚拟扬声器配置) 配置的，开录前请用户手动确认
+Teams 扬声器选配置的虚拟设备，Windows 默认输出选实际要听的音箱或耳机。切错 Teams 输出会漏录。
+没有配置时继续录 Windows 默认输出的混音，可能混入通知声，静音或音量为零时可能录不到声音。
+Zoom / 腾讯会议 / Edge 默认使用进程级录音。遇到静音时检查信号，再决定是否改用系统混音。
 
 ⚠️ **必须加 `--output-root ~/Report/Group_Meeting`**(大组会归档处)。Claude Code 的工作目录可能是
 `system32` 等无写入权限的位置，默认 `./meetings` 会 Access Denied。
@@ -169,9 +166,10 @@ matches`），把整个 output 内容贴给用户，告诉他们出了什么错�
 > - 主题：`<topic>` | 软件：`<software>`
 > 
 > 你现在可以正常开会。会议结束后跟我说"结束了"或"停止录制"，
-> 我会停止录制并自动转录。
-> 
-> ⚠️ 系统静音/调音量不影响录制 — 安心听会。"
+> 我会停止录制并自动转录。"
+
+确认开录日志或 `metadata.json` 的 `audio_device` 指向配置的虚拟播放端点后，才补充：
+“实体扬声器的静音和音量只影响监听。转送会随录制停止，若还要继续听会，请在 Teams 里手动切回扬声器。”
 
 然后**正常进入对话状态**，等用户开口。
 

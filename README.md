@@ -36,6 +36,10 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 **触发词**：`录会议`、`录个会议`、`开始录制`、`start recording a meeting`
 
+**2026-11-19 更新：Windows Teams 可选配虚拟扬声器录音**
+- 开录前将 Teams 扬声器设为自己的虚拟播放设备，Windows 默认输出继续选实体音箱或耳机。录制期间的监听可独立静音、调音量。
+- 未配置时照常录默认输出混音，静音时可能录不到声音。具体配置步骤和录完后的切回方式见 [Teams 虚拟扬声器配置](skills/meeting_mind/README.md#teams-虚拟扬声器配置)。
+
 **2026-11 更新：会后总结更适合阅读与学习**
 - `summary.md` 按报告讲清研究问题、方法、主要结果和关键问答，解释必要术语，选少量关键图；篇幅随内容安排，不再限于500字。
 - `interpretation.md` 保留逐页证据与细节，供需要时回查。已有会议也可只重写总结，无需重录或重新转录。
@@ -57,7 +61,7 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 | 能力 | 上一版 | 现在 |
 |------|--------|------|
-| 录音路径 | 只有 ProcTap 进程级抓取 | 三选一：进程级 / **`--system-audio` 系统混音**（修 Teams 整场录成静音）/ **`--mic-only` 单麦** |
+| 录音路径 | 只有 ProcTap 进程级抓取 | 三选一：进程级 / **`--system-audio` 系统混音**（Teams 推荐）/ **`--mic-only` 单麦** |
 | **面对面会议** | ❌ 只能录线上 | ✅ **`--mic-only` + `--diarize` + `--voiceprint`** —— 一支麦克风录两个人，自动分离说话人并按声纹认名字 |
 | 自己的声音 | 不录 | `--mic` 录成第二路 `audio/mic.wav`（1:1 会议两路分开） |
 | 长会议音频 | 内存缓冲 —— **长会议曾整段丢失** | **边录边落盘**（新 `wavsink` 模块），录多久都不丢 |
@@ -83,7 +87,7 @@ python install.py --profile server   # 交给 spark 转录（推荐）；有 N �
 不给 `--profile` 会先问你；更新 skill 后不带参数重跑会沿用原来的档位。server / both 档要能 `ssh spark` 免密登录（按服务器使用指南配好）。local / both 档首次转录会下 ~3.4 GB 的 Qwen3-ASR 模型到 `~/.cache/huggingface/`。
 
 **依赖**（装进 skill 自带 venv，**不污染你其他项目**）：
-- 录制：`proc-tap`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`、`soundfile`、`soxr`
+- 录制：`proc-tap`、`soundcard`、`windows-capture`、`pycaw`、`psutil`、`pygetwindow`、`pywin32`、`pillow`、`numpy`、`soundfile`、`soxr`
 - 本机转录（local / both 档）：`torch+cu128`、`transformers`、`qwen-asr`、`librosa`、`accelerate`
 
 **系统要求**：录制需要 Windows 10 build 19041+ / Windows 11 + Python 3.10+。转录：server 档不需要显卡；local 档需要 NVIDIA GPU（推荐 6 GB+ 显存；CPU 可跑但慢 5-10×）。
@@ -319,7 +323,8 @@ skills/
 │   ├── vendor/proctap/            ← ★ ProcTap 补丁版（修 WASAPI loopback 静音），install 第 5b 步覆盖上游
 │   └── src/meetingmind/
 │       ├── cli.py                 ← record / transcribe / postprocess 等子命令
-│       ├── audio.py               ← ProcTap 进程级录音
+│       ├── audio.py               ← 进程级录音与系统混音采集
+│       ├── teams_audio.py         ← Teams 虚拟扬声器配置与监听转送
 │       ├── audioio.py             ← ★ 音频 IO 抽象
 │       ├── wavsink.py             ← ★ 边录边落盘（修长会议音频整段丢失）
 │       ├── mic.py                 ← ★ 麦克风采集（--mic / --mic-only）

@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import Final, TypedDict
 
 import psutil
-from pycaw.pycaw import AudioUtilities
 
 # Map a friendly keyword to the executable names the app is known to use.
 # Multi-PID apps (e.g. Teams) list all observed executables.
@@ -53,6 +52,9 @@ def _audio_sessions() -> list:
     pycaw triggers COM initialization which can fail on non-Windows or in
     constrained environments. Callers must tolerate exceptions.
     """
+    # Load only for session enumeration so Teams loopback can initialize soundcard first.
+    from pycaw.pycaw import AudioUtilities
+
     return AudioUtilities.GetAllSessions()
 
 

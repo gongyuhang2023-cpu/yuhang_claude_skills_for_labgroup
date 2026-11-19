@@ -35,6 +35,7 @@ from types import TracebackType
 import numpy as np
 from proctap import ProcessAudioCapture
 
+from . import teams_audio
 from .wavsink import FeedGate, WavSink
 
 SAMPLE_RATE: int = 48000
@@ -318,7 +319,7 @@ class AudioRecorder:
 
 
 class SystemAudioRecorder:
-    """Record the default output endpoint's system loopback to a WAV file.
+    """Record a render endpoint's system loopback to a WAV file.
 
     Where `AudioRecorder` targets a single process via WASAPI *process* loopback,
     this captures the whole default render endpoint's mix — whatever the speakers
@@ -342,11 +343,18 @@ class SystemAudioRecorder:
     recording, and surfaces teardown issues via `stop_errors`.
     """
 
-    def __init__(self, output_path: Path, device_name: str | None = None) -> None:
+    _channels = CHANNELS
+
+    def __init__(
+        self, output_path: Path, device_name: str | None = None, *,
+        teams_device_id: str | None = None,
+    ) -> None:
         self._output_path = Path(output_path)
         self._device_name = device_name  # None → default output endpoint
+        self._teams_device_id = teams_device_id
         self._bytes_captured: int = 0
         self._thread: threading.Thread | None = None
+        self._monitor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
@@ -404,7 +412,7 @@ class SystemAudioRecorder:
 
     @property
     def device_label(self) -> str | None:
-        """Name of the loopback device actually captured (set after start())."""
+        """Name of the captured loopback, with its ID for configured Teams."""
         return self._device_label
 
     @property
@@ -421,6 +429,9 @@ class SystemAudioRecorder:
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("SystemAudioRecorder already started")
+
+        if self._teams_device_id is not None:
+            teams_audio.prepare_wasapi()
 
         # Open the file first: creating it is cheap and predictable, whereas
         # opening a WASAPI endpoint is neither. If the device then fails we
@@ -444,9 +455,10 @@ class SystemAudioRecorder:
             if not self._ready.wait(timeout=10.0):
                 self._stop_event.set()
                 thread.join(timeout=2.0)
+                source = self._teams_device_id or "the default output device"
                 raise RuntimeError(
                     "system audio capture did not start within 10s "
-                    "(no WASAPI loopback data from the default output device)"
+                    f"(WASAPI loopback source: {source})"
                 )
             if self._start_error is not None:
                 thread.join(timeout=2.0)
@@ -457,17 +469,45 @@ class SystemAudioRecorder:
             self._sink = None
             raise
         self._thread = thread
+        if self._teams_device_id is not None:
+            monitor = threading.Thread(
+                target=teams_audio.monitor,
+                name="meetingmind-teams-monitor",
+                daemon=True,
+                args=(self._teams_device_id, self._stop_event, SAMPLE_RATE, self._channels),
+            )
+            try:
+                monitor.start()
+            except RuntimeError as exc:
+                teams_audio.report(f"Listening monitor could not start: {exc}")
+            else:
+                self._monitor_thread = monitor
 
     def _run(self) -> None:
         """Background thread: open the loopback stream, pump until stopped."""
         try:
-            mic = self._resolve_loopback()
-            self._device_label = getattr(mic, "name", None)
-            with mic.recorder(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                blocksize=_SYS_LOOPBACK_BLOCK,
-            ) as rec:
+            with contextlib.ExitStack() as stack:
+                if self._teams_device_id is not None:
+                    stack.enter_context(teams_audio.wasapi_thread())
+                mic = self._resolve_loopback()
+                self._device_label = getattr(mic, "name", None)
+                if self._teams_device_id is not None:
+                    self._device_label = f"{self._device_label} ({mic.id})"
+                    teams_audio.report(
+                        f"Set Teams speaker to {mic.name} and Windows default "
+                        "output to the physical speaker or headset you want to hear."
+                    )
+                    try:
+                        teams_audio.monitor_speaker(self._teams_device_id)
+                    except teams_audio.MonitorFeedbackError:
+                        raise
+                    except Exception as exc:
+                        teams_audio.report(f"Default listening output unavailable: {exc}")
+                rec = stack.enter_context(mic.recorder(
+                    samplerate=SAMPLE_RATE,
+                    channels=self._channels,
+                    blocksize=_SYS_LOOPBACK_BLOCK,
+                ))
                 self._ready.set()  # stream open → start() may return
                 while not self._stop_event.is_set():
                     chunk = rec.record(numframes=_SYS_LOOPBACK_BLOCK)
@@ -492,9 +532,18 @@ class SystemAudioRecorder:
             # after → a mid-recording failure (surfaced via stop_errors).
             if self._ready.is_set():
                 self._run_error = exc
+                if self._teams_device_id is not None:
+                    teams_audio.report(f"Capture stopped on {self._device_label}: {exc}")
             else:
-                self._start_error = exc
+                if self._teams_device_id is not None:
+                    self._start_error = RuntimeError(
+                        f"Cannot open Teams audio endpoint {self._teams_device_id}: {exc}"
+                    )
+                else:
+                    self._start_error = exc
         finally:
+            if self._teams_device_id is not None:
+                self._stop_event.set()
             self._ready.set()
 
     def stop(self) -> Path:
@@ -531,6 +580,12 @@ class SystemAudioRecorder:
             self._stop_errors.extend(_sink_diagnostics(self._sink, self._gate))
             self._warn_if_silent()
 
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=1.0)
+            if self._monitor_thread.is_alive():
+                teams_audio.report("Listening output is still closing after stop.")
+            self._monitor_thread = None
+
         return self._output_path
 
     # ----------------------------------------------------------------- context
@@ -552,6 +607,9 @@ class SystemAudioRecorder:
     def _resolve_loopback(self):  # type: ignore[no-untyped-def]  # soundcard mic
         """Pick the loopback capture device: the named one, else the default
         output endpoint's loopback, else the first available loopback device."""
+        if self._teams_device_id is not None:
+            return teams_audio.loopback(self._teams_device_id)
+
         import soundcard as sc  # noqa: PLC0415 — lazy: only when system audio is on
 
         if self._device_name:
@@ -587,6 +645,12 @@ class SystemAudioRecorder:
         """
         sink = self._sink
         if sink is None or not sink.is_silent or sink.written_frames == 0:
+            return
+        if self._teams_device_id is not None:
+            teams_audio.report(
+                f"Teams recording is silent (RMS={sink.rms:.2e}). "
+                f"Check that Teams played on {self._device_label}."
+            )
             return
         print(
             f"\n⚠️  WARNING: System audio is SILENT (RMS={sink.rms:.2e}). "

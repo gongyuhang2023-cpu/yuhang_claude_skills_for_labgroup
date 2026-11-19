@@ -50,8 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="meetingmind",
         description=(
             "Auto-record online meetings (Teams/Zoom/Tencent): audio + PPT "
-            "screenshots + transcription + AI summary. "
-            "Volume-independent capture via Windows Process Loopback."
+            "screenshots + transcription + AI summary."
         ),
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -175,8 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
         "record",
         help="Record a meeting (audio + slide screenshots)",
         description=(
-            "Record an online meeting end-to-end: process-loopback audio "
-            "(volume-independent) plus WGC slide screenshots, written to "
+            "Record meeting audio and WGC slide screenshots, written to "
             "meetings/YYYY-MM-DD-{topic}/. Stop with Ctrl+C or by creating "
             "a STOP file in the meeting directory."
         ),
@@ -280,11 +278,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--system-audio",
         action="store_true",
         help=(
-            "Capture system audio (the default output device's mix) instead of "
-            "per-process loopback. Use for apps where process capture records "
-            "silence — notably new Teams / WebView2. Records whatever plays on "
-            "the default speaker (other apps' sounds included). No PID needed. "
-            "Recommended for Teams."
+            "Capture a render endpoint's mix instead of per-process loopback. "
+            "Recommended for Teams. On Windows, Teams can use a fixed endpoint "
+            "from %%LOCALAPPDATA%%/MeetingMind/teams-audio.json; otherwise this "
+            "uses the default output. Mixes include all apps using the endpoint."
         ),
     )
     p_record.add_argument(

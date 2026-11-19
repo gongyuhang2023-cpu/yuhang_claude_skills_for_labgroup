@@ -82,14 +82,14 @@
         "转录二选一：交给 spark（不需要显卡，要能 ssh spark 免密登录），或在本机跑（NVIDIA 显卡 6 GB 显存以上，首次下载约 3.4 GB 模型）"
       ],
       "care_install": "复制好后在它的目录运行 python install.py --profile server（交给 spark 转录，几分钟装完）；有 N 卡想在本机转录就用 --profile both。",
-      "care_update": "本次更新新增 src/meetingmind/panel.py，并修改了 src/meetingmind/cli.py 和 SKILL.md，请把整个 skill 目录覆盖复制，新文件也要带上。已正常使用当前录制和转录功能的，不用重跑 install.py；从更早版本升级且缺少服务器转录等功能时，按安装说明重跑 install.py。保留现有录音、配置及虚拟环境。",
+      "care_update": "更新整个 skill 目录，带上新增的 src/meetingmind/teams_audio.py，保留原有录音、配置和虚拟环境。录制和转录已正常使用的无需重跑 install.py，缺少所需依赖时按原安装说明处理。想启用 Teams 虚拟扬声器录音时，按 skill 的 README 在这台 Windows 查端点 ID 并配置，Teams 和 Windows 扬声器由我手动选择。",
       "notes": {
-        "date": "2026-11-10",
-        "headline": "组会稿可以放到面板「组会」页",
+        "date": "2026-11-19",
+        "headline": "Windows Teams 可选配虚拟扬声器录音",
         "changes": [
-          "组会解读完、问要不要上传云盘时，会再问要不要放到面板的「组会」页；放之前先查，有人放过就不再重复放",
-          "只放会后阅读稿、逐页解读和其中用到的截图，不放转录和音频；页面写着是谁上传的",
-          "放上去之后改了总结，可以让 AI 更新自己放的那份"
+          "Teams 可按本机虚拟播放设备的完整 ID 录音。实体音箱或耳机的静音和音量只影响监听。",
+          "录制期间只转送一份声音到 Windows 默认输出。录完若要继续听会，在 Teams 里手动切回扬声器。",
+          "没有配置时照常录默认输出混音，静音时可能录不到会议声音。虚拟播放设备可自选，配置步骤见 skill 的 README。"
         ]
       }
     },

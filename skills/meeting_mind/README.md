@@ -10,7 +10,7 @@
 
 跑在你 Windows 机器上的一个 Claude Code skill。在 Claude 主对话里说一句**"录会议"**，它会：
 
-1. **后台录**进程级音频（Teams / Zoom / 腾讯会议 / Edge 浏览器直播都行）。**调系统音量、静音都不影响录制**——这是它跟一般录屏软件的核心区别。
+1. **后台录**会议音频。Zoom / 腾讯会议 / Edge 默认使用进程级录音，Teams 使用系统混音，可选配虚拟扬声器录音。
 2. **自动截图**会议窗口的 PPT 翻页（变化检测，跨虚拟桌面也能抓）。
 3. 你开完会跟 Claude 说"**结束了**"。
 4. **Qwen3-ASR 转录**音频成文字：在本机 GPU 上跑，或者交给实验室服务器 spark 排队转录
@@ -113,6 +113,34 @@ python -m venv .venv
 钥匙串里，可在云盘「设置 → 安全」里吊销）。云盘地址和会议文件夹第一次会自动从 spark 取，不写在 skill 里。
 手动用：`meetingmind cloud login | find | fetch | upload`。
 
+### Teams 虚拟扬声器配置
+
+已有可用的虚拟播放设备时，可以开启这项配置，品牌任选。在 skill 目录打开 Windows PowerShell，列出本机已启用的播放设备及完整 ID：
+
+```powershell
+$py = ".\.venv\Scripts\python.exe"
+& $py -c 'import soundcard as sc; [print(s.name, s.id) for s in sc.all_speakers()]'
+```
+
+从输出中找到要给 Teams 用的**虚拟播放设备**，将其完整 ID 粘贴到下面的提示中。这会写入当前 Windows 用户的 `%LOCALAPPDATA%\MeetingMind\teams-audio.json`。
+
+```powershell
+$deviceId = (Read-Host '粘贴虚拟播放端点的完整 ID').Trim()
+if (-not $deviceId) { throw '需要填写完整端点 ID' }
+$configDir = Join-Path $env:LOCALAPPDATA 'MeetingMind'
+New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+$configPath = Join-Path $configDir 'teams-audio.json'
+@{ capture_device_id = $deviceId } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
+```
+
+Windows PowerShell 5.1 写出的 UTF-8 BOM 可以直接读取。每台 Windows 按自己的设备 ID 配置。
+
+1. 开录前在 Teams 的「设置 → 设备 → 扬声器」手动选刚才的虚拟播放设备，Windows 默认输出则选实际听会的实体音箱或耳机。Teams 和虚拟设备须有音频输出。
+2. 用 `--process teams --system-audio` 录制。开录日志和 `metadata.json` 的 `audio_device` 可用于核对采集端点。录制期间，虚拟设备的混音转送到 Windows 默认输出，实体设备的静音和音量只影响监听。
+3. 同一设备的录制全部停止后，转送结束。还要继续听会时，在 Teams 里手动切回日常扬声器。
+
+没有虚拟播放设备或没有配置时，照常将 Teams 扬声器设为 Windows 默认输出，用系统混音录制。此时静音或音量为零可能录不到声音。配置指向不可用设备时会报错，可将配置文件改名后再用默认输出录制。普通进程录制继续可用。
+
 ### 实验室面板「组会」页：谁先放就用谁的
 
 组会（主题或文件夹名里有「组会」「group meeting」「lab meeting」）解读完、问要不要上传云盘时，会再问要不要放到
@@ -161,7 +189,7 @@ python -m venv .venv
 
 | 依赖 | 用途 | 来源 |
 |---|---|---|
-| [proc-tap](https://pypi.org/project/proc-tap/) | 进程级音频抓取（系统静音不影响录制的核心）| MIT 类型许可 |
+| [proc-tap](https://pypi.org/project/proc-tap/) | Windows 进程级 loopback| MIT 类型许可 |
 | [windows-capture](https://pypi.org/project/windows-capture/) | Windows Graphics Capture API 的 Python 绑定 | MIT 类型许可 |
 | [qwen-asr](https://pypi.org/project/qwen-asr/) + [qwen-omni-utils](https://pypi.org/project/qwen-omni-utils/) | Qwen3-ASR-1.7B 模型的 Python wrapper | Apache 2.0（阿里巴巴） |
 | [Qwen3-ASR-1.7B 模型本身](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | 本地语音识别模型 | Apache 2.0 + Qwen Research License（**商业使用要看 Qwen 自家条款**）|
