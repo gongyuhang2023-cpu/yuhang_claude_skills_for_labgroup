@@ -10,7 +10,7 @@
 - GPU：GB10（统一内存，无独立显存框），驱动 580，**CUDA 13.0**
 - 系统 Python 3.12、gcc 13.3（可从源码编译）
 - **docker 普通用户用不了**：装了，但用户不在 docker 组（2026-10-14 核实，`/ai.md` 也这么写）
-- **公共软件优先**：`/opt/bio/bin` 里有大量工具，`micromamba` 也是公共的；要自己装照 `/ai.md`：优先 pixi，不新建 conda 环境
+- **公共软件优先**：`/opt/bio/bin` 里有大量工具，`micromamba` 也是公共的。缺工具时先看 `/ai.md`，通用安装流程使用 `/usr/local/bin/pixi` 建项目环境。
 
 ### ⚠ 「查不到」≠「没装」——非交互 ssh 的 PATH 是残缺的
 
@@ -72,10 +72,10 @@ print(d['latest_version'], sorted({f.get('attrs',{}).get('subdir') for f in d['f
 ```
 
 ## 建议用法
-- **先查公共区有没有**（`software find`），有就直接用 `/opt/bio/bin` 里的。
+- **先读服务器规则**（`rules`），再用 `software find` 查公共区。已有工具可以直接用 `/opt/bio/bin` 里的。
 - 正式分析需要复现：读 `project-envs.md`，用 `env init/build` 与 `gen-sbatch --env`；不要向只读环境 pip install。
-- 临时个人安装：照 `/ai.md`，命令行工具用 `pixi global install`，项目要钉版本就在项目里 `pixi init` / `pixi add`；纯 Python 依赖可以用 venv。别裸依赖系统 Python。
-- 装包优先 pip wheel（要 aarch64 的），没有 wheel 再考虑源码编译。docker 普通用户用不了。
+- 临时试用也用项目环境。先预览 `env init --dir <项目目录>`，缺配方时经确认加 `--yes` 初始化，再用 `/usr/local/bin/pixi add --no-install <包名>` 更新配方和锁，最后用 `env build` 预演构建。详见 `software.md` 和 `project-envs.md`。
+- 纯 Python 依赖写进项目环境。确认是所需项目且有适用的 wheel 后，用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。docker 普通用户用不了。
 
 ## 陈旧提示
 本文件是手工经验，`env-profile.local.json` 是自动实时探测。两者冲突以实时探测为准，并回来更新本文件。

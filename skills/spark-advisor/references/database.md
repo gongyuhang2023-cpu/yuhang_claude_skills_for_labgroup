@@ -6,7 +6,7 @@
 公共数据库在 `/opt/bio/db/<名>/<版本>/`，一个版本一个目录；`/opt/bio/db/<名>/current` 指向其中一个版本。库的文件可能在服务器本地盘，也可能在 NAS 上（读起来约 100 MB/s）。
 
     python scripts/advise.py database find <名>
-    python scripts/advise.py database plan <名> --url <下载地址> [--url …] [--version <版本>] [--recipe <配方>] [--request <申请编号>]
+    python scripts/advise.py database plan <名> --url <下载地址> [--url …] [--version <版本>] [--recipe <配方>]
     python scripts/advise.py database install <同 plan 的参数> --expected-plan <plan_sha256> --yes
     python scripts/advise.py database status [<作业号>]
     python scripts/advise.py database scan|check <项目>
@@ -15,36 +15,39 @@
     python scripts/advise.py database compare <目录> <名> [<版本>] [--yes | --result <作业号>]
     python scripts/advise.py database adopt <名> <版本> --path <目录> [--plan-job | --result <作业号>]
     python scripts/advise.py database adopt <名> <版本> --path <目录> --expected-plan <plan_sha256> --yes
-    python scripts/advise.py database request --name <名> [--version …] [--source …] [--reason …] [--yes]
-    python scripts/advise.py database vote <申请编号> [--yes]
 
 输出都是 JSON（写不写 `--json` 都一样）。会写东西的命令不带 `--yes` 只预演。
 
 ## 1. 先查：`database find <名>`
 
 - 按库名、子库别名、版本号匹配：搜 `UHGV` 能找到包含它的 virodb。拿不准就多试一两种写法。
+- 先看 `name` 和 `matched_alias`。别名命中的可能是某个库的组成部分。比如搜 `CARD` 命中 pharokka 时，先核对文件格式和内容。pharokka 的 CARD 是 MMseqs2 数据，RGI 需要的则是 `card.json`。
 - 每个库列出全部版本（新的在前），每个版本有：
   - `path`：带版本号的路径。**脚本里写这个**，结果才可复现。
   - `current`：是不是 current 指向的版本。
   - `location_cn`：本地 / NAS / 两边都有（比如工具用的部分在本地，官网全套在 NAS）。
-  - `install_method`：申请 #编号 / 自助（谁装的）/ 管理员直接装。
-  - `verification`：`official` 已和官方校验值核对；`self` 上游没有校验值，只核对了下载完整；`local-copy` 是收编的个人副本，未与官方核对。
-  - `compat`：只有和工具绑定的库（GTDB-Tk、Bakta、CheckV、geNomad）才有：`pass` 公共区的工具读得了，`fail` 读不了，`untested` 没测出来。
+  - `install_method`：自助（谁装的）/ 管理员直接装。
+  - `verification`：`official` 已和官方校验值核对，`self` 表示至少部分文件只核对了下载完整性，`local-copy` 是收编的个人副本（未与官方核对），`null` 表示旧版本的登记没有记录这一项。
+  - `compat` 的自动检查目前只覆盖 GTDB-Tk、Bakta、CheckV、geNomad。`pass` 表示公共区的工具读得了，`fail` 表示读不了，`untested` 表示没测出来。`na` 表示没有绑定兼容检查。
+  - 其它库例如与 RGI 配套的 CARD，请先用计划采用的工具和版本实际加载一次，再用于分析。
   - `cache_status`：NAS 上的库有没有取进本地缓存。`cache_hint` 有内容时照说：库装好了，但本地剩余不足，暂时取不进缓存。
-- `requests` 是有没有人申请过（§5），`installs` 是正在装或装失败的记录。
-- 有 `warning` 说面板没认出这台电脑：能查，不能申请。
+- `installs` 是正在装或装失败的记录。
+- 只有匹配到 NAS、mixed 或带 NAS 路径的版本时，才查本地缓存盘空间。无这类匹配时，`local_free_gb: null` 表示没发起查询。有这类匹配却返回 `null` 时，表示这次没有拿到空间数字。
 
 ## 2. 公共区没有：自己装进 NAS 公共库
 
 不用审批，谁都可以装，装好全组都能用。
 
 1. **预演**：`database plan <名> --url <下载地址> …`
-   - 地址用官方下载页上的公网 https 地址，一个文件一个地址。不写 `--version` 时，只有网址里有唯一、明确的版本号才推断得出来；推断不了就问用户写哪个版本。
-   - 是在回应面板上的某条申请，加 `--request <编号>`，面板会显示「申请 #编号」。
-   - 看返回的 `status`：
+   - 到官网发布或下载页找直链，一个文件一个公网 HTTPS 地址。优先选带明确版本的固定链接。内容会随发布变化的 `latest` 链接可能推断不出版本，内容变化后也可能让提交时重算的 `plan_sha256` 对不上。
+   - 省略 `--version` 时，服务器从所有 URL 的路径里收集符合边界的点分数字版本（如 `X.Y` 或 `X.Y.Z`，可带 `v`）。候选可以出现在路径段开头、斜杠、下划线或连字符之后，后面须接路径分隔符、下划线、连字符、`.tar`、`.tgz` 或到达路径结尾。查询参数和 URL 主机名不参与。相同候选只算一次。没有候选或有多个不同候选时，从官方下载页核对版本，再传 `--version`。
+   - `plan` 按传入的库名查登记路径，别名只用于 `find`。例如 `database find card` 命中 pharokka 的别名时，`database plan card` 仍计划安装到 `/opt/bio/db/card/<版本>`。
+   - 同一发布的必要文件在第一次预演时一并传入。已登记的同名同版本在可完成预演时返回 `exists`，再次传 URL 不会向该版本追加文件。独立发布的附属数据用各自的库名登记，版本按各自发布页填写。比如 CARD 的 WildCARD 或 prevalence，即使版本号相同，也要按发布页核对是不是同一次发布。`database plan` 可传 `--version`，没有发布日期参数。
+   - 看退出码和返回结果：
      - `exists`：公共区已有同一版本，直接用 `path`，不用装。
      - `blocked`：NAS 装完会低于 2 TB 底线，装不了，照 `error` 告诉用户。
      - `ready`：可以装。`files` 是要下载的文件、大小和校验值来源，`nas.after_install` 是装完 NAS 还剩多少。
+     - 预演失败返回非零退出码，JSON 中没有 `status`。服务端返回 NAS 断开的错误 JSON 时，advisor 退出 1，返回 `error`、原始错误 `detail` 和 `hint`。其它错误至少有 `error`，有针对性的提示时附 `hint`。
    - 有 `other_versions` 和 `ask_user`：公共区已经有这个库的别的版本。**先问用户**是用已有的版本，还是另装一版，别替用户定。
    - 有 `cache_note`：装得上，但装好后本地剩余不足 350 GB，暂时取不进缓存（§3）。有 `verification_note`：上游没给校验值，只能核对下载完整。
 2. **给用户看计划**：库名、版本、文件和大小、校验值来源、NAS 余量；有别的版本时说清是另装一版。**用户明确同意**再往下走。
@@ -55,11 +58,19 @@
 
 规矩：
 - **只用内置配方**：`generic` 只下载、核对、归档，不运行建索引之类的命令；`gtdbtk`、`bakta`、`checkv`、`genomad` 还会检查公共区的工具读不读得了这个库。不写 `--recipe` 时按库名选。
-- **不执行用户提供的命令**：安装请求里不能带命令、建库步骤或脚本。用户想「下载后再跑某个命令」，告诉他装好后在自己的作业里跑。
+- **不执行用户提供的命令**：安装规格只填写库名、版本、下载地址和配方。用户想「下载后再跑某个命令」，告诉他装好后在自己的作业里跑。
 - **KEGG 这类要订阅的库不收**，服务器直接拒绝。
 - NAS 上还放着大家 home 的备份，**装完 NAS 至少要剩 2 TB**。
 - 官方给的 `.tar.gz` 会转成 `.tar.zst` 包加成员清单存进 NAS（NAS 上不展开小文件），取进缓存时再解开。
+- `generic` 对 `.tgz` 的处理与 `.tar.gz` 相同。`.tar.bz2`、`.zip` 等其它后缀按原文件名和字节内容存进 NAS。`db-cache` 会把这些未登记成员的压缩文件原样取回。需要解包时，在自己的作业里用取回的文件和作业可写目录处理。
+- 文件名取预演时传入的 URL 路径最后一段并解码。`files[].name` 就是计划里的文件名，下载响应的 `Content-Disposition` 不参与命名。例如 URL 文件名为 `broadstreet-v4.0.2.tar.bz2`、响应建议 `card-data.tar.bz2` 时，公共路径为 `/opt/bio/db/<名>/<版本>/broadstreet-v4.0.2.tar.bz2`。
 - 别把公共库自己再下一份到 home：会被查成重复安装，也占全组的盘。
+
+### NAS 暂时不可用时
+
+- 预演里的 `Host is down`（errno 112）、`Transport endpoint is not connected`、`Stale file handle`、`No route to host` 等若指向相对路径 `db` 或其下的目录，按 NAS 故障处理。其它网络错误结合 NAS 探测结果判断，详情可用 `status` 核对。
+- `status` 的 `nas.online` 是本次只读探测结果。`true` 表示挂载点可读且已挂载，`false` 表示路径不可读、未挂载或探测超过 5 秒。`null` 表示没有取得探测结果。细节见 `nas.state` 和 `nas.note`。
+- NAS 连不上时，告诉用户公共库放在 NAS 上，并请用户转告管理员。等用户回来继续，或征得用户同意后稍后用 `status` 重查。NAS 恢复后再预演，每次故障期间只报告结果，不反复重试。
 
 ### current 怎么定
 
@@ -70,7 +81,7 @@
 
 ## 3. NAS 上的库：取进本地缓存
 
-NAS 不适合随机读。查几条记录可以直接读；要拿整个文件跑比对、建索引之类的，先取进本地的共享缓存（`/scratch/db-cache`）：
+小文件可以在作业里直接从公共版本路径读。几 MB 的压缩包也可直接从公共路径解压到作业可写目录。大文件或大量随机读先取进本地共享缓存（`/scratch/db-cache`）。
 
 - **在作业里用（首选）**：`gen-sbatch --stage <库路径>`，可以写多个。生成的脚本开头有 `D1=$(db-cache use <库路径>)`、`D2=…`，命令里用 `$D1`、`$D2`；`current` 在生成时就换成实际版本。
   - `submit` 时没缓存的先交一个 1 核 2G 的取库作业，主作业用 `--dependency=afterok:<取库作业号>` 等它完成，并马上登记，免得排队期间缓存被清掉；已经缓存的直接提交。
@@ -130,16 +141,9 @@ check 的判断：
 - `project check` 的 `db_refs` 用同样的规则扫描。
 - 写论文以出结果那天的作业日志、运行记录为准；锁了清单之后，`check` 能说明库的内容有没有变过。
 
-## 5. 申请（等管理员装）
+## 5. 个人副本：找出来、比对、放进 NAS 公共库、删掉
 
-- `requests` 里已有同名同版本的申请（「待处理」或「已接受，安装中」）：不重复提交，建议用户 +1。`voted_by_me` 为 true 就是投过了。先不带 `--yes` 跑 `database vote <编号>`，用户同意后加 `--yes`；只加票不撤票，想撤票让用户在网页上点。
-- 没人申请过：`database request --name <名> [--version …] [--source <官方地址>] [--reason …]` 出草稿，用户明确同意后加 `--yes`。`reason` 写清用途、急不急、是不是已经自己下了一份（在哪），用用户的原话。申请全组都看得见；同名同版本的会合并成一条。
-- 提交和 +1 必须在用户自己的电脑上跑：面板按发出请求的设备认人，AI 在服务器上时 `--yes` 会被拒，这时让用户到面板网页提交（`page` 字段）。
-- 用户愿意自己装的话，§2 更快，不用等。
-
-## 6. 个人副本：找出来、比对、放进 NAS 公共库、删掉
-
-整理 home 里的数据库时，按下面的顺序一项一项做。**只处理 tidy 列出来的条目**，表外的目录一律不动。
+整理 home 里的数据库时，按下面的顺序一项一项做。默认只处理 tidy 列出来的条目。用户明确指定的数据库单文件或混合目录，可按第 4 步预演已核对的子集。
 
 1. **找**：`database tidy`（服务器上的 `spark-cleanup dbscan`，只看不动；home 大的要几分钟到十几分钟）。
    - 它按公共库每个版本的文件清单认副本：和公共文件同名同大小的，就倒推出这份副本的根目录。公共区没有的，按 Kraken2、DIAMOND、BLAST、MMseqs2 这些常见库和索引的文件认。conda 环境、Nextflow 的 work 不在里面。
@@ -156,8 +160,8 @@ check 的判断：
    | `protected` | 不动：管理员登记为不能动，原因在 `suggest.why`。比如别人的流程按路径和校验值核对这里，备份验收拿这里当样本 |
    | `shared` | 不动：和公共区（或别处）共用同一份文件，删了腾不出空间 |
    | `public_same` | 文件名和大小都和某个公共版本一致：先 `database compare` 核对校验值，再按第 4 步删 |
-   | `public_close` | 只差几个小文件（建库日志、下载日志、README 之类，`diff` 里列着）：先给用户看；用户同意后，把它们换成公共版本里的同名文件、删掉多出来的，再像上一行一样核对 |
-   | `public_partial` | 只对上一部分（别的版本、缺文件、改过）：不删。compare 看差在哪，问用户；要留给大家就 adopt，会登记成本地副本 |
+   | `public_close` | 只差几个小文件（建库日志、下载日志、README 之类，`diff` 里列着）：先给用户看；只清理校验一致的文件时可用子集模式 |
+   | `public_partial` | 只对上一部分（别的版本、缺文件、改过）：用 compare 看差异。已知与公共版重复的文件可预演子集清理；要共享确有不同的数据库版本时评估 adopt |
    | `other_db` | 认不出是哪个公共库：问用户这是什么。官方发布的库先 `database find`，公共区没有就 adopt；用自己数据建的索引，留着 |
 
    认不出的库多的时候，按 `summary.other_db_groups` 一组问一次。同一个分析目录下好几个的，多半是分析时用自己的数据建的。
@@ -166,9 +170,9 @@ check 的判断：
 
 2. **比对**：`database compare <目录> <名> [<版本>]`
    - 不超过 2 GB、文件不多的当场算；更大的给出一个低优先级作业的计划（1 核 2G，排在所有人的普通作业之后），用户同意后加 `--yes` 提交，算完用 `--result <作业号>` 取结果。
-   - 逐个文件和公共版本比，官方压缩包里的成员也比。`match` 有值就是公共区已有同一份；`versions` 里每个版本给出对得上的文件数和不同、多出、缺少的文件。
+   - 逐个普通文件和公共版本比，官方压缩包里的成员也比。`match` 有值说明普通文件一致；`versions` 里每个版本给出对得上的文件数和不同、多出、缺少的文件。compare 会在 `skipped` 里报告跳过的软链接，清理时另外核对相对路径和公共链接目标。
    - `level_note` 说明这份和官方包在哪一层对上：同一层、在官方包的顶层目录里面，或者多了一层 `<版本>/`。`adopt_path` 是收编时 `--path` 该指的那一层。
-   - 多出、缺少或不一样的小文件（下载日志、建库日志之类）也算对不上。先给用户看是哪几个文件，用户同意后换成公共版本的、删掉多出来的，再比。
+   - 多出、缺少或不一样的小文件（下载日志、建库日志之类）会使整份副本对不上。把差异给用户看；只清理重复文件时可以直接预演子集并保留这些差异。
 3. **公共区没有同一份：放进 NAS 公共库**：`database adopt <库名> <版本> --path <目录>` 预演。
    - 先看第 2 步 compare 的结果：判一致（`match` 有值）就不用收编，直接按第 4 步处理。要收编时，`--path` 指到和官方包相同的那一层（compare 给的 `adopt_path`）。打包存放的官方版本只按包内成员（加上不在包里的文件）比；成员都带 `<版本>/` 时剥掉这一层，但上游包自带的顶层目录（如 `checkv-db-v1.5/`）不剥。`--path` 指在这层目录里面，就会被判成不同、登记成 `<版本>-local-<用户名>`。
    - 版本号要有依据（目录名、库里的版本文件、下载记录），没有就问用户，不替用户编。
@@ -178,21 +182,22 @@ check 的判断：
    - 预演结果按 plan_sha256 存在服务器上本人的 `~/.spark-advisor/db-adopt/` 里，提交时用它。
    - 用户同意后带 `--expected-plan <plan_sha256> --yes` 提交。提交时只做轻量核对（目录还在、属主是本人、文件数和总大小和预演一致），逐个文件的校验在安装作业里，和预演的指纹对不上，作业就失败、不登记。所以**作业结束前别改这个目录**；改过就重新预演。收编在用户自己的作业里打包传给服务端，原目录不动。
 4. **删个人副本，必须同时满足**：
-   - 公共版本已经登记，并且和这份对得上：compare 的 `match` 有值，或者刚收编的就是这一份、登记好了。
+   - 公共版本已登记且健康。整份副本先看 compare 的 `match` 或收编结果；子集以 `cleanup apply --subset` 的逐文件结果为准。
    - 没有运行或排队的作业在用它（`in_use` 为空）。
    - 引用都处理了：用到它的脚本已经改成公共版本的路径（`database pin`）并提交；或者用户选 `link`，原路径换成指向公共版本的链接，脚本不用改。
    - 删除走 `cleanup apply <目录> --action remove|link --db <库名>`。不带 `--yes` 先预演，把确切路径、能腾出的空间（`frees`）、替代的公共路径给用户看，用户同意才加 `--yes`。
-     - 服务器会再核一遍：是不是本人 home 里的、路径里有没有链接、有没有进程或作业在用、是不是管理员登记不能动的；还会按文件清单抽查校验值，对不上就拒绝。
-     - 公共版本打包存放、或者层次不同时，不能 `link`，只能改脚本后 `remove`。
+     - 服务器会再核一遍：路径属主、是否在本人 home 内、路径里的软链接、进程或作业占用、管理员保护名单、公共版本健康，并按文件清单核对完整 SHA256。
+     - 只需处理一个文件、混合目录，或有归档、校验文件、`ON_NAS` 提示差异时，用 `spark-cleanup apply <文件或目录> --action remove --db <库名>/<版本> --subset --json` 预演。目录按对齐后的同一相对路径核对大小和完整 SHA256，同路径有差异时拒绝整次清理。明确指定单文件时可以跨目录匹配同名文件。0 字节文件和未匹配项保留并列出。用户确认后执行须带 `--yes --expect <plan_sha256>`。大文件的预演和执行放进 Slurm 作业，详见 [cleanup 用法](cleanup.md)。
+     - 子集 `link` 可把匹配文件逐个链接到各自的公共路径。包内成员须先改脚本，再用 `remove`。
    - 每删一项都先问；一项做完、确认结果对了，再做下一项。出错就停，原样报告。
 5. **还在用，公共版本只在 NAS 上**：
-   - 本地剩余够（见第 3 节缓存的规矩），就先取进缓存：脚本改成 `db-cache use`，或者 `gen-sbatch --stage`。然后按第 4 步删个人那份。
+   - 本地剩余够（见第 3 节缓存的规矩），先迁移并验证实际调用。在作业中用 `db-cache use /opt/bio/db/<库名>/<版本>/<文件路径>` 或 `gen-sbatch --stage`，让工具使用返回的本地路径，再按第 4 步清理。会执行 `unlink` 的旧脚本须先改掉对私人缓存的清理逻辑，避免把共享缓存当临时文件。
    - 不够就先留着个人那份，告诉用户还差多少。留着和取进缓存占的空间一样大，不吃亏。
 
 最后给用户一张总表：每一项怎么处理的、腾出多少、留下了什么、为什么留。
 
 ## 规矩
 
-- 总闸照旧：`install`、`adopt --plan-job`、`adopt --yes`、`compare --yes`、`lock --yes`、`pin --yes`、`request --yes`、`vote --yes` 都要先给用户看计划、用户明确同意。
+- 总闸照旧：`install`、`adopt --plan-job`、`adopt --yes`、`compare --yes`、`lock --yes`、`pin --yes` 都要先给用户看计划、用户明确同意。
 - 跟用户说「放进 NAS 公共库」，不说「备份」：放进去的是全组共用的公共库。
 - 不替用户编造版本号和用途。

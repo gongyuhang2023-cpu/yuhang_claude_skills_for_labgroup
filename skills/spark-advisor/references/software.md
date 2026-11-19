@@ -1,37 +1,38 @@
-# 查公共工具、申请安装
+# 查公共工具与自助安装
 
-服务器上有一个**公共区**：管理员统一装好的工具，已在每个人的 PATH 里。
-用户要用某个工具时，**先查公共区有没有**，没有再申请。别让用户自己再装一份：那会变成重复安装，占全组的磁盘。
-公共数据库（查库、自己装库、锁版本）看 `database.md`。
+## 先查公共工具
 
-## 流程
+先运行 `python scripts/advise.py rules`，看服务器 `/ai.md` 对这个工具有没有专门安排。iPHoP 等有专门安排的工具按服务器规则处理。流程涉及把用户数据放进共享盘时，先征得用户同意。
 
-1. **查**：`python scripts/advise.py software find <名字>`
-   - 按名字和命令名匹配：搜 `blastn` 能找到 `blast`。名字拿不准就多试一两种写法。
-     命令名沾边的包也会带出来（搜 `gtdb` 会带出 metaphlan，因为它有个 `sgb_to_gtdb_profile` 命令），看 `commands` 再判断。
-   - `tools` 有结果：告诉用户直接敲命令就行（已经在 PATH 里）。
-     `gen-sbatch` 生成的脚本是登录 shell（`#!/bin/bash -l`），也可以直接写命令名。
-     **cron 和 `ssh spark '<命令>'` 这类非登录方式拿不到这条 PATH，要写绝对路径 `/opt/bio/bin/<命令>`。**
-   - 有 `dbs_hint`：公共区还有名字相近的数据库，用户要的是库就改用 `database find`。
-   - 有 `warning` 说面板没认出这台电脑：能查，不能提交。告诉用户先连上 Tailscale，或者找管理员登记设备。
-2. **已经有人申请过**（`requests` 里有同名的，`status_cn` 是「待处理」或「已接受，安装中」）：不要重复提交，建议用户 +1。
-   - `voted_by_me` 为 true 说明用户已经投过，告诉用户就行，不用再投。
-   - 先不带 `--yes` 跑 `software vote <id>`，把要做的事给用户看。
-   - 用户同意后再跑 `software vote <id> --yes`。这条命令只加票不撤票：已经投过的会直接返回 `already_voted`。想撤票的话，让用户在网页上点。
-3. **公共区没有、也没人申请过**：先确认 ARM 上能不能装。
-   - `software find` 找不到时会自动带上 `arch`，也可以手动加 `--arch`。
-   - 服务器是 **ARM（aarch64）**：如果 bioconda 和 conda-forge 都没有 `linux-aarch64` 或 `noarch` 构建，就装不上。
-     直接告诉用户，再找替代工具（比如 roary 可以换成 panaroo），别提交注定办不了的申请。
-   - 能装的话先起草：`software request --name <名字> [--version …] [--source …] [--reason …]`。
-     不带 `--yes` 只出草稿。`reason` 写清楚用途、急不急、是不是已经自己装了一份（装在哪）。
-   - **把草稿给用户看，用户明确同意后**才加 `--yes` 提交。申请全组都看得见。
-   - 面板会把同名申请合并成一条（等于 +1），不用担心重复。
-4. **等不及**：给用户 `pixi global install -c conda-forge -c bioconda <名字>`，装在他自己的 `~/.pixi`。
-   同时提醒：等申请变成「已安装」，就用 `pixi global uninstall <名字>` 删掉个人版，不然它会出现在「我的重复安装」里。
+没有专门安排时，再走下面的通用流程。用户说「申请安装」或「请管理员装」时，告诉用户缺工具可以自己建项目环境，缺数据库可以自己装进 NAS 公共库，都不用等管理员。然后按工具或数据库的流程继续。
 
-## 规矩
+`python scripts/advise.py software find <工具名>` 按包名、环境名和命令名搜索公共工具。
+`tools` 会列出匹配的包、版本和常用命令。也可以在面板「公共资源 → 公共工具」里搜。
+安装前，在 Spark 上以用户身份运行 `which -a <工具>` 查实际命令。它能查到 PATH 上的个人安装和公共工具，`software find` 的工具清单只覆盖公共区。发现已有个人版本时，先核对它是否满足需求。
+用 `--arch` 同时查询 Conda 的构建。公共工具没有匹配时会自动查询构建。
 
-- **提交和 +1 必须在用户自己的电脑上跑**：面板按发出请求的设备认人。
-  - AI 如果运行在服务器上，`--yes` 会被拒绝。
-  - 这时让用户去面板网页提交，地址在 `page` 字段里。
-- 不替用户编造用途。`reason` 用用户的原话，或者先经用户确认。
+## 用已有的工具
+
+登录后 `/opt/bio/bin` 已在 PATH，直接敲命令。用 `which -a <命令>` 查看实际用的是哪一份。
+`gen-sbatch` 默认生成登录 shell 脚本，也可以直接用命令名。cron 等非登录环境可用 `/opt/bio/bin/<命令>`。
+需要固定版本时，把依赖写进项目环境。
+
+## 缺工具时建项目环境
+
+临时试用也走项目环境。相同的配方可以复用已构建环境，版本会写进锁文件。
+
+1. 看 `software find` 的 `arch` 和 `availability`，确定要加入配方的依赖。Conda 有 `linux-aarch64` 构建时选对应的 Conda 包。
+   只有 `noarch` 时，包本身适用于 ARM64，依赖仍以 `/usr/local/bin/pixi lock` 能否解析成功为准。若因缺少 ARM64 构建而解析失败，把缺少的依赖告诉用户。
+   如果 Conda 查询有失败，且没有渠道查到构建，先用 `software find <名> --arch` 重查。重查仍失败时，到失败渠道的 Anaconda 项目页核对包名和构建。仍无法确认时，告诉用户哪些结果未知，等确认后再选依赖。
+   各 Conda 渠道都明确没有可用构建时，才看 `pypi`。PyPI 的同名项目可能是另一个工具。先核对 `summary` 和主页或项目链接，确认是用户要的工具，并核对 wheel 支持的 Python 版本。
+   若只找到旧版 wheel，按返回的版本选择。env-store 接受 wheel，拒收 sdist 和 Git 依赖。没有可用构建就把查询结果告诉用户。
+2. 对已存在的 Spark 项目目录运行 `env init --dir <项目目录>`。缺配方时，给用户看预览，确认后用 `env init --dir <项目目录> --yes` 写最小配方并生成初始锁。已有配方就沿用。目录缺失时先确认 Spark 项目落点，目录就绪后重跑。
+3. 在 Spark 项目目录用 `/usr/local/bin/pixi add --no-install <包名>` 更新配方和锁。PyPI 依赖用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。把示例 `tasks.smoke` 换成真正检查工具的短命令，例如 `<工具> --version`。已有真实测试时沿用。编辑后运行 `/usr/local/bin/pixi lock` 更新锁。把 `pixi.toml`、`pixi.lock` 和项目代码放在一起。
+4. 用 `env build --dir <项目目录>` 看构建计划，用户同意后加 `--yes --wait` 构建。
+
+完整参数与示例见 [项目环境](project-envs.md)。使用 ws 时按 SKILL.md 的入口规则用 `ws_forward.py`。
+
+## 在作业里用项目环境
+
+用 `gen-sbatch --env <项目目录>` 加上任务所需的 `--name`、`--workdir`、资源和 `--command` 等参数生成脚本，`--workdir` 写服务器上的绝对路径。脚本会激活锁定的环境，计算命令直接用环境里的工具。
+用 `env check <脚本>` 核对，然后按提交流程让用户确认并用 `submit --script <脚本>` 交作业。

@@ -33,18 +33,14 @@ Subcommands:
                     only safety net there is.
   rules             the server's own rules + shared software/databases + live free
                     resources (the panel's /ai.md) -- the single source of truth
-  software find/    look up a shared tool / existing tool request on the panel; draft a
-  request/vote      request and submit it (or +1 one) only with --yes. Must run from the
-                    user's own computer: the panel identifies people by the Tailscale
-                    account of the device that sends the request.
-  env ...           project environments: init/build/adopt/status/find/check via env-store
+  software find     look up a shared tool or find ARM64 packages for a project environment
+  env ...           project environments: init/build/adopt/status/check via env-store
   database ...      shared databases: find (every version, where it lives, how it was
                     installed, cache state); plan/install/status (self-install into the
                     NAS public library via the server's db-install, dry run first);
                     scan/check/lock/pin (the project's databases.lock.json, see
                     db_project.py); tidy (every database-like directory in the user's home,
-                    via the server's spark-cleanup dbscan); adopt/compare (a personal copy);
-                    request/vote.
+                    via the server's spark-cleanup dbscan); adopt/compare (a personal copy).
   cleanup scan/     relay to the server command `spark-cleanup` (runs as the user, dry
   refs/apply        by default): personal envs / database copies that duplicate the
                     shared ones, with tier, references, in-use checks and real space
@@ -69,6 +65,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import IncompleteRead
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_CANDIDATES = [
@@ -850,7 +847,7 @@ PANEL_PORT = 3001
 def panel_url(cfg, path=""):
     """面板地址。用 config 里的 `host`（Tailscale 地址），不用 resolve_host()：LAN 地址可能是 IPv6
     （拼进 URL 要加方括号，不加就必定连不上），而且面板按来源的 Tailscale 账号认人，
-    走 LAN 它认不出你是谁、申请就提交不了。环境变量 SPARK_PANEL_URL 只给测试用。"""
+    走 LAN 时面板可能识别不了你的账号。环境变量 SPARK_PANEL_URL 只给测试用。"""
     base = os.environ.get("SPARK_PANEL_URL") or cfg.get("panel_url")
     if not base:
         h = cfg["host"]
@@ -877,11 +874,8 @@ def cmd_rules(cfg):
     return 0
 
 
-# ----------------------------- software: 查公共工具，申请安装 -----------------------------
-# 数据来自面板 /api/software。申请按来源设备的 Tailscale 账号认人，所以只能从你自己的电脑发；
-# 提交和 +1 都是全组看得见的动作 —— 不带 --yes 只出草稿，用户同意后才真的发。数据库在下面的 database 段。
+# ----------------------------- software: 公共工具与项目环境 -----------------------------
 
-REQ_STATUS_CN = {"pending": "待处理", "accepted": "已接受，安装中", "installed": "已安装", "rejected": "未采纳"}  # 同面板
 
 def _http_json(url, body=None, timeout=20):
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -917,17 +911,36 @@ def _vkey(v):
     return [(1, int(x), "") if x.isdigit() else (0, 0, x) for x in re.split(r"[.\-_]", str(v or ""))]
 
 
-def _conda_arch(name):
-    """anaconda.org 上 bioconda / conda-forge 有没有 linux-aarch64 或 noarch 的构建 —— 服务器是 ARM，
-    只有 x86 构建的包装不上（roary、iPHoP 就是这样）。出错只记在那个 channel 上，不连累面板的查询结果。"""
-    out = {}
-    for ch in ("bioconda", "conda-forge"):
-        url = f"https://api.anaconda.org/package/{ch}/{urllib.parse.quote(name)}"
+CONDA_CHANNELS = ("bioconda", "conda-forge")
+SMOKE_TEST_STEP = ("把示例 tasks.smoke 换成真正检查工具的短命令，例如 <工具> --version。已有真实测试时沿用。"
+                   "再在 Spark 项目目录运行 /usr/local/bin/pixi lock 更新锁。")
+
+
+def _package_index_json(url):
+    """Retry one transport failure, including a timeout while reading the response."""
+    for attempt in range(2):
         try:
-            with urllib.request.urlopen(url, timeout=15) as r:
-                d = json.loads(r.read().decode("utf-8"))
+            with urllib.request.urlopen(url, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError:
+            raise
+        except (OSError, IncompleteRead):
+            if attempt:
+                raise
+
+
+def _conda_arch(name):
+    """查各渠道的 linux-aarch64 和 noarch 构建。iPHoP 等 noarch 包仍需用 ARM64 的锁验证依赖。"""
+    out = {}
+    for ch in CONDA_CHANNELS:
+        url = f"https://api.anaconda.org/package/{ch}/{urllib.parse.quote(name, safe='')}"
+        try:
+            d = _package_index_json(url)
+            files = d.get("files")
+            if not isinstance(files, list):
+                raise ValueError("Conda 响应缺少有效的构建清单")
             best = {}
-            for f in d.get("files", []):
+            for f in files:
                 sub = (f.get("attrs") or {}).get("subdir")
                 v = f.get("version")
                 if sub in ("linux-aarch64", "noarch") and (sub not in best or _vkey(v) > _vkey(best[sub])):
@@ -936,9 +949,49 @@ def _conda_arch(name):
                        "linux-aarch64": best.get("linux-aarch64"), "noarch": best.get("noarch")}
         except urllib.error.HTTPError as e:
             out[ch] = {"exists": False} if e.code == 404 else {"error": f"HTTP {e.code}"}
-        except Exception as e:
-            out[ch] = {"error": str(e)[:120]}
+        except (OSError, IncompleteRead, AttributeError, TypeError, ValueError) as e:
+            out[ch] = {"error": str(e)[:120] or type(e).__name__}
     return out
+
+
+def _pypi_arch(name):
+    """Find a non-yanked Python 3 wheel for Linux ARM64 or a pure Python wheel."""
+    url = f"https://pypi.org/pypi/{urllib.parse.quote(name, safe='')}/json"
+    try:
+        data = _package_index_json(url)
+        releases = dict(data.get("releases") or {})
+        info = data.get("info") or {}
+        latest = info.get("version")
+        result = {"exists": True, "wheel": None, "summary": info.get("summary") or None,
+                  "home_page": info.get("home_page") or (info.get("project_urls") or {}).get("Homepage"),
+                  "project_url": info.get("project_url") or f"https://pypi.org/project/{urllib.parse.quote(name, safe='')}/"}
+        if latest and data.get("urls"):
+            releases[latest] = data["urls"]
+        matches = []
+        for version, files in releases.items():
+            for f in files:
+                filename = f.get("filename", "")
+                if f.get("packagetype") != "bdist_wheel" or f.get("yanked") or not filename.endswith(".whl"):
+                    continue
+                tags = filename[:-4].rsplit("-", 3)
+                if len(tags) != 4:
+                    continue
+                _, python, abi, platform = tags
+                if not any(re.fullmatch(r"(?:py|cp|pp)3[0-9]*", tag) for tag in python.split(".")):
+                    continue
+                pure = platform == "any" and abi == "none"
+                arm = all(re.fullmatch(r"linux_aarch64|manylinux(?:[0-9]+|_[0-9]+_[0-9]+)_aarch64", tag)
+                          for tag in platform.split("."))
+                if pure or arm:
+                    matches.append((version == latest, f.get("upload_time_iso_8601") or "", filename, version))
+        if matches:
+            _, _, wheel, version = max(matches)
+            result.update(wheel=wheel, version=version)
+        return result
+    except urllib.error.HTTPError as e:
+        return {"exists": False} if e.code == 404 else {"error": f"HTTP {e.code}"}
+    except (OSError, IncompleteRead, AttributeError, TypeError, ValueError) as e:
+        return {"error": str(e)[:120] or type(e).__name__}
 
 
 def _on_server(cfg):
@@ -965,7 +1018,7 @@ def cmd_software_find(cfg, name, check_arch=False):
                 "commands": cmds[:10], "n_commands": len(t.get("exposed") or [])}))
     out = {"query": name, "me": d.get("me"),
            "tools": [x[2] for x in sorted(tools, key=lambda x: (x[0], x[1]))][:10],
-           "requests": _requests(d, q, "tool")[:10], "page": panel_url(cfg, "/software")}
+           "page": panel_url(cfg, "/software")}
     if out["tools"]:
         out["usage"] = ("公共工具已在 PATH 里，直接敲命令；gen-sbatch 生成的脚本是登录 shell，也能直接用命令名。"
                         "cron 和 ssh spark '<命令>' 这类非登录方式拿不到，要写绝对路径 /opt/bio/bin/<命令>。")
@@ -973,19 +1026,52 @@ def cmd_software_find(cfg, name, check_arch=False):
     if n_db:
         out["dbs_hint"] = "公共区还有和「%s」相关的数据库（%d 个版本）：查库用 database find %s" % (name.strip(), n_db, name.strip())
     if check_arch or not out["tools"]:
-        out["arch"] = _conda_arch(name.strip())
-    if d.get("me") is None:
-        out["warning"] = "面板没认出这台电脑（没登记或不在 Tailscale 上）：能查，但不能提交申请。"
+        arch = out["arch"] = _conda_arch(name.strip())
+        pkg = shlex.quote(q)
+        failed = [ch for ch in CONDA_CHANNELS if "exists" not in arch.get(ch, {})]
+        add_step = "在 Spark 项目目录用 /usr/local/bin/pixi add --no-install <包名> 更新配方和锁。"
+        if any(r.get("linux-aarch64") for r in arch.values()):
+            out["availability"] = "Conda 有 linux-aarch64 构建。"
+            add_step = f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁。"
+        elif any(r.get("noarch") for r in arch.values()):
+            out["availability"] = ("Conda 找到 noarch 构建。包本身适用于 ARM64，"
+                                   "依赖可能缺少 ARM64 构建，以 /usr/local/bin/pixi lock 能否解析成功为准。")
+            add_step = (f"在 Spark 项目目录用 /usr/local/bin/pixi add --no-install {pkg} 更新配方和锁，以 ARM64 锁能否解析成功为准。"
+                        "若因缺少 ARM64 构建而解析失败，把缺少的依赖告诉用户。")
+        elif failed:
+            out["availability"] = f"Conda 渠道查询失败（{'、'.join(failed)}），可用构建未知。"
+            out["next"] = [f"software find {pkg} --arch",
+                           "重查仍失败时，到失败渠道的 Anaconda 项目页核对包名和构建。"
+                           "仍无法确认时，告诉用户哪些结果未知，等确认后再选依赖。"]
+        else:
+            pypi = out["pypi"] = _pypi_arch(name.strip())
+            if pypi.get("wheel"):
+                out["availability"] = ("PyPI 有同名项目提供 Linux ARM64 或纯 Python wheel。"
+                                       "先核对简介和主页或项目链接，确认是用户要的工具，再核对 wheel 支持的 Python 版本。")
+                dep = shlex.quote(q + "==" + pypi["version"])
+                add_step = ("先核对 PyPI 简介和主页或项目链接，确认是用户要的工具且 wheel 支持项目的 Python 版本，"
+                            f"再在 Spark 项目目录用 /usr/local/bin/pixi add --no-install --pypi {dep} 更新配方和锁。")
+            elif pypi.get("error"):
+                out["availability"] = "PyPI 查询失败，暂时无法确认是否有可用 wheel。"
+            else:
+                out["availability"] = "Conda 未找到 ARM64 或 noarch 构建，PyPI 未找到 Linux ARM64 或纯 Python wheel。"
+        if not out["tools"] and "next" not in out:
+            out["next"] = [
+                "对已存在的 Spark 项目目录运行 env init --dir <项目目录>，预览配方。",
+                "缺 pixi.toml 时，确认后运行 env init --dir <项目目录> --yes，写出配方并生成初始锁。",
+                add_step,
+                SMOKE_TEST_STEP,
+                "运行 env build --dir <项目目录> 看构建计划，确认后加 --yes --wait 构建。",
+                "环境就绪后，用 gen-sbatch --name <作业名> --mem-gb <GB> --workdir <Spark 项目绝对路径> "
+                "--env <项目目录> --command '<命令>' 生成脚本。",
+            ]
+            out["env_note"] = "env-store 只接受可锁定的 Conda 包和 PyPI wheel，拒收 sdist 和 Git 依赖。"
+        if not out["tools"]:
+            out["next"].insert(0, "先运行 rules 查这个工具是否有专门安排。有就按服务器规则处理。"
+                                  "没有专门安排时，再继续下面的步骤。")
+    if inv.get("error") or "inventory" not in d:
+        out["warning"] = "公共工具清单暂不可用，请稍后重查。"
     return out
-
-
-def _requests(d, q, kind):
-    return [{"id": r.get("id"), "kind": r.get("kind"), "name": r.get("name"), "version": r.get("version"),
-             "status": r.get("status"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
-             "user": r.get("user"), "votes": len(r.get("votes") or []),
-             "voted_by_me": d.get("me") in (r.get("votes") or []), "note": r.get("note"),
-             **({"available_versions": r.get("available_versions") or []} if kind == "db" else {})}
-            for r in d.get("requests", []) if r.get("kind") == kind and q in str(r.get("name") or "").lower()]
 
 
 def _db_rank(q, x):
@@ -997,54 +1083,6 @@ def _db_rank(q, x):
     vr = _rank(q, [], [x.get("version")])
     r = nr if nr < 9 else (10 + ar[0][0] if matched else (20 + vr if vr < 9 else 99))
     return r, (matched if nr >= 9 else None)
-
-
-def cmd_software_request(cfg, kind, name, version, source, reason, yes):
-    draft = {"kind": kind, "name": (name or "").strip()[:80], "version": (version or "").strip()[:40],
-             "source": (source or "").strip()[:200], "reason": (reason or "").strip()[:600]}
-    if not draft["name"]:
-        return 2, {"error": "名称不能为空"}
-    if not yes:
-        return 0, {"draft": draft, "submitted": False,
-                   "note": "这是草稿，还没提交。给用户看过、用户同意后加 --yes 再跑一次（申请全组可见）。"}
-    if _on_server(cfg):
-        return 3, {"error": "现在是在服务器上运行：面板按来源设备认人，从服务器发出去会认错人。"
-                            "请让用户在网页上提交：" + panel_url(cfg, "/software#request")}
-    res = _http_json(panel_url(cfg, "/api/software/request"), draft)
-    return (0 if res.get("ok") else 1), {"submitted": res.get("ok", False), "draft": draft, "result": res,
-                                         "page": panel_url(cfg, "/software#request")}
-
-
-def cmd_software_vote(cfg, rid, yes, kind="tool"):
-    """只加票、不撤票：面板的 +1 是开关，已经投过再发一次就撤掉了，所以先查一次。撤票让用户在网页上点。"""
-    if _on_server(cfg):
-        return 3, {"error": "现在是在服务器上运行，面板会认错人。请让用户在网页上点「我也需要」。",
-                   "page": panel_url(cfg, "/software#request")}
-    try:
-        d = _http_json(panel_url(cfg, "/api/software"))
-    except Exception as e:
-        return 1, {"error": f"面板连不上（{panel_url(cfg)}）：{e}", "hint": "确认这台电脑连着 Tailscale"}
-    r = next((x for x in d.get("requests", []) if x.get("id") == rid), None)
-    if not r:
-        return 2, {"error": "没有第 %d 条申请" % rid}
-    if r.get("kind") != kind:
-        return 2, {"error": "第 %d 条是%s申请：用 %s vote %d" % (
-            rid, "数据库" if r.get("kind") == "db" else "工具", "database" if r.get("kind") == "db" else "software", rid)}
-    me, voters = d.get("me"), r.get("votes") or []
-    info = {"request": rid, "name": r.get("name"), "status_cn": REQ_STATUS_CN.get(r.get("status"), r.get("status")),
-            "user": r.get("user"), "votes": len(voters)}
-    if me is None:
-        return 3, {**info, "error": "面板没认出这台电脑（没登记或不在 Tailscale 上），不能 +1。"}
-    if r.get("user") == me:
-        return 2, {**info, "error": "这是你自己的申请，不能 +1。"}
-    if me in voters:
-        return 0, {**info, "submitted": False, "already_voted": True,
-                   "note": "你已经 +1 过了，不用再投（再发一次会撤销，所以没发）。"}
-    if not yes:
-        return 0, {**info, "submitted": False, "note": "给第 %d 条申请 +1。用户同意后加 --yes。" % rid}
-    res = _http_json(panel_url(cfg, "/api/software/vote"), {"id": rid})
-    ok = bool(res.get("ok"))
-    return (0 if ok else 1), {**info, "votes": len(voters) + ok, "submitted": ok, "result": res}
 
 
 # ----------------------------- cleanup: 清理和公共区重复的个人安装 -----------------------------
@@ -1226,7 +1264,7 @@ def cmd_project(cfg, argv, timeout=180):
 # ----------------------------- database: 公共数据库 -----------------------------
 # 查（面板 /api/software）、自己装进 NAS 公共库（服务器的 db-install：plan 预演 → 用户同意 → submit）、
 # 项目的数据库清单 databases.lock.json（db_project.py：项目在本机就在本机扫，否则送到服务器上扫）、
-# 个人副本的比对与收编、申请。会写东西的默认只预演。
+# 个人副本的比对与收编。会写东西的默认只预演。
 
 DB_ROOT = "/opt/bio/db"
 DB_INSTALL = "/usr/local/bin/db-install"
@@ -1355,10 +1393,8 @@ def db_facts(cfg, pairs=(), fingerprints=False):
 
 
 def _install_method(x):
-    via, who = x.get("via") or "admin", x.get("installed_by") or x.get("added_by") or ""
-    if via == "request" and x.get("request_id"):
-        return "申请 #%s" % x["request_id"] + ("（%s）" % who if who else "")
-    if via == "self":
+    if x.get("via") == "self":
+        who = x.get("installed_by") or x.get("added_by") or ""
         return "自助（%s）" % who if who else "自助"
     return "管理员直接装"
 
@@ -1408,8 +1444,9 @@ def cmd_db_find(cfg, name):
             v = {"version": x.get("version"), "path": x.get("path") or "%s/%s/%s" % (DB_ROOT, nm, x.get("version")),
                  "current": bool(x.get("current")), "location": loc, "location_cn": LOCATION_CN.get(loc, loc),
                  "size": _size(_row_bytes(x)), "size_bytes": _row_bytes(x),
-                 "install_method": _install_method(x), "via": x.get("via") or "admin",
-                 "request_id": x.get("request_id") or None, "installed_by": x.get("installed_by") or x.get("added_by") or None,
+                 "install_method": _install_method(x),
+                 "via": "admin" if x.get("via") in ("request", "registered") else x.get("via") or "admin",
+                 "installed_by": x.get("installed_by") or x.get("added_by") or None,
                  "verification": x.get("verification") or None,
                  "verification_cn": VERIFICATION_CN.get(x.get("verification") or "", ""),
                  "compat": x.get("compat") or None, "compat_cn": COMPAT_CN.get(x.get("compat") or "", ""),
@@ -1437,11 +1474,11 @@ def cmd_db_find(cfg, name):
         dbs.append({"name": nm, "current_version": cur, "aliases": (g["rows"][0].get("aliases") or ""),
                     "matched_alias": g["matched_alias"], "versions": versions})
     names = {n.lower() for n in groups}
-    installs = [dict(i, status_cn=INSTALL_STATUS_CN.get(i.get("status"), i.get("status")))
+    installs = [_db_status_view(i)
                 for i in d.get("db_installs") or []
                 if (q in str(i.get("name") or "").lower() or str(i.get("name") or "").lower() in names)
                 and i.get("status") in ("running", "failed")]
-    out = {"query": name, "me": d.get("me"), "dbs": dbs, "requests": _requests(d, q, "db")[:10],
+    out = {"query": name, "me": d.get("me"), "dbs": dbs,
            "installs": installs[:10], "page": panel_url(cfg, "/software"),
            "local_free_gb": _gb(free) if free is not None else None}
     if dbs:
@@ -1449,16 +1486,24 @@ def cmd_db_find(cfg, name):
                         "会随公共区更新而变，只在第一次挑版本时用。项目用到的库用 database lock 写进 databases.lock.json。"
                         "NAS 上的库用 gen-sbatch --stage <库路径> 先取进本地缓存。" % DB_ROOT)
     else:
-        out["next"] = ("公共区没有：用户可以自己装进 NAS 公共库（database plan <名> --url <官方下载地址> 预演），"
-                       "也可以申请（database request --name <名>）。先看 requests 里是不是已经有人申请过。")
-    if d.get("me") is None:
-        out["warning"] = "面板没认出这台电脑（没登记或不在 Tailscale 上）：能查，但不能提交申请。"
+        out["next"] = ("公共区没有时可自己装进 NAS 公共库。用 database plan <名> --url <官方下载地址> 看计划，"
+                       "确认后用 database install。")
     return 0, out
 
 
-def _install_argv(name, version, urls, recipe, request):
+def _db_status_view(record):
+    item = dict(record, status_cn=INSTALL_STATUS_CN.get(record.get("status"), record.get("status")))
+    legacy_id = item.pop("request_id", None)
+    if item.get("via") in ("request", "registered") or (not item.get("via") and legacy_id):
+        item["via"] = "admin"
+        if "install_method" in item:
+            item["install_method"] = _install_method(item)
+    return item
+
+
+def _install_argv(name, version, urls, recipe):
     return ([name] + (["--version", version] if version else []) + ["--url"] + list(urls) +
-            (["--recipe", recipe] if recipe else []) + (["--request", str(request)] if request else []))
+            (["--recipe", recipe] if recipe else []))
 
 
 def _plan_view(p):
@@ -1469,7 +1514,7 @@ def _plan_view(p):
               "expanded_size": _size(f.get("bytes") if f.get("expanded_bytes") is None else f.get("expanded_bytes")),
               "checksums": ["%s（%s）" % (c.get("algorithm"), c.get("source")) for c in f.get("checksums") or []]}
              for f in p.get("files") or []]
-    out = {"name": name, "version": version, "recipe": p.get("recipe"), "request": spec.get("request_id") or None,
+    out = {"name": name, "version": version, "recipe": p.get("recipe"),
            "files": files, "plan_sha256": p.get("plan_sha256"),
            "verification": "official" if files and all(f["checksums"] for f in files) else "self",
            "nas": {"free": _size(nas.get("free_bytes")), "estimate": _size(nas.get("estimate_bytes")),
@@ -1497,29 +1542,53 @@ def _plan_view(p):
     if out["verification"] == "self":
         out["verification_note"] = "有文件在上游找不到校验值：只能核对下载完整，登记为 verification=self"
     # 用服务器校验过的 spec 拼命令：版本、配方都写明，submit 重算出的 plan_sha256 不变
-    full = ["database", "install"] + _install_argv(name, version, spec.get("urls") or [], spec.get("recipe"),
-                                                   spec.get("request_id")) + ["--expected-plan", p.get("plan_sha256") or "", "--yes"]
+    full = ["database", "install"] + _install_argv(name, version, spec.get("urls") or [], spec.get("recipe")) + ["--expected-plan", p.get("plan_sha256") or "", "--yes"]
     out["install_command"] = " ".join(shlex.quote(a) for a in full)
     out["next"] = ("把计划给用户看（库名、版本、文件和大小、校验值来源、NAS 余量%s）；用户明确同意后运行 install_command。"
                    "安装以用户的名义交一个 Slurm 作业（2 核 4G）下载、核对、登记" % ("、要不要另装" if out.get("ask_user") else ""))
     return out
 
 
-def cmd_db_plan(cfg, name, version, urls, recipe, request):
-    argv = _install_argv(name, version, urls, recipe, request)
+def _db_plan_error(cfg, error):
+    msg = str(error)
+    lower = msg.lower()
+    result = {"error": "数据库预演失败：" + msg}
+    storage_error = re.search(
+        r"host is down|transport endpoint is not connected|stale file handle|no route to host|"
+        r"network is unreachable|\berrno\s+(?:101|107|112|113|116)\b", lower)
+    if storage_error and not lower.startswith("ssh 没成功") and "://" not in msg:
+        # db-install 扫描 NAS 暂存区时可能只报相对路径 'db'。无路径的网络错误也可能来自上游。
+        db_path = re.search(r"""['"]db(?:/|['"])""", lower)
+        if db_path or _nas_status(cfg)["online"] is False:
+            return {"error": "NAS 现在连不上。公共库放在 NAS 上。",
+                    "detail": msg, "hint": "请告诉管理员，等 NAS 恢复后再运行 database plan。"}
+    hints = {
+        "cannot infer a unique version": "从官方下载页确认版本，再显式传 --version。",
+        "subscription database is not accepted": "公共库只收可公开下载的库。KEGG 这类订阅库不收。",
+        "only public https urls are allowed": "请用官网下载页提供的公网 HTTPS 下载地址。",
+        "non-public address": "请用官网下载页提供的公网 HTTPS 下载地址。",
+    }
+    for reason, hint in hints.items():
+        if reason in lower:
+            result["hint"] = hint
+            break
+    return result
+
+
+def cmd_db_plan(cfg, name, version, urls, recipe):
+    argv = _install_argv(name, version, urls, recipe)
     rc, p = _db_install(cfg, ["plan"] + argv)
     if rc:
-        return rc, {"error": "服务器没有接受这次安装：" + str(p.get("error")),
-                    "hint": "版本推断不了就加 --version；KEGG 这类要订阅的库不收；只接受公网 https 地址"}
+        return rc, _db_plan_error(cfg, p.get("error"))
     return 0, _plan_view(p)
 
 
-def cmd_db_install(cfg, name, version, urls, recipe, request, expected, yes):
-    argv = _install_argv(name, version, urls, recipe, request)
+def cmd_db_install(cfg, name, version, urls, recipe, expected, yes):
+    argv = _install_argv(name, version, urls, recipe)
     if not yes:
         rc, p = _db_install(cfg, ["plan"] + argv)
         if rc:
-            return rc, {"error": "服务器没有接受这次安装：" + str(p.get("error"))}
+            return rc, _db_plan_error(cfg, p.get("error"))
         view = _plan_view(p)
         view.update(executed=False, plan_matches=(p.get("plan_sha256") == expected) if expected else None)
         return 0, view
@@ -1551,7 +1620,7 @@ def cmd_db_status(cfg, job_id):
         return rc, d
     jobs = []
     for j in d.get("jobs") or []:
-        j = dict(j, status_cn=INSTALL_STATUS_CN.get(j.get("status"), j.get("status")), mine=j.get("user") in (None, cfg.get("user")))
+        j = dict(_db_status_view(j), mine=j.get("user") in (None, cfg.get("user")))
         if j.get("status") == "success" and j.get("current_switched"):
             j["note"] = "已经设成这个库的 current"
         jobs.append(j)
@@ -1709,9 +1778,9 @@ def cmd_database(cfg, a):
     if c == "find":
         return cmd_db_find(cfg, a.name)
     if c == "plan":
-        return cmd_db_plan(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe, a.request)
+        return cmd_db_plan(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe)
     if c == "install":
-        return cmd_db_install(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe, a.request,
+        return cmd_db_install(cfg, a.name, a.version, [u for g in a.url for u in g], a.recipe,
                               a.expected_plan, a.yes)
     if c == "status":
         return cmd_db_status(cfg, a.id)
@@ -1723,9 +1792,6 @@ def cmd_database(cfg, a):
         return cmd_db_tidy(cfg, a.min_gb)
     if c in ("scan", "check", "lock", "pin"):
         return cmd_db_project(cfg, c, a.path, getattr(a, "db", []), getattr(a, "yes", False), getattr(a, "plan_id", None))
-    if c == "request":
-        return cmd_software_request(cfg, "db", a.name, a.version, a.source, a.reason, a.yes)
-    return cmd_software_vote(cfg, a.id, a.yes, kind="db")
 
 
 # ----------------------------- 项目环境（env-store） -----------------------------
@@ -1819,29 +1885,39 @@ def env_plan_summary(plan):
 
 _ENV_INIT = r'''
 import json, os, subprocess, sys
-p = json.load(sys.stdin)
-manifest = os.path.join(p['project'], 'pixi.toml')
-exists = os.path.lexists(manifest)
-result = {'schema': 1, 'status': 'preview', 'project': p['project'], 'exists': exists,
-          'written': False, 'lock_run': False}
-if not exists:
-    result['content'] = p['content']
-if p['yes']:
+def init(p):
+    project = p['project']
+    manifest = os.path.join(project, 'pixi.toml')
+    project_exists = os.path.isdir(project)
+    exists = project_exists and os.path.lexists(manifest)
+    result = {'schema': 1, 'status': 'preview', 'project': project, 'project_exists': project_exists,
+              'exists': exists, 'manifest_exists': exists, 'written': False, 'lock_run': False}
+    if not project_exists:
+        return dict(result, status='error', error='Spark 项目目录不存在或不可用：' + project)
+    if exists and not os.path.isfile(manifest):
+        return dict(result, status='error', error='pixi.toml 路径不是可用文件：' + manifest)
     if not exists:
-        try:
-            with open(manifest, 'x', encoding='utf-8', newline='\n') as f:
-                f.write(p['content'])
-            result['written'] = True
-        except FileExistsError:
-            result['exists'] = True
+        result['content'] = p['content']
+    if not p['yes']:
+        return result
     try:
-        proc = subprocess.run(['/usr/local/bin/pixi', 'lock'], cwd=p['project'],
+        if not exists:
+            try:
+                with open(manifest, 'x', encoding='utf-8', newline='\n') as f:
+                    f.write(p['content'])
+                result.update(written=True, manifest_exists=True)
+            except FileExistsError:
+                result.update(exists=True, manifest_exists=True)
+        proc = subprocess.run(['/usr/local/bin/pixi', 'lock'], cwd=project,
                               capture_output=True, text=True)
         result.update(status='locked' if proc.returncode == 0 else 'error', lock_run=True,
                       lock={'returncode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr})
     except OSError as e:
-        result.update(status='error', error=str(e))
-print(json.dumps(result, ensure_ascii=False))
+        project_exists = os.path.isdir(project)
+        result.update(status='error', error=str(e), project_exists=project_exists,
+                      manifest_exists=project_exists and os.path.lexists(manifest))
+    return result
+print(json.dumps(init(json.load(sys.stdin)), ensure_ascii=False))
 '''
 
 
@@ -1889,7 +1965,7 @@ def cmd_env_adopt(cfg, a):
         missing = [name for name, key in (("pixi.toml", "manifest_exists"), ("pixi.lock", "lock_exists"))
                    if not inspection[key]]
         return 1, {**inspection, "summary": {"note": "缺少 " + "、".join(missing) + "，未收编"},
-                   "submitted": False, "next": "在服务器项目目录先用 pixi lock 生成 v7 锁；"
+                   "submitted": False, "next": "在服务器项目目录先用 /usr/local/bin/pixi lock 生成 v7 锁；"
                    "没有 pixi.toml 时先用 env init --dir <项目> 初始化，确认后加 --yes。"}
     rc, result = cmd_env_build(cfg, a, project=project, adopt=True)
     result["project_environment"] = local
@@ -1897,13 +1973,13 @@ def cmd_env_adopt(cfg, a):
         result.setdefault("warnings", []).append(local["warning"])
     if local["exists"]:
         fp = result.get("plan", {}).get("fp") or "<fp>"
-        result["next"] += (" 待锁获准且库中环境 ready 后，按顺序："
+        result["next"] += (" 待锁获准且 env-store 里的环境 ready 后，按顺序："
                            "1. 用 gen-sbatch --env %s -e %s 重新生成作业脚本，或将现有脚本的环境激活改为 "
                            "ENV1=$(env-store use %s) || exit 3 加 source \"$ENV1\"；"
                            "2. 跑一次作业，确认结果没有变化；"
                            "3. 再运行 cleanup scan --path %s，用 cleanup 清掉该项目环境。"
-                           "spark-cleanup 会识别与项目环境库完全重复的包，删除前逐个先问；"
-                           "pixi run 以后需要时会自己重装。" %
+                           "spark-cleanup 会识别和 env-store 里同一份环境完全重复的包，删除前逐个先问；"
+                           "/usr/local/bin/pixi run 以后需要时会自己重装。" %
                            (shlex.quote(project), shlex.quote(a.environment), shlex.quote(fp), shlex.quote(local["path"])))
     else:
         result["next"] += " 项目中不存在所选 .pixi/envs 环境，无需清理。"
@@ -1928,19 +2004,25 @@ def cmd_env(cfg, a):
             result = json.loads(raw)
         except ValueError:
             die("无法解析环境初始化结果：" + raw.strip()[:300])
-        result["next"] = ("已有 pixi.toml，绝不覆盖。" if result.get("exists") else "最小工作区如 content 所示。") + \
-            "在服务器项目目录用 pixi add <包> 编辑依赖；确认后 env init --dir <目录> --yes 执行 pixi lock。"
+        if not result["project_exists"]:
+            result["next"] = "先确认 Spark 项目路径，选一个已存在的目录，或确认项目落点并建好目录后重新运行 env init。"
+        elif env_error(result):
+            result["next"] = "先查看 error 或 lock.stderr，修正配方路径或锁定错误后重新运行 env init。"
+        else:
+            edit = "在 Spark 项目目录用 /usr/local/bin/pixi add --no-install <包> 更新配方和锁。" + SMOKE_TEST_STEP
+            path = shlex.quote(project)
+            if not result["manifest_exists"]:
+                name_opt = " --name " + shlex.quote(a.name) if a.name else ""
+                edit = f"确认后运行 env init --dir {path}{name_opt} --yes，写出配方并生成初始锁。随后" + edit
+            result["next"] = edit + f"锁定成功后运行 env build --dir {path} 看构建计划。"
         return (1 if env_error(result) else 0), result
-    if c == "find":
-        result = env_call(cfg, ["find", a.package])
-        return (1 if env_error(result) else 0), {**result, "summary": "包查询：" + a.package}
     if c == "status":
         if a.dir:
             fp_result = env_current_fp(cfg, env_project(cfg, a.dir), a.environment)
             fp = fp_result["fp"]
         else:
-            fp = env_fp(a.fp) if a.fp else None
-        result = env_call(cfg, ["status"] + ([fp] if fp else []))
+            fp = env_fp(a.fp)
+        result = env_call(cfg, ["status", fp])
         state_cn = {"ready": "本地可用", "archived": "仅 NAS 存档", "building": "构建中",
                     "restoring": "取回中", "failed": "上次失败"}
         result = env_compact(result)
@@ -1955,19 +2037,19 @@ def cmd_env_build(cfg, a, project=None, adopt=False):
     plan = env_call(cfg, ["plan"] + argv)
     result = {"plan": plan, "summary": env_plan_summary(plan), "submitted": False}
     if env_error(plan) or not plan.get("allowed"):
-        result["next"] = ("按 rejections 修正 pixi.toml 并用 pixi lock 更新 v7 锁：仅允许指定 channel 和 wheel；"
+        result["next"] = ("按 rejections 修正 pixi.toml 并用 /usr/local/bin/pixi lock 更新 v7 锁：仅允许指定 channel 和 wheel；"
                           "移除 git、sdist 和本地路径依赖，再运行 env build。")
         return 1, result
     fp = env_fp(plan.get("fp"))
     status = env_call(cfg, ["status", fp])
     result["environment_status"] = env_compact(status)
     if adopt and not env_error(status) and status.get("state") == "ready":
-        result["summary"]["note"] = "已在库中，本地可用，未提交构建"
+        result["summary"]["note"] = "env-store 里已有，本地可用，未提交构建"
         result["next"] = "可用 gen-sbatch --env 生成引用此 fp 的作业脚本。"
         return 0, result
     if status.get("state") == "archived" or (status.get("state") == "failed" and env_has_archive(status)):
         if adopt:
-            result["summary"]["note"] = "已在库中，有存档，未提交构建"
+            result["summary"]["note"] = "env-store 里已有，有存档，未提交构建"
         result["next"] = env_restore_hint(fp)
         return 0, result
     # 不存在的 fp 会返回非零；仍由 submit 原子地复核存在性和存档状态。
@@ -1984,10 +2066,10 @@ def cmd_env_build(cfg, a, project=None, adopt=False):
                       next="用 env status 查询环境状态；ready 后可以生成作业脚本。")
         if built.get("status") == "archived":
             if adopt:
-                result["summary"]["note"] = "已在库中，有存档，未提交构建"
+                result["summary"]["note"] = "env-store 里已有，有存档，未提交构建"
             result["next"] = env_restore_hint(fp)
         elif adopt and built.get("status") in ("exists", "ready") and not result["submitted"]:
-            result["summary"]["note"] = "已在库中，未提交构建"
+            result["summary"]["note"] = "env-store 里已有，未提交构建"
         elif env_error(built):
             result["next"] = built.get("next", "构建提交失败，请查看 result。")
         return (1 if env_error(built) else 0), result
@@ -2110,6 +2192,58 @@ def disk_hint(cfg):
         res["hint"] = ("本地盘只剩 %d GB，低于 /ai.md 的 300 GB 线：可以 /spark-advisor cleanup 腾空间"
                        "（你的 home 占 %s GB）" % (res["local_free_gb"], res["my_home_gb"]))
     return res
+
+
+_NAS_PROBE = r"""
+import os, subprocess, sys
+
+sys.path.insert(0, '/opt/bio/sbin')
+try:
+    from db_install_lib import Paths
+    path = str(Paths().nas)
+except Exception:
+    print('config_error')
+    sys.exit(0)
+if not os.path.isabs(path) or any(c in path for c in '\r\n\0'):
+    print('invalid_path')
+    sys.exit(0)
+
+proc = subprocess.Popen(['stat', '-t', os.path.join(path, '.')], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    rc = proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    # A blocked filesystem syscall may not see SIGKILL until the kernel returns.
+    # Do not wait again or leave the child holding SSH's output pipes.
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    print('timeout')
+else:
+    if rc:
+        print('unreachable')
+    else:
+        with open('/proc/self/mountinfo', encoding='utf-8') as stream:
+            mounted = any(line.split()[4] == path and line.split(' - ', 1)[1].split()[0] == 'cifs'
+                          for line in stream)
+        print('online' if mounted else 'unmounted')
+"""
+
+
+def _nas_status(cfg):
+    rc, out, err = ssh_try(cfg, "/usr/bin/python3 -I -c " + shlex.quote(_NAS_PROBE), timeout=8)
+    state = out.strip()
+    notes = {"online": "NAS 在线。", "unreachable": "NAS 路径无法读取。",
+             "unmounted": "NAS 未挂载。", "timeout": "NAS 路径探测超过 5 秒。"}
+    if rc or state not in notes:
+        config_notes = {"config_error": "无法从服务器 db-install 配置读取 NAS 路径。",
+                        "invalid_path": "服务器 db-install 配置未返回有效的绝对 NAS 路径。"}
+        if not rc and state in config_notes:
+            return {"online": None, "state": "unknown", "note": config_notes[state]}
+        return {"online": None, "state": "unknown", "note": "未取得 NAS 探测结果。",
+                "detail": (err or out).strip()[:200]}
+    return {"online": state == "online", "state": state, "note": notes[state]}
 
 
 def cmd_status(cfg):
@@ -3239,34 +3373,34 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    # Match the retired commands before argparse and before loading config.
+    if len(sys.argv) >= 3 and sys.argv[1] in ("software", "database") and sys.argv[2] in ("request", "vote"):
+        steps = (["software find <工具名>", "env init --dir <项目目录>", "env build --dir <项目目录>",
+                  "gen-sbatch --env <项目目录>"] if sys.argv[1] == "software"
+                 else ["database find <库名>", "database plan <库名> --url <官方下载地址>",
+                       "database install <计划中的参数> --expected-plan <plan_sha256> --yes"])
+        emit({"ok": False, "error": "工具和数据库改为自助安装。先查询公共资源，缺工具就在项目里加依赖，缺数据库就装进 NAS 公共库。",
+              "next": steps})
+        sys.exit(2)
+
     ap = argparse.ArgumentParser(description="spark-advisor engine (facts + baseline; AI does final judgment)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")
     sub.add_parser("rules")
 
-    # 公共工具：查、申请、+1。提交类动作不带 --yes 只出草稿
+    # 公共工具：查共享工具和项目环境可用的构建
     sw = sub.add_parser("software")
     swsub = sw.add_subparsers(dest="swcmd", required=True)
     swf = swsub.add_parser("find")
     swf.add_argument("name")
-    swf.add_argument("--arch", action="store_true", help="同时查 bioconda / conda-forge 有没有 ARM 构建")
-    swr = swsub.add_parser("request")
-    swr.add_argument("--name", required=True)
-    swr.add_argument("--version", default="")
-    swr.add_argument("--source", default="")
-    swr.add_argument("--reason", default="")
-    swr.add_argument("--yes", action="store_true", help="真的提交（全组可见）。不带只出草稿")
-    swv = swsub.add_parser("vote")
-    swv.add_argument("id", type=int)
-    swv.add_argument("--yes", action="store_true")
+    swf.add_argument("--arch", action="store_true", help="同时查 Conda 的 ARM64 / noarch 构建，各渠道确认缺构建时查 PyPI wheel")
 
-    # 公共数据库：查、自己装进 NAS 公共库、项目锁版本、个人副本、申请。会写东西的不带 --yes 只预演
+    # 公共数据库：查、自己装进 NAS 公共库、项目锁版本、个人副本。会写东西的不带 --yes 只预演
     db = sub.add_parser("database")
     dbsub = db.add_subparsers(dest="dbcmd", required=True)
     dbp = {}
-    for nm in ("find", "plan", "install", "status", "adopt", "compare", "tidy", "scan", "check", "lock", "pin",
-               "request", "vote"):
+    for nm in ("find", "plan", "install", "status", "adopt", "compare", "tidy", "scan", "check", "lock", "pin"):
         dbp[nm] = dbsub.add_parser(nm)
         dbp[nm].add_argument("--json", action="store_true", help="输出总是 JSON；写上也行")
     dbp["find"].add_argument("name")
@@ -3275,7 +3409,6 @@ def main():
         dbp[nm].add_argument("--version", default="", help="不写时只从网址里唯一明确的版本号推断")
         dbp[nm].add_argument("--url", action="append", nargs="+", required=True, help="官方下载地址（公网 https），可写多个")
         dbp[nm].add_argument("--recipe", choices=RECIPES, default=None, help="内置配方；不写按库名选")
-        dbp[nm].add_argument("--request", default="", help="对应面板上的申请编号")
     dbp["install"].add_argument("--expected-plan", default=None, help="database plan 给出的 plan_sha256")
     dbp["install"].add_argument("--yes", action="store_true", help="真的提交安装作业。不带只重新预演")
     dbp["status"].add_argument("id", nargs="?")
@@ -3299,17 +3432,10 @@ def main():
         dbp[nm].add_argument("--db", action="append", default=[], metavar="名=版本", help="指定锁哪个版本，可重复")
         dbp[nm].add_argument("--yes", action="store_true")
         dbp[nm].add_argument("--plan-id", default=None)
-    dbp["request"].add_argument("--name", required=True)
-    dbp["request"].add_argument("--version", default="")
-    dbp["request"].add_argument("--source", default="")
-    dbp["request"].add_argument("--reason", default="")
-    dbp["request"].add_argument("--yes", action="store_true", help="真的提交（全组可见）。不带只出草稿")
-    dbp["vote"].add_argument("id", type=int)
-    dbp["vote"].add_argument("--yes", action="store_true")
 
-    ep = sub.add_parser("env", help="项目只读环境：init/build/adopt/status/find/check")
+    ep = sub.add_parser("env", help="项目只读环境：init/build/adopt/status/check")
     eps = ep.add_subparsers(dest="envcmd", required=True)
-    for nm in ("init", "build", "adopt", "status", "find", "check"):
+    for nm in ("init", "build", "adopt", "status", "check"):
         parser = eps.add_parser(nm)
         parser.add_argument("--json", action="store_true", help="输出总是 JSON；写上也行")
         if nm in ("init", "build", "adopt", "status"):
@@ -3324,8 +3450,6 @@ def main():
             parser.add_argument("--wait", action="store_true")
         elif nm == "status":
             parser.add_argument("fp", nargs="?")
-        elif nm == "find":
-            parser.add_argument("package")
         else:
             parser.add_argument("script")
 
@@ -3507,6 +3631,8 @@ def main():
 
     if args.cmd == "env" and args.envcmd == "status" and args.fp and args.dir:
         ap.error("env status 的 fp 和 --dir 不能同时指定")
+    if args.cmd == "env" and args.envcmd == "status" and not (args.fp or args.dir):
+        ap.error("env status 要指定 --dir <项目> 或 fp")
     cfg = load_config()
     if args.cmd == "env":
         rc, payload = cmd_env(cfg, args)
@@ -3515,16 +3641,8 @@ def main():
     if args.cmd == "rules":
         return cmd_rules(cfg)
     if args.cmd == "software":
-        if args.swcmd == "find":
-            emit(cmd_software_find(cfg, args.name, args.arch))
-            return
-        if args.swcmd == "request":
-            rc, payload = cmd_software_request(cfg, "tool", args.name, args.version, args.source,
-                                               args.reason, args.yes)
-        else:
-            rc, payload = cmd_software_vote(cfg, args.id, args.yes)
-        emit(payload)
-        sys.exit(rc)
+        emit(cmd_software_find(cfg, args.name, args.arch))
+        return
     if args.cmd == "database":
         rc, payload = cmd_database(cfg, args)
         emit(payload)
@@ -3579,6 +3697,7 @@ def main():
     if args.cmd == "status":
         out = cmd_status(cfg)
         out["disk"] = disk_hint(cfg)
+        out["nas"] = _nas_status(cfg)
         emit(out)
     elif args.cmd == "history":
         emit(cmd_history(cfg, args.user, args.tool, args.days))

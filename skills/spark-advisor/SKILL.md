@@ -1,15 +1,15 @@
 ---
 name: spark-advisor
-description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共软件（查有没有装、申请安装：software）；公共数据库（database）：查有哪些版本、自己把库装进 NAS 公共库、申请、NAS 上的库取到本地缓存、给项目锁定数据库版本（databases.lock.json）、整理 home 里的数据库（tidy：找出所有副本，比对后删掉或放进公共库）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、申请装软件、缺数据库、自己装数据库、下载数据库到公共区、NAS 上的数据库、把库取到本地、数据库版本、锁定数据库版本、脚本用的哪个版本的库、我自己下的库放进公共区、整理我 home 里的数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
+description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地还是服务器跑，再定 --mem/--gres/--time 并提交，避免统一内存 OOM；要反复改、反复跑的调试循环开交互式会话（/spark-advisor debug）。也管公共工具（software 查有没有，缺的用 env 自建项目环境）；公共数据库（database）：查有哪些版本、自己把库装进 NAS 公共库、NAS 上的库取到本地缓存、给项目锁定数据库版本（databases.lock.json）、整理 home 里的数据库（tidy：找出所有副本，比对后删掉或放进公共库）；腾空间（cleanup）：智能清理和公共区重复的环境、把冷数据搬到 NAS 再搬回来、记个人搬运清单；服务器上的项目（project）：代码推了没、推到 Gitea；spark 排不上时把小任务放到 Google Colab 免费算力（colab）。触发：/spark-advisor、把作业交到 spark/服务器、这活本地还是服务器跑、要多少内存/显存、服务器忙不忙、该排队还是能跑、推荐 slurm 参数、在服务器上调试、开个调试会话、每跑一次都要重新排队、服务器上有没有装、缺工具、装个软件、pip 装不上、缺数据库、自己装数据库、下载数据库到公共区、NAS 上的数据库、把库取到本地、数据库版本、锁定数据库版本、脚本用的哪个版本的库、我自己下的库放进公共区、整理我 home 里的数据库、重复安装、清理环境、磁盘不够了、服务器上腾空间、冷数据、搬到 NAS、从 NAS 搬回来、服务器上的代码推了没、服务器上用的数据库版本、Colab、用 Google 云跑、免费 GPU、spark 排不上、绑定 Google 账号、绑定云盘、个人云盘。
 ---
 
 # spark-advisor — 共享 GPU 服务器顾问
 
-> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py`（纯标准库，封装好 SSH+slurm、只返回干净 JSON（`rules` 例外：原样返回 `/ai.md` 的 Markdown）——**别自己现攒 ssh/slurm 命令**）。例外是只读的查看：读文件、`ls`、`du`、`grep`、`squeue` / `sacct`、git 的只读命令（`status` / `log` / `diff`，前面加 `GIT_OPTIONAL_LOCKS=0`，免得回写索引）可以直接 ssh，先看体量再读，别把大文件整个拉回来；会改东西的一律走引擎。`spark-colab` 是例外：它本身就是服务器上封装好的公共命令，直接在服务器上运行。
+> 在共享 GPU 服务器（Slurm/ARM64）上正确跑活、管好空间和代码。引擎 `scripts/advise.py` 用标准库封装 SSH 和 Slurm，默认返回 JSON。`rules` 原样返回 `/ai.md` 的 Markdown。读文件、`ls`、`du`、`grep`、`squeue`、`sacct` 和 git 的只读命令可在有直连权限的机器上用 SSH 查看。查看 git 时加 `GIT_OPTIONAL_LOCKS=0`，先看文件体量再读。写操作走引擎，`spark-colab` 用服务器封装的公共命令。
 
 ## ★ 先读服务器规则：`advise.py rules`（唯一权威来源）
 
-出任何推荐、写 sbatch、查软件、清理或搬数据之前，先跑 `python scripts/advise.py rules`（只查、只推服务器上的代码不用）。它读服务器面板的 `/ai.md`：管理员维护的使用规则、共享软件（`/opt/bio/bin`）与共享数据库（`/opt/bio/db`）、sbatch 模板和**此刻**的空闲资源。
+出推荐、写 sbatch、查询软件或数据库、清理或搬数据之前，先跑 `python scripts/advise.py rules`。仅查询服务器代码状态或仅推送服务器代码时，可以跳过这一步。它读服务器面板的 `/ai.md`，其中有管理员维护的使用规则、共享软件（`/opt/bio/bin`）、共享数据库（`/opt/bio/db`）、sbatch 模板和**此刻**的空闲资源。
 
 - 与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
 - 生成 sbatch 时，临时查看优先用共享工具箱；正式分析需要复现时用 `env-store` 项目环境（见 `references/project-envs.md`）。数据库优先用共享版本，不要另下一份数据库。数据库写带版本号的路径（`$CHECKVDB` 这类默认变量指向 current，会变），见 `references/database.md`。
@@ -19,6 +19,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 
 - **GPU / 重活只走 Slurm**（`gen-sbatch → submit` 或调试会话），**绝不** `ssh <server> 'python xxx.py'` 裸跑，哪怕用户说"就跑一下"：裸跑不留痕、逃过 memguard、抢显存（详见 `references/server-facts.md`）。轻活（改代码、几秒的小脚本、`squeue`/`nvidia-smi`）可以直接跑；拿不准就走队列。
 - **总闸：下面每一样都先把计划给用户看、用户明确同意才做。** 提交作业；用 Colab 跑任务（数据会传给 Google）；取消作业；开调试会话；任何带 `--yes` 的命令（删环境、搬到 NAS、搬回、推代码、写 `.gitignore`）；改用户的脚本；改服务器上的 git 配置。叫出这个 skill、说「帮我清理 / 腾空间」只是开始商量，不算同意；「能删的都删」这类笼统的话也不算，要逐项点名。
+- 把用户数据放进共享盘 `/mnt/gdrive/share` 前，先征得用户同意。数据会传到 Google，Spark 上的用户都能改名或删除共享盘中的文件。
 - **作业在跑但没进度，禁止直接 `scancel`**：对冻结的作业 scancel 会让它永久卡住、不还内存。先 `wait <id>` 或 `status` 判断；冻结的用 `cancel-frozen <id>`（先不带 `--yes` 看计划）：返回 0 = 退干净；30 = 请求发了但资源没确认释放（**不算成功**）；31 = 这条命令不适用（没有这个作业、已结束、在排队、没冻结或暂时判断不了），照 `note` 做；32 = 这个账号没权限，请用户找管理员；33 = 只检查了、没执行（没带 `--yes`）。细节读 `references/frozen-jobs.md`。没冻结、确认是用户自己的作业，用户点头后可以直接 `scancel <id>`。
 - **`wait` 返回码**：0 正常结束；10 跑完但退出码非零；**11 被冻结（别 scancel）**；12 / 13 被取消 / 失败；20 监控自己超时（作业状态未知）；21 / 255 查询失败（**别当成完成**）；22 没有这个作业号（多半写错了）。作业从 `squeue` 消失不等于成功。调用时带 `--max-wait`（按预计时长给）：不带就一直等，程序自己卡死、没被冻结的作业会把它挂到作业时限。
 - **备份不是归档**：NAS 备份只能找回 1–2 个月内删掉的东西。要长期留，代码推 Gitea、数据搬进 NAS 归档（`references/storage.md`）。
@@ -33,11 +34,12 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 想自己调低作业优先级：不急、可以让别人先跑（用户自己说的） | 「提交作业」第 5 步加 `--low-priority` | `references/submit-flow.md`「降低优先级」 |
 | 要盯着结果改代码、反复跑；开个调试会话 | `debug-start` / `debug-log` / `debug-list` / `debug-end` | `references/debug-session.md` |
 | 作业不动了、卡住了、帮我 scancel | `wait` / `status` → `cancel-frozen` | `references/frozen-jobs.md` |
-| 服务器忙不忙 | `status`：人话汇总 GPU 空/忙、可调度内存、空闲核、队列；`disk.hint` 有内容就转达 | — |
+| 服务器忙不忙、NAS 通不通 | `status` 汇总 GPU、内存、空闲核、队列和 `nas.online`。`nas.note` 和 `disk.hint` 有内容就转达 | `references/database.md` |
 | spark 排不上、用 Colab 跑、用 Google 云跑 | `spark-colab`（在 spark 上运行） | `references/colab.md` |
 | 绑定 Google 账号、绑定云盘、Colab 授权过期 | `spark-colab login` | `references/colab-first-login.md` |
-| 服务器上有没有装某个工具、申请装软件 | `software find` / `request` / `vote` | `references/software.md` |
-| 有没有某个数据库、有哪些版本、缺数据库、自己装一个库、申请装库 | `database find` → `plan` → `install` / `request` | `references/database.md` |
+| 服务器上有没有装某个工具、缺工具、装个软件、pip 装不上、申请装软件、请管理员装工具 | 先读 `rules`。iPHoP 等有专门安排的工具按服务器规则处理。其余工具用 `software find` 查公共区，缺工具时走 `env init/build` → `gen-sbatch --env` | `references/software.md` → `references/project-envs.md` |
+| 有没有某个数据库、有哪些版本、缺数据库、自己装一个库、申请装库、请管理员装库 | `rules` → `database find` → `plan` → `install` | `references/database.md` |
+| 同时需要工具和数据库，例如 RGI 加 CARD | 先读 `rules`，分别用 `software find` 和 `database find` 查工具和库，并核对版本与格式 | `references/software.md` 和 `references/database.md` |
 | 要用 NAS 上的数据库、把库取到本地 | `gen-sbatch --stage` / `db-cache` | `references/database.md` |
 | 磁盘不够、服务器上腾空间 | 按顺序：`project check` → `cleanup scan` → `cleanup cold` | `references/storage.md` |
 | 这几个环境和公共区重复，能删吗 | `cleanup scan` + 智能判断 | `references/cleanup.md` |
@@ -47,8 +49,8 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 脚本用的是哪个版本的库、锁定数据库版本 | `database scan` / `check` / `lock` / `pin` | `references/database.md` |
 | 整理 home 里的数据库；我自己下了一份库：能不能放进公共区、能不能删 | `database tidy` → `compare` → `adopt` / `cleanup apply --db` | `references/database.md` |
 | 删掉的文件还能找回吗 | — | `references/storage.md` |
-| 正式分析要复现、项目环境、pixi 锁、环境构建或取回 | `env init/build/status/find/check` → `gen-sbatch --env` → `submit` | `references/project-envs.md` |
-| 已有 pixi.lock 的项目收编进公共环境库、清掉项目重复环境 | `env adopt --dir <项目> [-e ENV]` → 改作业脚本 → 验证一次 → `cleanup` | `references/project-envs.md`「收编已有项目」 |
+| 正式分析要复现、项目环境、pixi 锁、环境构建或取回 | `env init/build/status/check` → `gen-sbatch --env` → `submit` | `references/project-envs.md` |
+| 已有 pixi.lock 的项目建进 env-store、清掉项目里重复的环境 | `env adopt --dir <项目> [-e ENV]` → 改作业脚本 → 验证一次 → `cleanup` | `references/project-envs.md`「收编已有项目」 |
 | 某个包能不能在 aarch64 装 | — | `references/env-notes.md` |
 
 子命令只是让意图更确定，不是唯一入口：用户说人话时按上表判断即可。

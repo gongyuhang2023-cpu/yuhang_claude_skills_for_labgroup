@@ -28,6 +28,33 @@
 - `--action remove`：就地删，删前只存一份几 KB 的重建配方（history、`@EXPLICIT` 精确包清单、pip 包清单）。靠配方能重建环境，但环境里另外放的数据救不回来；NAS 备份也不备份 conda 环境。照配方或项目的 `environment.yml` 重建时，去掉 `r-base` 和 `r-*`：服务器不许用 conda 装 R，用公共的 R。
 - `--action archive --env`（只限 conda 环境）：先存配方，再把环境**原样**打包到 NAS、逐个文件核对，然后才删本地。出了问题 `cleanup restore P` 原样搬回，原路径不变，`conda run` / `conda activate` 照常能用。提交成 Slurm 作业，几 GB 的环境一般几分钟。**部分重复的环境默认用这种。**
 
+## 清理已核对的数据库子集
+
+用 `--subset` 处理单个文件、夹有个人文件的数据库目录，或者和公共版本只在归档、校验文件、`ON_NAS` 提示上有差异的副本。**先迁移实际调用并验证，确认没有运行或排队的作业会读取旧路径，再清理。** 仅在 NAS 上的文件，在 Slurm 作业里用 `F=$(db-cache use /opt/bio/db/<库名>/<版本>/<文件路径>)`，工具读取 `"$F"`。打包版本先用 `db-cache use` 取出整个包，再访问解包目录中的成员。
+
+单文件的在用检查能看到可访问进程已打开的文件，以及部分命令行、作业脚本和工作目录。作业脚本可能用 `$CACHE/METAVR.dmnd` 这样的变量拼接路径，或等到后续步骤才打开文件，需人工对照运行和排队作业。
+
+子集模式直接调用 Spark 上的 `spark-cleanup`。当前 `advise.py cleanup apply` 只透传整份副本的参数。
+
+```bash
+# 在 Spark 上执行。大文件的预演和执行都放进 Slurm 作业。
+spark-cleanup apply "$HOME/my-metavr/METAVR.dmnd" --action remove --db metavr/2026-08 --subset --json
+spark-cleanup apply "$HOME/my-kofam" --action remove --db kofam/2026-08-02 --subset --json
+# 用户核对预演并同意后，复制它返回的 plan_sha256。
+EXPECT='<预演返回的 plan_sha256>'
+spark-cleanup apply "$HOME/my-kofam" --action remove --db kofam/2026-08-02 --subset --json --yes --expect "$EXPECT"
+```
+
+- 子集必须写 `--db <库名>/<版本>`。先看 `matched`、`kept` 和 `frees`，用户同意后用原参数加 `--yes --expect <plan_sha256>`。执行前重新核对，摘要不同须重新预演。整份数据库模式也可用 `--expect` 绑定预演。预演不写说明、日志或锁。
+- 目录按整份模式的层级对齐，只核对同一相对路径上大小及完整 SHA256 都一致的文件。同路径文件有大小或 SHA256 差异时，预演会在 `conflicts` 列出这些文件并拒绝整次清理。检查差异，需要保留的私人变体先移开再重跑预演。明确输入单个文件时，可以跨目录匹配同名文件。0 字节文件及缺少完整 SHA256 的文件无法匹配。
+- 软链接须在对齐后的公共目录里有相同的相对目标文本，且在副本内解析到本次会处理的文件或整棵子树。公共链接读不到时保留。若某个保留链接会因处理而悬空，计划列出 `dangling_links` 并拒绝执行。
+- 公共版本只有归档包、没有展开目录时，副本里的内部软链接核对不上。目录清理只检查根目录内的链接，单文件只检查直接父目录里的链接。清理前用 `spark-cleanup refs P` 查脚本和配置，再检查从副本外项目目录指进来的软链接。
+- 清理器按副本路径最具体的挂载记录判断，位于 `fuse.*`、`cifs`、`smb3`、`nfs` 或 `nfs4` 挂载下的副本会被拒绝。普通本地挂载下的副本可按原流程核对。
+- `remove` 只处理匹配项，并清掉因此变空的目录。`link` 把匹配项逐个换成指向固定公共版本的软链接，供旧路径兼容；包内成员须先迁移脚本再用 `remove`。迁移会删除或改写私人缓存的脚本时，把这些操作留在自己的工作目录。
+- 副本根计划保留时，先在根里写 `.PUBLIC_DB.txt`；单文件或计划剪枝到根时，写在原路径的父目录。重名时另存一份。单文件另存到 `~/.spark-cleanup/notes/<回执号>.txt`。说明先记录计划，处理后追加最终状态。逐文件的 SHA256、设备号、inode 和 mtime 可在 JSON 与 `~/.spark-cleanup/log.tsv` 中按 `receipt` 核对。释放量按已分配磁盘块估算，`nlink > 1` 按零字节计。
+- 整份模式中断时，先在 `~/.spark-cleanup/log.tsv` 用原路径和时间找到对应回执号，再按第六列回执号看这一组记录。`whole-plan` 是原计划，`whole-rename` 的 `step` 记录临时目录 `*.spark-cleanup-deleting-*`，`whole-rmtree` 和 `whole-symlink` 分别表示删除和建链接已完成。没有 `whole-ok` 时，以最后一条已完成步骤为线索，核对原路径、临时目录和公共链接；删除可能只完成了一部分。
+- 人读输出遇到非 UTF-8 文件名时可能报编码错误。AI 用 `--json` 读取，文件名中的字节会以转义形式输出。
+
 ## 怎么读 scan 的结果
 
 - **范围**：不带 `--path` 时，只列每天扫描认定和公共区重名的环境和数据库副本。
@@ -84,7 +111,7 @@
 | 课题还在写论文、已经用这个版本出过结果 | 保留（可复现）；论文发了再处理 |
 | 脚本直接调环境里的 `python` | `/opt/bio/bin` 里没有 python。脚本只用标准库的，可以改用系统的 `/usr/bin/python3`（3.12），但要用小数据实测一遍；环境钉了别的 python 版本、或用到第三方包的，按下一行保留。R 不受影响：`Rscript` 走公共的 `/opt/bio/bin/Rscript` |
 | 脚本是用 `import` / `library()` 调用环境里的库 | 保留：库换不成 `/opt/bio/bin` 下的命令 |
-| 用到了公共区没有的包，或环境里放了数据（`reasons` 里有不属于任何包的文件，比如下载进环境的数据库） | 保留，或先装进公共区：包用 `software` 申请，数据库用 `database`（见 `database.md`） |
+| 用到了公共区没有的包，或环境里放了数据（`reasons` 里有不属于任何包的文件，比如下载进环境的数据库） | 保留，或按用途迁移：工具用 `software find` 查过后放进项目环境（见 `software.md`），数据库用 `database` 自助装进 NAS 公共库（见 `database.md`） |
 | `major` 差距，或 `0.x` 版本的 `minor` 差距 | 默认保留：大版本、0.x 的小版本都可能不兼容 |
 | 只差 `patch` / `minor`、公共版更新、只通过命令行调用 | **候选**：讲清楚后，用户逐个点名才走下面 5 步 |
 
@@ -134,7 +161,7 @@
    计划里写清：
    - 每一项删什么、改哪些脚本的哪几行、预计能腾出多少空间。
    - `reasons` 里提到的不属于任何包的文件（比如下载进环境的数据库）：删了靠配方也救不回来，单独写出来。
-   - 删完会清一次包缓存：conda 环境跑 `conda clean --all -y`，作用于整个 conda 安装（比如整个 `~/miniforge3`）；pixi 环境跑 `pixi clean cache --conda -y`。
+   - 删完会清一次包缓存：conda 环境跑 `conda clean --all -y`，作用于整个 conda 安装（比如整个 `~/miniforge3`）；pixi 环境跑 `/usr/local/bin/pixi clean cache --conda -y`。
      现有环境照常能用，以后新建环境要重新下载包。
 4. **逐项执行**：`cleanup apply <path> --action remove --yes`。
    - 以下情况它会拒绝：

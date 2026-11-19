@@ -1,6 +1,7 @@
 # 项目环境：env-store
 
 正式分析、需要复现结果时用项目环境：版本由 pixi.lock 固定，作业引用固定 fp。
+工具是公共的，环境是这个项目自己的工具组合。env-store 把建好的环境放在共享存储里，只是为了配方一模一样时只存一份、久不用时转存 NAS；它不是公共资源，不需要也不用去看别人的环境。
 临时查看文件、查询工具版本可用共享工具箱。项目环境不能用工具箱补齐未锁定的依赖；
 正式脚本默认从 PATH 移除 `/opt/bio/bin` 和 `/opt/bio/compat`。
 只有用户明确需要混用时才加 `--keep-toolbox`，并说明额外工具不受该锁约束。
@@ -8,47 +9,55 @@
 ## 完整流程
 
 以下 `~/project` 指服务器上的项目目录；带引号传给引擎，由服务器展开。
-`--workdir` 仍须填写服务器上的真实绝对目录。已有目录才可初始化，不自动建项目目录。
-在 ws 上按 SKILL.md 的入口规则将 `scripts/advise.py` 替换为 `scripts/ws_forward.py`。
+`--workdir` 仍须填写服务器上的真实绝对目录。先确认项目落点与目录，`env init` 只初始化已有目录。
+预览分别报告 `project_exists` 和 `manifest_exists`。目录缺失时，预览和 `--yes` 都返回错误和下一步。选定已有的 Spark 目录，或确认项目落点并建好目录后再试。
+使用 ws 时，先读 SKILL.md 的 ws-only 段并把项目配方与锁文件的现有限制告诉用户。
 
 ```bash
-# 1. 预览最小 manifest；确认后才写入并生成依赖锁
+# 1. 对已有 Spark 项目目录预览；缺配方时，经用户确认后写出最小配方并生成初始锁
 python scripts/advise.py env init --dir '~/project' --name analysis
 python scripts/advise.py env init --dir '~/project' --name analysis --yes
-# 2. 在服务器项目目录编辑 pixi.toml，或用 pixi add <包> 加依赖
-#    把 tasks.smoke 换成真正的短冒烟测试；示例 echo 仅用于起步
-# 3. 在服务器项目目录执行 /usr/local/bin/pixi lock（或以下命令）
-python scripts/advise.py env init --dir '~/project' --yes
-# 4. 看构建计划；展示计划并取得用户同意后提交 Slurm 构建作业
+```
+
+第 2 步的依赖命令在 Spark 项目目录执行。下面以添加 Python 为例。
+
+```bash
+(cd "$HOME/project" && /usr/local/bin/pixi add --no-install python)
+```
+
+PyPI 依赖用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。把示例 `tasks.smoke` 换成真正检查工具的短命令，例如 `<工具> --version`。已有真实测试时沿用。编辑后，在同一目录运行 `/usr/local/bin/pixi lock`。
+
+```bash
+# 3. 看构建计划；展示计划并取得用户同意后提交 Slurm 构建作业
 python scripts/advise.py env build --dir '~/project' -e default
 python scripts/advise.py env build --dir '~/project' -e default --yes --wait
 python scripts/advise.py env status --dir '~/project' -e default
-python scripts/advise.py env find 'numpy==2.0'
-# 5. 用项目锁生成脚本。以下 workdir 换成实际服务器项目绝对路径
+# 4. 环境就绪后用项目锁生成脚本。以下 workdir 换成实际服务器项目绝对路径
 python scripts/advise.py gen-sbatch --name analysis --cpus 2 --mem-gb 8 \
   --workdir /path/to/project --env '~/project' -e default \
   --command 'python analyze.py' --out job.sbatch
 python scripts/advise.py env check job.sbatch --json
-# 6. 先只检查；按提交总闸取得用户同意后再交
+# 5. 先只检查；按提交总闸取得用户同意后再交
 python scripts/advise.py submit --script job.sbatch --check-only
 python scripts/advise.py submit --script job.sbatch
 ```
 
 `env init` 不覆盖已有 pixi.toml；不带 `--yes` 只预览、不运行 lock；带 `--yes` 才运行
-`pixi lock`。已有 manifest 也遵守这条规则。`--name` 只用于新 manifest。
+`/usr/local/bin/pixi lock`。已有配方可直接加依赖，再用更新后的锁预演构建。`--name` 只用于新配方。
+`/usr/local/bin/pixi add --no-install` 更新配方和锁，构建留给 env-store 的 Slurm 作业。
 `env build` 总是重新 plan，摘要显示 fp、conda/PyPI 包数、估算体积、警告与拒收原因；
 允许的计划先查 fp 的 status；已有存档（archived，或 failed 且 archived 为 true、无 archive_problem）时不重建，
 提示 `env-store fetch <fp> --wait`，或直接 submit 交主作业自动取回。即使查询后状态改变、
 服务器 submit 返回 archived，也按取回处理。无存档时才可用本次 `plan_sha256` 提交构建。
 `--wait` 只有配合 `--yes` 才等构建完成。
 构建由 `env-store submit` 在本人 Slurm 小作业里进行，不能在登录节点手工构建。
-`env status` 可不带参数列出环境，也可指定 fp；fp 和 `--dir` 不能同时指定。
+查本项目的环境用 `env status --dir`，也可指定 fp；两者必须给一个，不能同时指定。
 命令沿用引擎 JSON 输出，中文摘要和服务器原始字段一起返回，`--json` 可以显式写出。
 
 ## 收编已有项目
 
-服务器项目已有 `pixi.toml` 和 v7 `pixi.lock` 时，用 `env adopt` 收编进公共环境库，
-不搬动项目自己的环境目录。没有锁先在项目目录执行 `pixi lock`；没有 manifest 可先用 `env init`。
+服务器项目已有 `pixi.toml` 和 v7 `pixi.lock` 时，用 `env adopt` 把它建进 env-store，
+不搬动项目自己的环境目录。没有锁先在项目目录执行 `/usr/local/bin/pixi lock`；没有 manifest 可先用 `env init`。
 
 ```bash
 # 先看计划；展示计划并取得用户同意后，才加 --yes 提交构建
@@ -57,24 +66,24 @@ python scripts/advise.py env adopt --dir '~/project' -e default --yes --wait
 ```
 
 adopt 只读检查项目文件，由 `env-store plan` 核验 v7 锁与依赖；拒收原因和修法与 `env build` 相同。
-ready、archived 或 failed 但有已核对存档时报告「已在库中」，不 submit、也不自动 fetch。
+ready、archived 或 failed 但有已核对存档时报告「env-store 里已有」，不 submit、也不自动 fetch。
 archived 或 failed 且有存档时先用 `env-store fetch <fp> --wait` 取回，也可由主作业 submit 自动取回。
 需要新建时，不带 `--yes` 只打印计划；带 `--yes` 使用本次计划哈希提交本人名下的 Slurm 构建作业，
 `--wait` 只有配合 `--yes` 才等构建完成。已有构建/取回作业的复用仍交由服务器 submit 判定。
 
 JSON 的 `project_environment` 列出所选 `<项目>/.pixi/envs/<环境名>` 是否存在、体积和 `du_status`。
 体积使用 `du -s -k`，最多等 10 秒；超时或读取失败显示体积未知并给出 warning，不阻止收编。
-检查本身失败则停止，不提交。没有项目环境时无需清理；存在时，待库中环境 ready 后按顺序做：
+检查本身失败则停止，不提交。没有项目环境时无需清理；存在时，待 env-store 里的环境 ready 后按顺序做：
 
 1. 用 `gen-sbatch --env <项目> -e <环境>` 重新生成完整作业脚本，或把已有脚本的环境激活改成
    `ENV1=$(env-store use <fp>) || exit 3` 加 `source "$ENV1"`。手改时按下一节保留 `# ENV-STORE` 标记，
-   供 submit 检查状态、取回和 pin；运行命令直接调用锁定工具，避免继续用 `pixi run` 包装。
+   供 submit 检查状态、取回和 pin；运行命令直接调用锁定工具，避免继续用 `/usr/local/bin/pixi run` 包装。
 2. 跑一次作业，确认结果没有变化。
 3. 再运行 `cleanup scan --path <项目>/.pixi/envs/<环境名>`，通过既有 `cleanup` 流程清理。
-   spark-cleanup 会识别与项目环境库完全重复的环境，删除前逐个先问；以实际扫描结果为准。
-   `env adopt` 不调用清理、不删除任何东西。以后再用 `pixi run`，缺失的项目环境会自己重装。
+   spark-cleanup 会识别和 env-store 里同一份环境完全重复的 `.pixi/envs`，删除前逐个先问；以实际扫描结果为准。
+   `env adopt` 不调用清理、不删除任何东西。以后再用 `/usr/local/bin/pixi run`，缺失的项目环境会自己重装。
 
-库里的环境是共享、只读的，不要再往里 `pip install`。要改依赖就改 manifest、更新锁、重新 build。
+env-store 里的环境是只读的（配方相同时和别人共用同一份），不要往里 `pip install`。要改依赖就改 manifest、更新锁、重新 build。
 
 ## 脚本、取回与复现
 
