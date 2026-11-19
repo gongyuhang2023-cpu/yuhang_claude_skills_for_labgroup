@@ -17,7 +17,7 @@
     {
       "name": "lab-frontier",
       "icon": "flow",
-      "purpose": "开通实验室「每日前沿」，聊简报、收藏条目、更新课题和运行配置",
+      "purpose": "开通实验室「每日前沿」：按你在 Gitea 上的课题每天自动推送前沿，可以聊简报、收藏条目",
       "needs": [
         "需 spark 账号",
         "需要 spark 账号，并通过 spark-advisor 配好 SSH 连接"
