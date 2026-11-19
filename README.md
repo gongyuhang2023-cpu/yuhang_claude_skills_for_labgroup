@@ -16,6 +16,10 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ## Skills 列表
 
+### `lab-frontier` — 实验室每日前沿
+
+在面板「公共资源 → Skills」复制安装提示词给 Claude Code 或 Codex。按「首次设置」开通后，可以聊简报、持续关注条目、更新课题和切换运行配置。需要通过 spark-advisor 配好 SSH。 [lab-frontier SKILL.md](skills/lab-frontier/SKILL.md)
+
 ### `git-auto-sync` — 选择 Gitea / GitHub 同步
 
 **用途**：说“保存并推到 Gitea”“只推 GitHub”即可按选定目标执行；支持项目级默认目标与双推。用户只要求提交时只做本地提交。
@@ -314,6 +318,10 @@ skills/
 │   └── references/
 │       ├── gitea-first-use.md      ← 首次登录、建空仓库、认证与推送
 │       └── project-directory.md   ← 项目目录维护
+├── lab-frontier/                  ← 每日前沿简报与持续关注
+│   ├── SKILL.md
+│   └── scripts/
+│       └── lf.py                  ← 借助 spark-advisor 的 SSH 配置调用 spark-frontier
 ├── meeting_mind/                  ← 会议录制引擎（线上 + 面对面，self-contained）
 │   ├── SKILL.md                   ← 完整工作流（Phase 1-4：参数确认 / 后台录制 / 转录 / AI 解读）
 │   ├── README.md                  ← 安装 + 使用 + 隐私说明
