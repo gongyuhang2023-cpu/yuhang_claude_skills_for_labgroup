@@ -130,3 +130,5 @@ python scripts/advise.py wait <JobID> --max-wait <秒>
 需要固定工具版本时先读 `project-envs.md`：`env init` → 编辑依赖并 lock → `env build` →
 `gen-sbatch --env` → `env check` → `submit`。可以同时传数据库 `--stage`；提交时环境取回、
 正在构建的环境和数据库缓存依赖合并，主作业提交后立即 pin 环境。`--check-only` 不交任何作业。
+
+迁移试跑加 `--verify`。项目环境和 `--stage` 缓存库照样登记保护，保留最近使用记录。缺缓存时，`submit` 等验证用数据库取回后再交主作业，预演会列出要取回的库。验证后的释放流程见 `toolbox-migration.md`。

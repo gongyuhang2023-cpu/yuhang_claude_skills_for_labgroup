@@ -2750,6 +2750,7 @@ def workdir_warning(workdir):
 # 数值要大于公平份额权重：2026-11-07 线上 PriorityWeightFairShare=100000，相邻两档份额差约 12500 分，
 # 小的 nice（如 100）只能调整自己几个作业之间的先后，让不了别人。管理员改权重时同步改这里。
 LOW_PRIORITY_NICE = 100000
+VERIFY_JOB_MARKER = "# SPARK-ADVISOR-VERIFY"
 
 
 def env_activation_lines(variable):
@@ -2763,7 +2764,7 @@ def env_activation_lines(variable):
 
 
 def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=None,
-                   low_priority=False, stage=None, env=None, environment=None, env_steps=None):
+                   low_priority=False, stage=None, env=None, environment=None, env_steps=None, verify=False):
     if env_steps and (not env or environment is not None or command is not None):
         die("--env-step 需要 --env <项目>。每一步已指定环境和命令，请使用这一组参数。")
     if env_steps and any(not step_command.strip() for _, step_command in env_steps):
@@ -2815,11 +2816,14 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
     # 它的激活脚本在 -u 下会报 unbound variable。必须放在最后一个 #SBATCH 之后 ——
     # sbatch 遇到第一条真命令就不再读 #SBATCH。
     L += ["", "set -eo pipefail"]
+    use_option = " --verify" if verify else ""
+    if verify:
+        L.append(VERIFY_JOB_MARKER)
     stages = cache_plan(cfg, stage or [])
     for i, entry in enumerate(stages, 1):
         path = entry["path"]
         L += ["# DB-CACHE-STAGE " + json.dumps(path, ensure_ascii=True),
-              "D%d=$(db-cache use %s)" % (i, shlex.quote(path))]
+              f"D{i}=$(db-cache use{use_option} {shlex.quote(path)})"]
     if env:
         project = env_project(cfg, env)
         names = dict.fromkeys(e for e, _ in env_steps) if env_steps else ["default" if environment is None else environment]
@@ -2829,7 +2833,7 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
             marker = {"fp": current["fp"], "project": project, "env": selected}
             variable = variables[selected] = f"ENV{i}"
             L += ["# ENV-STORE " + json.dumps(marker, ensure_ascii=True),
-                  f"{variable}=$(env-store use {current['fp']}) || exit 3"]
+                  f"{variable}=$(env-store use{use_option} {current['fp']}) || exit 3"]
         if not env_steps:
             L += env_activation_lines("ENV1")
     if is_gpu:
@@ -2868,7 +2872,8 @@ def cmd_gen_sbatch(cfg, name, gres, mem_gb, time, cpus, command, out, workdir=No
             "scontrol update jobid=<作业号> nice=0。" % LOW_PRIORITY_NICE)
     if stages:
         result["stage"] = stages
-        result["stage_note"] = "提交时先取未缓存的库，主作业带 afterok 依赖；仍须先展示计划并取得用户同意。"
+        result["stage_note"] = ("验证用数据库在提交主作业前取进缓存，取回和登记均保持最近使用记录。"
+                                if verify else "提交时先取未缓存的库，主作业带 afterok 依赖；仍须先展示计划并取得用户同意。")
     result["next"] = "Review, get user OK, then: advise.py submit --script <file>"
     return result
 
@@ -2921,9 +2926,14 @@ def cmd_submit(cfg, script_path, check_only=False):
             script = f.read()
     except (OSError, UnicodeDecodeError) as e:
         die(f"读不了 --script {script_path}：{e}")
+    verify = VERIFY_JOB_MARKER in script.splitlines()
     stages = cache_plan(cfg, script_stages(script))
     plan = {"stage": stages, "will_fetch": [e["path"] for e in stages if not e["cached"]],
-            "dependency": "afterok:<fetch-job-ids>" if any(not e["cached"] for e in stages) else None}
+            "dependency": "afterok:<fetch-job-ids>" if not verify and any(not e["cached"] for e in stages) else None}
+    if verify:
+        plan["verify"] = True
+        if plan["will_fetch"]:
+            plan["stage_note"] = "先等验证用数据库取回，再提交主作业并登记保护。"
     envs = env_submit_plan(cfg, script_envs(script))
     needs_env_dependency = any(e["will_fetch"] or e["state"] in ("building", "restoring") for e in envs)
     user_dependency = env_script_dependency(script) if needs_env_dependency else None
@@ -2939,6 +2949,14 @@ def cmd_submit(cfg, script_path, check_only=False):
     dependencies = []
     for entry in stages:
         if entry["cached"]: continue
+        if verify:
+            # Verification registration requires a ready cache, unlike ordinary pin.
+            rc, out, err = ssh_try(cfg, "/usr/local/bin/db-cache fetch --verify --wait " + shlex.quote(entry["path"]),
+                                   timeout=86400)
+            if rc or out.strip() != entry["local"]:
+                die("验证用数据库取回失败或路径与预演不符，尚未提交主作业：" +
+                    (err.strip() or out.strip() or entry["path"]))
+            continue
         value = ssh_run(cfg, "/usr/local/bin/db-cache fetch " + shlex.quote(entry["path"])).strip()
         if re.fullmatch(r"[0-9]+", value): dependencies.append(value)
         elif value != entry["local"]: die("无法解析 db-cache fetch 结果：" + value)
@@ -2996,8 +3014,15 @@ def cmd_submit(cfg, script_path, check_only=False):
         if not match: die("无法解析主作业号，不能登记缓存使用：" + out)
         # Pin queued jobs immediately, including files whose fetch hasn't finished.
         for entry in stages:
-            ssh_run(cfg, "sudo -n -u dbcache /usr/local/bin/db-cache _worker pin " +
-                    shlex.quote(entry["path"]) + " " + match.group(1))
+            key_and_job = shlex.quote(entry["path"]) + " " + match.group(1)
+            worker = "sudo -n -u dbcache /usr/local/bin/db-cache _worker "
+            if verify:
+                rc, _, err = ssh_try(cfg, worker + "use " + key_and_job + " --verify")
+                if rc:
+                    result.setdefault("warnings", []).append("验证用数据库登记失败：%s。主作业 %s 已提交，请核对登记。%s" %
+                                                             (entry["path"], match.group(1), err.strip()))
+            else:
+                ssh_run(cfg, worker + "pin " + key_and_job)
         for entry in envs:
             pinned = _soft(env_call, cfg, ["pin", entry["fp"], "--job", match.group(1)])
             if pinned is None:
@@ -3599,6 +3624,10 @@ def main():
     clrs = clsub.add_parser("restore", help="从 NAS 搬回原处（不带 --yes 只预演）")
     clrs.add_argument("path")
     clrs.add_argument("--yes", action="store_true")
+    clpark = clsub.add_parser("park", help="将从 NAS 恢复的目录核对后放回（默认只预演）")
+    clpark.add_argument("path")
+    clpark.add_argument("--yes", action="store_true")
+    clpark.add_argument("--expect", help="预演返回的 plan_sha256")
     clj = clsub.add_parser("job", help="搬运 / 搬回作业的进度和结果")
     clj.add_argument("id")
     clv = clsub.add_parser("verify", help="转发既有服务器验证请求")
@@ -3656,6 +3685,7 @@ def main():
                         "排到所有人的普通作业之后。默认不加" % LOW_PRIORITY_NICE)
 
     g.add_argument("--stage", action="append", default=[], help="NAS 库文件/目录；可重复，提交时先取库")
+    g.add_argument("--verify", action="store_true", help="验证用作业，登记环境及缓存库，保留最近使用记录")
 
     g.add_argument("--env", help="服务器项目目录；使用其 pixi.lock 对应的只读环境")
     g.add_argument("-e", dest="environment", help="--command 使用的环境，默认 default")
@@ -3804,8 +3834,9 @@ def main():
             rc, payload = cmd_cleanup(cfg, ["archived"], timeout=700)
             if rc == 0 and "items" in payload:
                 write_archive_list(cfg, payload)
-        elif args.clcmd == "restore":
-            rc, payload = cmd_cleanup(cfg, ["restore", server_path(args.path)] + yes, timeout=300)
+        elif args.clcmd in ("restore", "park"):
+            expect = ["--expect", args.expect] if args.clcmd == "park" and args.expect else []
+            rc, payload = cmd_cleanup(cfg, [args.clcmd, server_path(args.path)] + yes + expect, timeout=300)
         elif args.clcmd == "job":
             rc, payload = cmd_cleanup(cfg, ["job", args.id], timeout=60)
         elif args.clcmd == "verify":
@@ -3843,7 +3874,7 @@ def main():
     elif args.cmd == "gen-sbatch":
         emit(cmd_gen_sbatch(cfg, args.name, args.gres, args.mem_gb, args.time, args.cpus, args.command,
                             args.out, args.workdir, low_priority=args.low_priority, stage=args.stage,
-                            env=args.env, environment=args.environment, env_steps=args.env_step))
+                            env=args.env, environment=args.environment, env_steps=args.env_step, verify=args.verify))
     elif args.cmd == "submit":
         emit(cmd_submit(cfg, args.script, check_only=args.check_only))
     elif args.cmd == "wait":

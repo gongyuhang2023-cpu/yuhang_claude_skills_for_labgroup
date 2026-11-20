@@ -12,6 +12,7 @@
     python scripts/advise.py cleanup job <作业号>                           # 看进度和结果
     python scripts/advise.py cleanup archived                              # 搬走了什么（不动服务器，只重写本机的个人清单）
     python scripts/advise.py cleanup restore <目录> [--yes]                 # 搬回原处
+    python scripts/advise.py cleanup park <原目录> [--yes --expect <plan_sha256>]  # 核对原归档后放回
     python scripts/advise.py cleanup note <目录> "<备注>"                   # 给搬走的东西写备注（只存在本机）
 
 `cold` 和 `archived` 要扫整个 home，可能要几分钟。路径用绝对路径，或带引号的 `'~/…'`：不加引号，Git Bash 会把 `~` 换成本机的 home。

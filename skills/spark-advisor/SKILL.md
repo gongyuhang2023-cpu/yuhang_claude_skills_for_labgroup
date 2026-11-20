@@ -13,6 +13,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 
 - 与本 skill 的 references **冲突时以 `/ai.md` 为准**；references 只提供背景和历史实测。
 - 把课题工具锁进项目的 `pixi.lock`，用 `env-store` 构建，生成作业用 `gen-sbatch --env`。临时查看优先用当前项目环境，项目外用自己的 scratch 项目。公共 R 可直接用。`/opt/spark-sys` 专供服务器服务使用。数据库优先用共享版本，不要另下一份数据库。数据库写带版本号的路径（`$CHECKVDB` 这类默认变量指向 current，会变），见 `references/database.md`。
+- 工具箱迁移的试跑用 `gen-sbatch --verify`，验证用的工具和缓存库不计入最近使用。暂时不用的项目可按用户决定冻结，保存环境记忆。见 `references/toolbox-migration.md`。
 - 一次会话读一次即可；要看最新的空闲资源用 `status`。
 
 ## ⛔ 红线与总闸（动手前必看）
@@ -50,7 +51,7 @@ description: 共享 GPU 服务器（Slurm/ARM64）顾问：先判任务该本地
 | 用某个工具做分析、服务器上有没有装某个工具、缺工具、装个软件、pip 装不上 | `rules` → `software find` → 按配方锁进项目 → `env build` → `gen-sbatch --env` | `references/software.md` → `references/project-envs.md` |
 | 看公共库目录或小文件 | 已知目录直接做只读检查，库或版本不清时用 `database find` | `references/software.md` |
 | 看一眼某个文件、临时试个工具 | 优先使用当前项目环境，项目外用自己的 scratch 项目 | `references/software.md` |
-| 迁移工具箱、扫描脚本 | `software scan <路径>…` → 核对近期作业 → 按项目迁移 | `references/toolbox-migration.md` |
+| 迁移工具箱、扫描脚本、冻结旧项目 | `software scan <路径>…` → 核对近期作业 → 按项目迁移或冻结。试跑用 `gen-sbatch --verify`，保持环境和缓存的最近使用记录 | `references/toolbox-migration.md` |
 | 有没有某个数据库、有哪些版本、缺数据库、自己装一个库、申请装库、请管理员装库 | `rules` → `database find` → `plan` → `install` | `references/database.md` |
 | 同时需要工具和数据库，例如 RGI 加 CARD | 先读 `rules`，分别用 `software find` 和 `database find` 查工具和库，并核对版本与格式 | `references/software.md` 和 `references/database.md` |
 | 要用 NAS 上的数据库、把库取到本地 | `gen-sbatch --stage` / `db-cache` | `references/database.md` |
