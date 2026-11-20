@@ -2,7 +2,7 @@
 
 ## 1. 先看服务器规则
 
-运行 `python scripts/advise.py rules`，查看工具是否有专门安排（例如 iPHoP）。有专门安排时照服务器规则处理。公共 R 可直接用 `/opt/bio/bin/R` 或 `/opt/bio/bin/Rscript`。`/opt/spark-sys` 专供服务器服务使用。课题脚本使用各自的项目环境。
+按 [服务器规则顺序](../SKILL.md#先读本次会话的服务器规则) 查看工具是否有专门安排，例如 iPHoP。公共 R 可直接用 `/opt/bio/bin/R` 或 `/opt/bio/bin/Rscript`。`/opt/spark-sys` 专供服务器服务使用。课题脚本使用各自的项目环境。
 
 ## 2. 查推荐配方
 

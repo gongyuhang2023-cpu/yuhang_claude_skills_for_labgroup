@@ -20,6 +20,8 @@
 
 所以想长期留的东西：**代码推 Gitea，数据搬进 NAS 归档。** 只靠备份，两个月后就没了。
 
+Google 共享盘 `/mnt/gdrive/share` 会把文件传给 Google，Spark 上的其他用户也能改名或删除。把数据和接收方列进 [外传计划](../SKILL.md#同意规则)。
+
 ## 腾空间、或项目要离开服务器之前：按这个顺序查
 
 1. **代码推了没**：`advise.py project check <项目>`。查没提交、没推、大文件、数据目录没忽略，以及用到的数据库版本（只查版本用 `database scan`）。能不能离开服务器看 `code_safe`。详见 `code-check.md`。

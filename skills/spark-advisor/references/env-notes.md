@@ -5,6 +5,12 @@
 > **本文件是耐用的经验知识**（哪些包能在 ARM 上装、坑在哪），手工维护。
 > 开源给 x86 服务器的人请替换本文件。
 
+## 首次配置与探测
+
+直连入口缺少 `config.json` 时，用 `python scripts/advise.py detect-server` 从 tailnet 找服务器并向用户确认账号，然后用 `python scripts/advise.py init --user <账号> --host <地址> --node <节点>` 写入配置。服务器地址只存入被 Git 忽略的 `config.json`。
+
+要了解服务器环境时先看本机探测缓存 `env-profile.local.json`。首次探测、`probed_at` 超过 14 天或刚建过新环境时，用 `advise.py probe-env` 刷新。它会连接服务器并写本机缓存。
+
 ## 架构与底座
 - **aarch64**，DGX OS（Ubuntu 24.04 基底），定制内核 `6.17-nvidia`
 - GPU：GB10（统一内存，无独立显存框），驱动 580，**CUDA 13.0**
@@ -24,9 +30,7 @@
 | **R / Rscript** | **公共区**：`/opt/bio/bin/Rscript`（R 4.5；2026-10-08 起学生 conda 环境里的 R 已移除，`/usr/bin/R` 不存在） | 绝对路径直接调，非交互可用 |
 | 各类生信工具 | 项目的 `pixi.lock` 和 env-store 环境 | 通过 `gen-sbatch --env` 生成作业，使用环境里的命令 |
 
-**先查 `env-profile.local.json` 的 `system.conda` / `system.r` 字段**（`probe-env` 会连
-conda env 里的 Rscript 一起扫出来），别只 `command -v` 一下就下结论。
-缓存旧了（`probed_at` >14 天、或刚建了新 env）就重跑 `advise.py probe-env`。
+可查 `env-profile.local.json` 的 `system.conda` / `system.r` 字段。`probe-env` 会连 conda env 里的 Rscript 一起扫出来。
 
 ## 关键：哪些包在 aarch64 上能装（决定能不能全速跑）
 
@@ -72,10 +76,8 @@ print(d['latest_version'], sorted({f.get('attrs',{}).get('subdir') for f in d['f
 ```
 
 ## 建议用法
-- **先读服务器规则**（`rules`），再用 `software find` 查推荐配方和构建。
-- 课题分析统一用 `env init/build` 与 `gen-sbatch --env`，依赖变更写回配方和锁。见 `project-envs.md`。
-- 临时试用优先用当前项目环境，项目外用自己的 scratch 项目。补依赖时按 `software.md` 的推荐配方写入全部约束和频道，再按 `project-envs.md` 预演构建。
-- 纯 Python 依赖写进项目环境。确认是所需项目且有适用的 wheel 后，用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。docker 普通用户用不了。
+- 选配方和临时试用见 [软件](software.md)，构建与运行见 [项目环境](project-envs.md)。
+- 纯 Python 依赖写进项目环境。确认是所需项目且有适用的 wheel 后，用 `/usr/local/bin/pixi add --no-install --pypi <包名>`。
 
 ## 陈旧提示
 本文件是手工经验，`env-profile.local.json` 是自动实时探测。两者冲突以实时探测为准，并回来更新本文件。

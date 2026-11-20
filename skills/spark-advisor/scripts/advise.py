@@ -52,7 +52,7 @@ recommendation phrasing / confidence framing is the AI's job -- see
 references/recommend-rules.md.
 
 Config: reads config.json (next to the skill root). Don't hand-write it: on first run,
-`advise.py detect-server`, then `advise.py init` (SKILL.md「首次配置」).
+`advise.py detect-server`, then `advise.py init` (see references/env-notes.md).
 """
 import argparse
 import datetime
@@ -133,11 +133,11 @@ def load_config():
             for key in ("host", "user", "node"):
                 if not cfg.get(key):
                     die(f"config.json is missing '{key}'. Re-create it: advise.py detect-server, "
-                        "then advise.py init (SKILL.md「首次配置」).")
+                        "then advise.py init (see references/env-notes.md).")
             return cfg
     die("config.json not found -- first-time setup: run `advise.py detect-server`, ask the user "
         "for their server username, then `advise.py init --user <name> --host <IP> --node <name>` "
-        "(SKILL.md「首次配置」). Don't hand-write config.json.")
+        "(see references/env-notes.md). Don't hand-write config.json.")
 
 
 _RESOLVED_HOST = None

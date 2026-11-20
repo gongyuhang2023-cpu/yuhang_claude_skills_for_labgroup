@@ -11,6 +11,10 @@
     python scripts/advise.py project push <项目目录> -m "<说明>" --yes --plan-id <id>
     python scripts/advise.py project init <项目目录> --remote <仓库网址> [--yes]         # 还不是仓库的项目
 
+## 项目目录
+
+按本机已有的个人目录约定找项目，必要时向用户确认服务器上的工作目录。以确认过的绝对路径生成作业或检查项目。直接用 Git 做只读核对时加 `GIT_OPTIONAL_LOCKS=0`。
+
 ## check 看什么
 
 - 是不是 git 仓库、在哪个分支、有没有上游；没提交的改动、没推的提交、远端是否领先本地。

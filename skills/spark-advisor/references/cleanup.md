@@ -21,7 +21,7 @@
     python scripts/advise.py cleanup apply P --action archive --env           # 预演：先原样打包到 NAS 再删
     python scripts/advise.py cleanup apply P --action … --yes                 # 真执行
 
-环境路径用 scan 结果里的 `path`；它属于哪个项目，看 `created_from` 和 `refs` 指向的位置。要找 scan 结果以外的项目目录时照 SKILL.md：先读 `references/workspace-layout.local.md`，没有这个文件就问用户，别自己编。
+环境路径用 scan 结果里的 `path`。看 `created_from` 和 `refs` 确认项目。查 scan 结果之外的项目时，先 [核对项目目录](code-check.md#项目目录)。
 - 在 Windows 的 Git Bash 里直接传绝对路径也可以，被 Git Bash 改写的路径会自动还原；统一带 `MSYS_NO_PATHCONV=1` 最省事（`gen-sbatch` 的 `--workdir` 不会自动还原）。
 - 也可以传带引号的 `'~/…'`。
 
