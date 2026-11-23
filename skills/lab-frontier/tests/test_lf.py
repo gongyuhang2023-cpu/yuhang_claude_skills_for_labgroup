@@ -121,6 +121,22 @@ sys.exit(int(os.environ.get("FAKE_SSH_RC", "0")))
         self.assertEqual(shlex.split(self.ssh_args()[-1]),
                          ["/usr/local/bin/spark-frontier", "profile", "note", "--person", note])
 
+    def test_profile_stop_and_resume_require_and_relay_project_id(self):
+        self.write_config(self.root / ".agents" / "skills")
+        for action in ("stop", "resume"):
+            with self.subTest(action=action):
+                missing = self.run_lf("profile", action)
+                self.assertEqual(missing.returncode, 2)
+                self.assertIn("OWNER/NAME", missing.stderr)
+        self.assertFalse(self.args_log.exists())
+        for action in ("stop", "resume"):
+            with self.subTest(action=action):
+                result = self.run_lf("profile", action, "other-owner/research")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(shlex.split(self.ssh_args()[-1]),
+                                 ["/usr/local/bin/spark-frontier", "profile", action,
+                                  "other-owner/research"])
+
     def test_interactive_commands_only_print_a_terminal_command(self):
         self.config["ssh_opts"] = ["-o", "BatchMode=yes"]
         self.write_config(self.root / ".agents" / "skills")

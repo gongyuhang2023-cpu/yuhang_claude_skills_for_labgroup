@@ -33,6 +33,7 @@ description: 在实验室面板开通「每日前沿」，按 Gitea 课题自动
 | 收藏夹 | 用简报的 `user`、`date` 和条目的 `id` 跑 `follow add <简报作者> <日期> <条目ID>`，或直接在面板收藏。用 `follow list` 查 ID，`follow set <收藏ID> false` 取消收藏，`true` 恢复收藏。 |
 | 换配置 | 用 `status` 核对当前档位及 `usage_7d`，按用户选的档位运行 `config --preset <配置档>`。 |
 | 暂停或恢复 | 跑 `pause` 或 `resume`，再用 `status` 核对。 |
+| 停用或恢复某个课题 | 用 `profile show` 查课题 ID。用户说某个课题不想再收推送时用 `profile stop <project_id>`，想恢复时用 `profile resume <project_id>`。 |
 | 卸载 | `uninstall` 停止报名与来源订阅，保留数据。用户明确要求删除并确认范围后，才用 `uninstall --purge` 清理私有数据及已发布简报。 |
 | 查状态 | 跑 `status`，说明报名、暂停、配置、上次结果、预计下次运行和近 7 天用量。查看 `last_run.reason` 和 `next_hint`，同时核对当前 `enrolled` 和 `paused`。 |
 

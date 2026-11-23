@@ -136,6 +136,8 @@ def parser():
     profile = commands.add_parser("profile").add_subparsers(dest="action", required=True)
     profile.add_parser("show")
     profile.add_parser("note").add_argument("--person", required=True)
+    for action in ("stop", "resume"):
+        profile.add_parser(action).add_argument("project_id", metavar="OWNER/NAME")
     return cli
 
 
