@@ -24,7 +24,7 @@
   - `other_branches`：别的本地分支里有没推的提交、或从没推过的；`stash`：只存在服务器上的 stash 个数。问「都推了吗」时这两样也要说。
   - `remote_ahead` 是当场查远端的；`unpushed_*`、`ahead_behind` 比的是本地记着的远端分支（不 fetch），可能是旧的。
 - **不该进 git 的东西**：单个超过 50 MB 的文件（没跟踪的、已暂存的、没推的提交里的都算）；数据目录 `data/`、`_data/` 和作业日志目录 `logs/` 没写进 `.gitignore`；像密钥的文件。一次要推的总量接近 100 MB 会提醒。
-  - `results/` 不强制忽略：小的结果表可以进 git，单个超过 50 MB 的照样拦；大的结果按 `cold-data.md` 搬到 NAS。
+  - `results/` 不强制忽略：小的结果表可以进 git，单个超过 50 MB 的照样拦；大的结果按 `cold-storage.md` 存进保留区。
   - 用 `gen-sbatch` 跑过作业的项目，`logs/` 里全是作业日志：第一次推之前用 `project ignore` 把它写进 `.gitignore`。日志照样留在服务器上。
 - 嵌套的仓库、属主是 root 的文件（git 会因为 dubious ownership 拒绝）、git 身份（`user.name` / `user.email`）有没有配。
 - **用到的公共数据库**（`db_refs`）：规则和 `database scan` 一样，`current` 和默认变量解析出来的是**今天**的版本。核对版本、锁版本用 `database check` / `lock` / `pin`，见 `database.md`。
@@ -56,4 +56,4 @@
 2. `project init <目录> --remote <网址>` 预演，用户同意后加 `--yes`：只做 `git init` 和关联远端。
 3. 用 `project ignore` 把数据目录写进 `.gitignore`，再用 `project push --set-upstream` 预演第一次推送。
 
-数据不进 git：大文件和原始数据按 `cold-data.md` 搬到 NAS。
+数据不进 git：大文件和原始数据按 `cold-storage.md` 存进保留区。

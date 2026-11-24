@@ -1,6 +1,6 @@
 # 清理重复的项目环境和数据库副本
 
-> 什么时候读：用户要腾空间、查项目环境或数据库是否有重复副本时。
+> 什么时候读：用户要腾空间、查项目环境或数据库是否有重复副本时。整理存储的整体顺序见 [存储](storage.md#整理一次)，这里只讲环境和数据库副本。
 
 项目环境以当前 `pixi.lock` 在 env-store 解析出的 fp 为准。核对项目环境是否和该存档对应，检查引用和可重建性后再清理。服务器自用工具目录由管理员按服务管理。
 
@@ -18,7 +18,7 @@
     python scripts/advise.py cleanup refs P                                   # 只看哪里用到了它
     python scripts/advise.py cleanup apply P --action remove                  # 预演删除
     python scripts/advise.py cleanup apply P --action remove|link --db <库名>  # 每日清单以外的数据库副本
-    python scripts/advise.py cleanup apply P --action archive --env           # 预演：先原样打包到 NAS 再删
+    python scripts/advise.py cleanup apply P --action archive --env           # 预演：先原样打包进保留区再删
     python scripts/advise.py cleanup apply P --action … --yes                 # 真执行
 
 环境路径用 scan 结果里的 `path`。看 `created_from` 和 `refs` 确认项目。查 scan 结果之外的项目时，先 [核对项目目录](code-check.md#项目目录)。
@@ -27,7 +27,7 @@
 
 **两种删法，选哪种：**
 - `--action remove`：就地删，删前只存一份几 KB 的重建配方（history、`@EXPLICIT` 精确包清单、pip 包清单）。靠配方能重建环境，但环境里另外放的数据救不回来；NAS 备份也不备份 conda 环境。照配方或项目的 `environment.yml` 重建时，去掉 `r-base` 和 `r-*`：服务器不许用 conda 装 R，用公共的 R。
-- `--action archive --env`（只限 conda 环境）：先存配方，再把环境**原样**打包到 NAS、逐个文件核对，然后才删本地。出了问题 `cleanup restore P` 原样搬回，原路径不变，`conda run` / `conda activate` 照常能用。提交成 Slurm 作业，几 GB 的环境一般几分钟。**希望原样重建的旧环境优先用这种。**
+- `--action archive --env`（只限 conda 环境）：先存配方，再把环境**原样**打包进 [保留区](cold-storage.md)（算额度，环境一般几 GB），逐个文件核对，然后才删本地。出了问题 `keep get P` 原样搬回，原路径不变，`conda run` / `conda activate` 照常能用。提交成 Slurm 作业，几 GB 的环境一般几分钟。**希望原样重建的旧环境优先用这种。**
 
 ## 清理已核对的数据库子集
 

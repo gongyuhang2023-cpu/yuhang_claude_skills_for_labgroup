@@ -46,6 +46,9 @@ Subcommands:
   cleanup scan/     relay to the server command `spark-cleanup` (runs as the user, dry
   refs/apply        by default): personal envs / database copies that duplicate the
                     shared ones, with tier, references, in-use checks and real space
+  keep ...          the personal keep area on the NAS (long-term storage with a quota):
+                    status/list/add/get/free/rm/undelete/adopt/note/job/request, relayed to the
+                    server command `spark-cleanup keep` (runs as the user, dry run by default)
 
 Facts vs judgment: this script produces FACTS + a rule-based baseline. The final
 recommendation phrasing / confidence framing is the AI's job -- see
@@ -1271,68 +1274,48 @@ def annotate_gaps(payload):
     return payload
 
 
-# 个人搬运清单：服务器上原处的 *.ON_NAS.txt 才是准的，这份每次 archived 都重写；备注只在本机
-ARCHIVE_LIST = os.path.join(HERE, "..", "references", "nas-archive.local.md")
-ARCHIVE_NOTES = os.path.join(HERE, "..", "references", "nas-archive.local.json")
+# 个人保留区：逻辑都在服务器命令 spark-cleanup keep 里（以用户身份运行，默认只看不动），这里只转一手。
+# 旧的 cleanup archived / restore / park / note 是它的别名；备注存在服务器的登记里，不再写本机清单。
+KEEP_TIMEOUT = {"status": 120, "list": 600, "add": 900, "get": 300, "free": 600, "rm": 120,
+                "undelete": 120, "adopt": 900, "note": 60, "job": 60, "request": 60}
 
 
-def _note_key(cfg, path):
-    """备注以 ~/… 为键：服务器绝对路径、Git Bash 改写过的路径、说明文件路径都换成这一种。"""
-    p = server_path(path).replace("\\", "/").rstrip("/")
-    if p.endswith(".ON_NAS.txt"):
-        p = p[:-len(".ON_NAS.txt")]
-    home = "/home/%s" % cfg["user"]
-    if p == home or p.startswith(home + "/"):
-        p = "~" + p[len(home):]
-    return p
+def keep_argv(args):
+    """argparse 的结果 -> 服务器 `spark-cleanup keep` 的参数（--json 由 cmd_cleanup 加）。"""
+    c = args.kpcmd
+    argv = ["keep", c]
+    if c == "list" and args.path:
+        argv += ["--path", server_path(args.path)]
+    elif c == "list" and args.files:
+        argv += ["--files", args.files] + (["--limit", str(args.limit)] if args.limit else [])
+    elif c in ("add", "free"):
+        argv.append(server_path(args.path))
+    elif c in ("get", "rm", "undelete", "note"):
+        argv.append(server_path(args.item))
+    elif c == "adopt" and args.path:
+        argv.append(server_path(args.path))
+    elif c == "job":
+        argv.append(args.id)
+    if c == "add":
+        argv += (["--free-local"] if args.free_local else []) + (["--register"] if args.register else [])
+    if c in ("add", "adopt", "request") and args.note:
+        argv += ["--note", args.note]
+    if c == "get":
+        argv += (["--to", server_path(args.to)] if args.to else []) + (["--only"] + args.only if args.only else [])
+    if c == "note":
+        argv.append(args.text)
+    if getattr(args, "yes", False):
+        argv.append("--yes")
+    if getattr(args, "expect", None):
+        argv += ["--expect", args.expect]
+    return argv
 
 
-def _load_notes():
-    try:
-        with open(ARCHIVE_NOTES, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def cmd_cleanup_note(cfg, path, text):
-    notes = _load_notes()
-    key = _note_key(cfg, path)
-    notes[key] = {"note": text, "at": time.strftime("%Y-%m-%d")}
-    with open(ARCHIVE_NOTES, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(notes, f, ensure_ascii=False, indent=1)
-        f.write("\n")
-    return {"path": key, "note": text, "saved_to": os.path.abspath(ARCHIVE_NOTES)}
-
-
-def write_archive_list(cfg, payload):
-    notes = _load_notes()
-    rows = []
-    for it in payload.get("items") or []:
-        key = _note_key(cfg, it.get("path_display") or it.get("path", ""))
-        it["note"] = (notes.get(key) or {}).get("note")
-        size = it.get("bytes")          # 旧格式的说明文件（nas-archive 写的）不记原始大小，只好写压缩包的
-        size_txt = "%.1f GB" % (size / 1e9) if size else \
-            "压缩后 %.1f GB" % (it["archive_bytes"] / 1e9) if it.get("archive_bytes") else "?"
-        state = "在" if it.get("on_nas") else "**找不到**"
-        if it.get("back_in_place"):
-            state += "（原处又有东西了）"
-        rows.append("| `%s` | %s | %s | %s | `%s` %s | %s |" % (
-            key, it.get("date") or "?", size_txt, it.get("by") or "?",
-            os.path.basename(it.get("archive") or "?"), state, it.get("note") or ""))
-    lines = ["# 搬到 NAS 的东西（个人清单）", "",
-             "> 由 `advise.py cleanup archived` 生成于 %s。以服务器上原处的 `*.ON_NAS.txt` 为准，这份只是方便查；"
-             "备注只存在本机 `nas-archive.local.json`，用 `cleanup note <路径> \"<备注>\"` 写。" % time.strftime("%Y-%m-%d %H:%M"),
-             "", "| 原路径 | 搬走日期 | 大小 | 谁搬的 | NAS 上的包 | 备注 |", "|---|---|---|---|---|---|"]
-    lines += rows or ["| （没有） | | | | | |"]
-    for title, xs in (("中途留下的目录（确认没用了可以删）", payload.get("leftovers")),
-                      ("NAS 上写到一半的包（确认没在跑可以删）", payload.get("orphan_parts"))):
-        if xs:
-            lines += ["", "## " + title, ""] + ["- `%s`" % x for x in xs]
-    with open(ARCHIVE_LIST, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(lines) + "\n")
-    payload["personal_list"] = os.path.abspath(ARCHIVE_LIST)
-    return payload
+def cmd_keep(cfg, argv, timeout):
+    rc, payload = cmd_cleanup(cfg, argv, timeout)
+    if rc and "invalid choice: 'keep'" in str(payload.get("error", "")):
+        payload = {"error": "服务器上的 spark-cleanup 还不支持 keep：保留区还没部署，找管理员"}
+    return rc, payload
 
 
 # 服务器上的项目：代码推了没、推 Gitea。逻辑在 remote_project.py，经 ssh 交给服务器上的 python3 -I - 执行；
@@ -3620,11 +3603,11 @@ def main():
     clc = clsub.add_parser("cold", help="大、而且很久没改过的目录")
     clc.add_argument("--min-gb", type=float, default=None)
     clc.add_argument("--days", type=int, default=None)
-    clsub.add_parser("archived", help="搬到 NAS 的东西；顺手重写个人清单 references/nas-archive.local.md")
-    clrs = clsub.add_parser("restore", help="从 NAS 搬回原处（不带 --yes 只预演）")
+    clsub.add_parser("archived", help="已改名为 keep list")
+    clrs = clsub.add_parser("restore", help="已改名为 keep get")
     clrs.add_argument("path")
     clrs.add_argument("--yes", action="store_true")
-    clpark = clsub.add_parser("park", help="将从 NAS 恢复的目录核对后放回（默认只预演）")
+    clpark = clsub.add_parser("park", help="已改名为 keep free")
     clpark.add_argument("path")
     clpark.add_argument("--yes", action="store_true")
     clpark.add_argument("--expect", help="预演返回的 plan_sha256")
@@ -3633,9 +3616,47 @@ def main():
     clv = clsub.add_parser("verify", help="转发既有服务器验证请求")
     clv.add_argument("path", nargs="?")
     clv.add_argument("--cmd", dest="cmds", nargs="+", required=True)
-    cln = clsub.add_parser("note", help="给搬走的东西写备注（只存在本机）")
+    cln = clsub.add_parser("note", help="已改名为 keep note")
     cln.add_argument("path")
     cln.add_argument("text")
+
+    # 个人保留区：转给服务器上的 spark-cleanup keep（以用户身份运行，默认只看不动）
+    kp = sub.add_parser("keep")
+    kpsub = kp.add_subparsers(dest="kpcmd", required=True)
+    kpsub.add_parser("status", help="额度、用量和核对提示")
+    kpl = kpsub.add_parser("list", help="存了什么；--path 查某个目录或它的上层存没存过；--files 列出一个条目里的文件")
+    kplx = kpl.add_mutually_exclusive_group()
+    kplx.add_argument("--path", default=None)
+    kplx.add_argument("--files", default=None, metavar="ITEM", help="条目号：列出它里面的文件")
+    kpl.add_argument("--limit", type=int, default=None, help="配合 --files：最多列几项（默认由服务器定）")
+    kpa = kpsub.add_parser("add", help="存进保留区（不带 --yes 只预演）")
+    kpa.add_argument("path")
+    kpa.add_argument("--free-local", action="store_true", help="核对完删本地，原处留 .ON_NAS.txt")
+    kpa.add_argument("--register", action="store_true", help="登记已在保留区里、但不是经本工具存进去的文件")
+    kpa.add_argument("--note", default=None, help="这批数据是什么，存在服务器的登记里")
+    kpg = kpsub.add_parser("get", help="取回（不带 --yes 只预演）")
+    kpg.add_argument("item", help="条目号或原路径")
+    kpg.add_argument("--to", default=None, help="放到别处；默认放回原路径")
+    kpg.add_argument("--only", nargs="+", default=None, help="只取回条目里的这些相对路径")
+    kpf = kpsub.add_parser("free", help="核对本地和保留区那份一致后删本地（不带 --yes 只预演）")
+    kpf.add_argument("path")
+    kpr = kpsub.add_parser("rm", help="移进回收站，30 天内可找回（不带 --yes 只预演）")
+    kpr.add_argument("item")
+    kpu = kpsub.add_parser("undelete", help="从回收站找回（不带 --yes 只预演）")
+    kpu.add_argument("item")
+    kpd = kpsub.add_parser("adopt", help="把 NAS 个人目录 user/ 里的旧归档挪进保留区；不带路径只列出")
+    kpd.add_argument("path", nargs="?")
+    kpd.add_argument("--note", default=None)
+    kpn = kpsub.add_parser("note", help="改备注（存在服务器的登记里）")
+    kpn.add_argument("item")
+    kpn.add_argument("text")
+    kpj = kpsub.add_parser("job", help="存入 / 取回作业的进度和结果")
+    kpj.add_argument("id")
+    kpq = kpsub.add_parser("request", help="还没开通时，请管理员开通（发邮件给管理员；不带 --yes 只预演）")
+    kpq.add_argument("--note", default=None, help="打算存什么、大概多大")
+    for kparser in (kpa, kpg, kpf, kpr, kpu, kpd, kpq):
+        kparser.add_argument("--yes", action="store_true", help="真的执行。不带只预演")
+        kparser.add_argument("--expect", default=None, help="预演返回的 plan_sha256")
 
     # 服务器上的项目：代码推了没、推 Gitea（remote_project.py 经 ssh 在服务器上执行）
     pj = sub.add_parser("project")
@@ -3814,11 +3835,26 @@ def main():
         rc, payload = cmd_database(cfg, args)
         emit(payload)
         sys.exit(rc)
+    if args.cmd == "keep":
+        rc, payload = cmd_keep(cfg, keep_argv(args), KEEP_TIMEOUT.get(args.kpcmd, 300))
+        emit(payload)
+        sys.exit(rc)
     if args.cmd == "cleanup":
         yes = ["--yes"] if getattr(args, "yes", False) else []
-        if args.clcmd == "note":
-            emit(cmd_cleanup_note(cfg, args.path, args.text))
-            return
+        alias = {"archived": "list", "restore": "get", "park": "free", "note": "note"}
+        if args.clcmd in alias:             # 旧名字：照转给 keep，输出里提醒改用新名字
+            new = alias[args.clcmd]
+            # restore 转给服务器的旧入口：它认得新旧两种说明文件，旧用法 --yes 不带摘要也照常能用
+            argv = ["restore"] if args.clcmd == "restore" else ["keep", new]
+            if args.clcmd != "archived":
+                argv.append(server_path(args.path))
+            if args.clcmd == "note":
+                argv.append(args.text)
+            argv += yes + (["--expect", args.expect] if getattr(args, "expect", None) else [])
+            rc, payload = cmd_keep(cfg, argv, KEEP_TIMEOUT[new])
+            payload["renamed"] = "cleanup %s 已改名为 keep %s" % (args.clcmd, new)
+            emit(payload)
+            sys.exit(rc)
         if args.clcmd == "scan":
             argv = ["scan"] + [x for p in args.path for x in ("--path", server_path(p))] + \
                    (["--db", args.db] if args.db else [])
@@ -3830,13 +3866,6 @@ def main():
             argv = ["cold"] + (["--min-gb", str(args.min_gb)] if args.min_gb is not None else []) + \
                    (["--days", str(args.days)] if args.days is not None else [])
             rc, payload = cmd_cleanup(cfg, argv, timeout=900)
-        elif args.clcmd == "archived":          # 不透传 --verify：逐个重算 NAS 上的包要几个小时
-            rc, payload = cmd_cleanup(cfg, ["archived"], timeout=700)
-            if rc == 0 and "items" in payload:
-                write_archive_list(cfg, payload)
-        elif args.clcmd in ("restore", "park"):
-            expect = ["--expect", args.expect] if args.clcmd == "park" and args.expect else []
-            rc, payload = cmd_cleanup(cfg, [args.clcmd, server_path(args.path)] + yes + expect, timeout=300)
         elif args.clcmd == "job":
             rc, payload = cmd_cleanup(cfg, ["job", args.id], timeout=60)
         elif args.clcmd == "verify":

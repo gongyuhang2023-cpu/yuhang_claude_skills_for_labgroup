@@ -1,6 +1,6 @@
 ---
 name: spark-advisor
-description: 为生信和数据分析选择执行资源。当分析依赖专用工具或共享数据库、本机算力受限、数据搬运成本较高，或需要管理 Spark 作业与 NAS 存储时，主动核对可用能力、说明取舍，并在已确认的范围内执行。也处理卡住的作业、交互调试、归档与腾空间，并在合适时评估 Colab。
+description: 为生信和数据分析选择执行资源。当分析依赖专用工具或共享数据库、本机算力受限、数据搬运成本较高，或需要管理 Spark 作业与 NAS 存储时，主动核对可用能力、说明取舍，并在已确认的范围内执行。也处理卡住的作业、交互调试、数据长期保存（个人保留区）与腾空间，并在合适时评估 Colab。
 ---
 
 # spark-advisor
@@ -14,7 +14,7 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 - **Slurm 算力与 GPU** — `status` 看队列、资源和物理 GPU，`recommend` 按任务和历史估资源，`wait` 看作业状态。
 - **课题工具** — `software recipes` 看推荐配方目录，`software find` 核对工具的版本、依赖和适用构建，`env status --dir` 查项目环境。
 - **公共数据库** — `database find` 查库的版本、格式、存放位置和兼容记录，`database check` 核对项目数据库锁。
-- **NAS 与冷数据** — `status` 看 `nas.online`、`nas.note` 和 `disk.hint`，`cleanup scan` 查空间和环境副本，`cleanup cold`、`cleanup archived` 查候选和归档。
+- **NAS 与保留区** — `status` 看 `nas.online`、`nas.note` 和 `disk.hint`；`keep status` 看个人保留区（NAS 上有额度的长期存储）的用量和核对提示；`cleanup cold` 找冷数据，`cleanup scan` 查空间和环境副本。
 - **Colab** — Spark 上的 `colab-free usage` 查授权与额度，`spark-colab` 管理云上作业。适用条件和数据去向见 [Colab](references/colab.md)。
 
 ## 主动判断用什么
@@ -22,11 +22,12 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 1. 规划分析步骤时，先看任务目标、输入和所需产出，判断是否需要专门工具、公共库、较大算力或搬运数据。若只需查看本地小文件、解释现成结果，或已确认在本地完成，直接做本地任务。执行地有疑问时读 [执行地判定](references/execution-strategy.md)。
 2. 从分析步骤提出候选工具。工具名不确定时看 `rules` 或 `software recipes`，再用 `software find` 核对配方。分析需要参考库或配方绑定数据库时，用 `database find` 核对库的内容、版本和格式是否符合该步骤。
 3. 检查当前项目是否已有版本相符且可复用的环境。只有配方或构建时，说明还需验证依赖和构建条件。主动讲清做法、收益和代价，例如复用项目锁与库版本、构建等待、排队、搬运或外传。在已有授权范围内能继续的就执行。
+4. 替用户把原始数据传上 Spark 之后，提一句可以存一份进保留区、服务器上那份照用，只在这一刻提一次。项目刚建、分析进行中不提；整理存储等用户自己调 cleanup（[存储](references/storage.md#整理一次)）。
 
 ## 同意规则
 
 - 在已有访问权限内，可直接做与任务有关的轻量只读查询。提交或取消作业、开调试会话、构建环境、取数落盘、改用户脚本或服务器 Git 配置、数据外传（含 Colab）以及任何 `--yes` 操作，须有用户明确授权。可逐步确认，也可一次确认整份计划。用户要求逐步确认时，按用户的要求执行。
-- 计划逐步列清要做什么、写到哪里、改哪些文件（附 diff 或拟改内容）、提交哪些作业（资源和预计时长）。删除、覆盖、移动逐项列出确切路径。外传列出数据和接收方。涉及他人资源时，先核实处置权限。
+- 计划逐步列清要做什么、写到哪里、改哪些文件（附 diff 或拟改内容）、提交哪些作业（资源和预计时长）。删除、覆盖、移动逐项列出确切路径；只有这一份的（保留区、NAS 和公共库里都没有）标「只有这一份」，能重新生成的注明，不另外再问。外传列出数据和接收方。涉及他人资源时，先核实处置权限。
 - 依赖前一步的结果，如锁内容、环境指纹或作业号，写明「以前一步的实际结果为准」和允许的版本、路径或资源范围。结果在范围内时，可继续执行已获同意的后续步骤。
 - 获得授权后才加 `--yes` 等执行参数。按预演逐步执行并核对。失败、结果不符或需要计划外操作时，停下说明并重新确认。照常使用 `plan_sha256`、`--expect` 等预演凭据，并遵守 `.no-yes` 等测试闸。宿主客户端放行命令不等于用户同意此次资源与数据安排。
 
@@ -43,8 +44,8 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 | 用公共数据库 | 用 `rg` 或 `grep` 在 [数据库](references/database.md) 中定位 `database find`、`取进本地缓存`、`锁版本`、`自己装进` 或 `个人副本`，只读相关段落 |
 | 选执行地、推荐资源与提交 | [执行地](references/execution-strategy.md)；选定 Spark 后按上面的运行红线阅读提交文档 |
 | 反复调试或排查卡住的作业 | [交互调试](references/debug-session.md) 或 [冻结作业](references/frozen-jobs.md) |
-| 存储与腾空间、找回误删文件 | [存储和备份](references/storage.md)；核对引用或处理副本时读 [清理](references/cleanup.md) |
-| 冷数据归档、取回与放回 | [冷数据](references/cold-data.md) |
+| 整理存储、腾空间（含面板复制的 cleanup 提示词）、找回误删文件 | [存储和备份](references/storage.md) 的「整理一次」；环境和数据库副本读 [清理](references/cleanup.md) |
+| 存进、查看、取回、腾本地、删除保留区里的数据，挪旧归档 | [保留区](references/cold-storage.md) |
 | Colab 执行或授权 | [Colab](references/colab.md)；首次登录或授权过期读 [登录](references/colab-first-login.md) |
 | 服务器上的项目 | [代码状态、Git 初始化与推送](references/code-check.md) |
 | 工具箱迁移（过渡期） | [扫描、迁移或冻结](references/toolbox-migration.md)，含验证用作业与验证后释放资源 |
