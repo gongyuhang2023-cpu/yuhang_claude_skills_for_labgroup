@@ -5,3 +5,6 @@ __pycache__/
 
 # spark-advisor 个人坑日志：绝不进公开库（只在个人库/私有快照保留）
 spark-pitfalls.md
+
+# 各 skill 的个人习惯区（*.local.md）：只在使用者本机和私有快照，绝不进公开库
+*.local.md
