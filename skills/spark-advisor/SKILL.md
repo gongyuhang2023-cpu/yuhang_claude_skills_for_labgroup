@@ -1,9 +1,19 @@
 ---
 name: spark-advisor
-description: 为生信和数据分析选择执行资源。当分析依赖专用工具或共享数据库、本机算力受限、数据搬运成本较高，或需要管理 Spark 作业与 NAS 存储时，主动核对可用能力、说明取舍，并在已确认的范围内执行。也处理卡住的作业、交互调试、数据长期保存（个人保留区）与腾空间，并在合适时评估 Colab。
+description: 为生信和数据分析选择执行资源。当分析依赖专用工具或共享数据库、本机算力受限、数据搬运成本较高，或需要管理 Spark 作业与 NAS 存储时，主动核对可用能力、说明取舍，并在已确认的范围内执行。也处理卡住的作业、交互调试、数据长期保存（个人保留区）与腾空间，并在合适时评估 Colab 或 LRZ 集群（课题组付费，只放大任务），以及引导第一次开通和连接。
 ---
 
 # spark-advisor
+
+## 算力资源：什么情况用什么
+
+| 资源 | 什么情况用 | 怎么用 | 第一次连接 |
+|---|---|---|---|
+| Spark | 默认执行地。课题工具、公共数据库和 GPU 都在这里 | 本文下面各节 | [环境说明](references/env-notes.md) 的「首次配置与探测」 |
+| Colab | Spark 排不上、任务不大，并且数据可以传到 Google | [Colab](references/colab.md) | [Colab 首次登录](references/colab-first-login.md) |
+| LRZ | Spark 跑不动的大批量 CPU 任务，或工具只有 x86 构建。**花课题组经费**，先在 Spark 跑通、定好资源 | [LRZ](references/lrz.md) | [LRZ 开通与连接](references/lrz-first-login.md) |
+
+本机就能完成的小任务直接在本机做。拿不准放在哪里时，按 [执行地判定](references/execution-strategy.md) 比较。
 
 ## 先读本次会话的服务器规则
 
@@ -35,6 +45,7 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 
 - **GPU 和重活走 Slurm**。提交前必读 [资源推荐规则](references/recommend-rules.md) 和 [提交与监控流程](references/submit-flow.md)，核对统一内存预算、物理 GPU 占用和工具显存自限。`--mem` 管不住设备显存，机制见 [服务器说明](references/server-facts.md)。
 - 提交后用 `wait` 监控，按终态核对。作业卡住时先用 `wait` 或 `status` 判明是否冻结，再读 [冻结作业](references/frozen-jobs.md) 处置。冻结作业禁止直接 `scancel`。
+- **LRZ 登录节点只做管理**：不在上面跑计算，不在上面运行 AI 编程工具，查 Slurm 最快 10 分钟一次。违反可能被封号，细则见 [LRZ](references/lrz.md) 的「红线」。
 
 ## 按任务找文档
 
@@ -42,11 +53,12 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 |---|---|
 | 用工具或查看文件 | [软件配方与轻量查看](references/software.md)；要锁定、构建、取回或收编环境时读 [项目环境](references/project-envs.md) |
 | 用公共数据库 | 用 `rg` 或 `grep` 在 [数据库](references/database.md) 中定位 `database find`、`取进本地缓存`、`锁版本`、`自己装进` 或 `个人副本`，只读相关段落 |
-| 选执行地、推荐资源与提交 | [执行地](references/execution-strategy.md)；选定 Spark 后按上面的运行红线阅读提交文档 |
+| 选执行地、推荐资源与提交 | 先看上面的「算力资源」表，拿不准时读 [执行地](references/execution-strategy.md)；选定 Spark 后按上面的运行红线阅读提交文档 |
 | 反复调试或排查卡住的作业 | [交互调试](references/debug-session.md) 或 [冻结作业](references/frozen-jobs.md) |
 | 整理存储、腾空间（含面板复制的 cleanup 提示词）、找回误删文件 | [存储和备份](references/storage.md) 的「整理一次」；环境和数据库副本读 [清理](references/cleanup.md) |
 | 存进、查看、取回、腾本地、删除保留区里的数据，挪旧归档 | [保留区](references/cold-storage.md) |
 | Colab 执行或授权 | [Colab](references/colab.md)；首次登录或授权过期读 [登录](references/colab-first-login.md) |
+| LRZ 开通、连接或提交 | 开通、第一次连接或登录报错读 [LRZ 开通与连接](references/lrz-first-login.md)；提交和日常使用读 [LRZ](references/lrz.md) |
 | 服务器上的项目 | [代码状态、Git 初始化与推送](references/code-check.md) |
 | 工具箱迁移（过渡期） | [扫描、迁移或冻结](references/toolbox-migration.md)，含验证用作业与验证后释放资源 |
 
