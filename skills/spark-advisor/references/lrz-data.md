@@ -32,6 +32,7 @@
 
 - 登录后用 `dssusrinfo all` 查 HOME 用量、可访问的容器和配额，确认路径属于本项目，再设置 `WORK` 或 `PROJECT`。HOME 快照在 `/dss/dsshome1/.snapshots/`。
 - **组里的 DSS（2026-11-26 开通）**：HOME 里的两个链接 `~/dss`（指向本人的私人目录）和 `~/dss-shared`（共享目录，现有 `db/` 数据库、`containers/` 容器镜像、`bin/`、`shell-pack/`）。每人上限 1 TB，但整个容器只有 5 TB、全组共用（开通时已用约 3 TB），放大数据前先用 `dssusrinfo all` 看容器余量。DSS 没有备份，要长期保留的结果仍要回传 Spark 或 NAS。
+- 往 DSS 传完大数据、或删掉一批数据后，在 Spark 上运行 `spark-extlog lrz storage` 更新面板磁盘卡「LRZ 存储」标签（个人用量和全组容器占用；10 分钟内只放行一次）。
 - 新成员要请 master user（DSS 的 data curator）把账号加进容器授权，重新登录后才生效；授权前 `dssusrinfo all` 列不出容器，HOME 里也没有这两个链接，这不代表组里没有 DSS。
 - 项目确实没有容器时，由 master user 从 Linux Cluster Servicedesk 申请，核对 IDM 联系邮箱并按邮件完成激活。基础档最多 10 TB，无额外存储费用。扩容或备份由 master user 向 LRZ 确认。
 - SCRATCH 和 DSS 尽量用较大的文件，避免大量小文件。大量输出写 SCRATCH，避免填满 HOME 导致写入失败。SCRATCH 高水位通常在 80–90% 触发，阈值可能变动。

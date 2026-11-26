@@ -96,7 +96,7 @@ module load slurm_setup
       [--est-core-h <预计核时>] [--est-start <预计开始>] --name <作业名>
   ```
 
-- 之后查作业状态，一律用 `spark-extlog lrz check`。它一次查清自己所有作业的状态，并把已经结束的作业补进记录。不要另外用 `squeue`、`sacct` 反复查。
+- 之后查作业状态，一律用 `spark-extlog lrz check`。它一次查清自己所有作业的状态，并把已经结束的作业补进记录；本人同意记录时，还会顺带记一次 LRZ 存储用量（最多每 6 小时一次），显示在面板磁盘卡的「LRZ 存储」标签上。不要另外用 `squeue`、`sacct` 反复查。
 - 本人没同意记录时，这两个命令照样能用，只是不写记录。记录里的核时按 Slurm 的 `AllocCPUS`（逻辑 CPU）× 运行时长计，用来比较资源占用。
 - 退出码：
   - 0 正常；
