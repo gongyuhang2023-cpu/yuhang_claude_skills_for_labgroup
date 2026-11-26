@@ -42,11 +42,11 @@
       User <你的 LRZ 账号>
       ControlMaster auto
       ControlPath ~/.ssh/cm-%C
-      ControlPersist 8h
+      ControlPersist yes
       ServerAliveInterval 100
   ```
 
-- 本人在终端运行 `ssh -fN lrz`，依次输入密码和动态码，连接会转到后台。之后用 `ssh -O check lrz` 确认连接还在。
+- 本人在终端运行 `ssh -fN lrz`，依次输入密码和动态码，连接会转到后台。之后用 `ssh -O check lrz` 确认连接还在。`ControlPersist yes` 表示不设时限，连接会一直保留，直到手动运行 `ssh -O exit lrz`，或者机器重启、断网。
 
 ## 登录失败时
 
