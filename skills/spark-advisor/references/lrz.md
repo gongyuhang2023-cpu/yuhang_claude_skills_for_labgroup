@@ -1,76 +1,58 @@
-# LRZ：Spark 跑不动的大任务，放到 LRZ 集群（CoolMUC-4）
+# LRZ：在 CoolMUC-4 跑大任务
 
-> 什么时候读：用户点名 LRZ；或者任务已经在 Spark 上跑通，但需要的核数、内存或排队时长超出了 Spark 的能力；或者工具只有 x86 构建。还没开通、第一次在某台机器上连接，或者登录报错时，先读 [LRZ 开通与连接](lrz-first-login.md)。
->
-> 依据 LRZ 官方文档，2026-11-26 查阅；标「实测」的内容来自当天的登录检查。文档之间说法矛盾的地方逐条标出。之后实测结果与本文不符时，以实测为准，并更新本文。
+> 什么时候读：用户点名 LRZ，或要将 Spark 上跑通的大批量 CPU 任务交给 LRZ，或工具只有 x86 构建。开通、首次连接或登录报错，读 [LRZ 开通与连接](lrz-first-login.md)。准备软件、数据库、存储和搬运，读 [LRZ 环境与数据](lrz-data.md)。
 
-## 先判断合不合适
+## 什么时候用
 
-**LRZ 要花课题组经费，只放大任务。** 上 LRZ 之前：
+**只放大任务。速度优先，兼顾资源效率。** 核数和分区按能明显缩短总时长来定，给足工具能用上的核和内存。加核不再变快就停，小任务用共享分区。使用 LRZ 花课题组经费（按组里的安排）。
 
-1. 先在 Spark 上用有代表性的小样本跑通，按实测定好核数、内存和 `--time`，不多申请。
-2. 只有 Spark 跑不动的大批量任务才搬上去，例如核数、内存或排队时长超出 Spark 的能力。
-3. 工具没有 ARM64 构建、Spark 上装不了时，在 LRZ 的 serial_std 上用小样本试跑，代替第 1 步。试跑通过后再跑全量。
+1. 先在 Spark 上用代表性输入跑通，按实测定核数、内存和 `--time`。
+2. 比较全量所需的核数、内存、搬运和等待时间。选定 LRZ 后准备 x86_64 环境，先在 LRZ 小规模复核资源再跑全量。
+3. **例外**：工具没有 ARM64 构建、Spark 上装不了时，任务仍须是大任务。能在 Spark 上验证的步骤先验证，向用户说明哪一步跑不了、为什么；是否按例外直接在 LRZ 小规模试跑，由用户在确认首次试跑时决定。试跑和全量仍各自单独确认。
 
-另外：
-
-- CoolMUC-4 是 x86_64。Spark 上建的 conda 环境和容器不能直接用，要在 LRZ 上重建。两边 CPU 不同，速度和内存峰值会有出入，跑全量之前要在 LRZ 上做一次小规模测试（见下节）。
-- 没有 GPU，LRZ 的 GPU 集群预计 2027 年上线。GPU 任务留在 Spark。
-- 不能处理人类受试者的个人数据（DSGVO 第 9 条规定的特殊类别，如遗传数据、健康数据），除非另签协议。人源样本的测序数据要先去除宿主 reads 再上传（推断，置信度中）。
-- 集群经常很满（实测 2026-11-26 中午：cm4 的 100 个节点中 98 个在用，serial 分区全满），排队时间要算进去，不一定比 Spark 快。
+- **GPU**：CoolMUC-4 没有 GPU。LRZ 的 GPU 要项目另外开通，本组暂未开通，GPU 任务用 Spark。
+- **数据**：普通 LRZ HPC 环境不得存放或处理 DSGVO 第 9 条的特殊类别个人数据，例如遗传或健康数据。需要例外时，由项目负责人先通过机构与 LRZ 确认专门协议及所需的安全环境。
 
 ## 提交前：估算资源并确认
 
-1. 从 Spark 试跑作业的实际用量出发：运行时长、内存峰值、CPU 利用率。看 `sacct -j <作业号> --format=JobID,Elapsed,MaxRSS,TotalCPU,AllocCPUS`（按作业步骤汇总，不加 `-X`），或用 spark-advisor 的 `history`。
-2. 在 LRZ 上做小规模测试。测什么、测多少由 AI 按任务判断：只测一个样本往往不准，要挑能代表全量的输入（包括最大、最复杂的样本），规模要足以看出用量怎样随数据量和核数变化。
-3. 按测试结果推算全量需要的总时长、内存峰值和核数。用 LRZ 是为了快，否则不如在 Spark 上排队慢慢跑：核数和分区按能明显缩短总时长来定。但多线程工具要先确认加核确实能变快，CPU 利用率低就不要多要核。
-4. 按下面的分区表选：1–16 核用 serial_std，超过 24 小时用 serial_long；17–112 核、单节点用 cm4_tiny；内存超过单节点时用 teramem_inter。cm4_std 是 2–4 个整节点独占，最费钱，只有确实能跨节点并行的任务才用。
-5. 资源要留出余量：时间或内存不够，作业被杀，前面花的机时就白费了。内存按测到的峰值多留一些，`--time` 也比推算值多留一些，但不要直接填分区上限。
-6. 每次提交（小规模测试和全量各算一次）之前都要单独确认：明确告诉用户这个任务会提交到 LRZ、会花课题组经费，并列出分区、核数、内存、`--time` 和预计核时（核数 × 小时），用户同意再交。对整份计划的同意不能代替这一步。
+1. 从 Spark 小样本的实测用量出发：在 Spark 上用 `history` 或 `sacct -j <作业号> --format=JobID,Elapsed,MaxRSS,TotalCPU,AllocCPUS` 核对时长、内存峰值和 CPU 利用率，用作业步骤数据汇总，别加 `-X`。在 LRZ 上查自己的作业要加 `-M <集群>`。
+2. 在 LRZ 用代表性输入复核（这也是在 LRZ 分配资源，先按第 5 步确认），包括最大或最复杂的样本，测加核和批量并发是否缩短总时长。比较单任务耗时、固定批次的吞吐，以及含排队和搬运的预计完成时间；收益超出测量和排队的不确定性、值得多占资源时才加。LRZ 的任务打包指南把约 70% 的并行效率当经验参考，不是硬阈值。打包或并发跑时，按同一节点上同时运行的任务估算节点内存峰值，不能只取单个任务的 MaxRSS。按结果设全量资源，给内存峰值和时限留合理余量。先确认输入、工作目录和日志目录已存在且权限正确。
+3. 按下面的分区表选。少核批处理先用 `serial_std`，超过 24 小时且符合内存限额时选 `serial_long`。单节点高效并行选 `cm4_tiny`。单节点高内存作业超出普通分区限额时考虑 `teramem_inter`。只有能高效跨节点或用打包任务填满 2–4 个独占节点时，才考虑 `cm4_std`。
+4. 串行和并行阶段需要不同资源时，分开定资源、确认和提交。同一 Slurm 集群内可用 `--dependency=afterok:<作业号>` 串接已确认的作业。
+5. **每次提交前单独确认，小规模测试和全量各算一次；AI 发起的任何新 LRZ 资源分配（包括 `salloc` 交互作业）都要先确认。** 告诉用户任务会提交到 LRZ、会花课题组经费。列集群、分区、节点数、核数和程序线程数、内存（注明每节点或合计）、时限、预计核时及粗略等候时间。预计核时按预计分配的核数 × 小时数估算，作为资源效率的参照。整份计划的同意不能代替这一步。
 
 ## 每次使用：连接
 
-每次登录都要动态码，AI 没法自己登录。做法是本人登录一次，之后的命令复用这条已登录的连接。推荐把这条连接建在 Spark 上：数据库和数据都在 Spark 和 NAS 上，从 Spark 推最快。只有数据在自己电脑上时，才在本机连。连接复用怎么配置，见 [LRZ 开通与连接](lrz-first-login.md)。
+本人先在 Spark 登录 CoolMUC-4，AI 在 Spark 复用这条已登录的 SSH 连接发送管理命令。配置见 [LRZ 开通与连接](lrz-first-login.md)。
 
-- AI 执行前先运行 `ssh -O check <host>`，它只检查本机，不连网。检查不通就请本人重新登录，**不要反复试连**，每次失败的登录 LRZ 都有记录。
-- 命令一律加 `-o BatchMode=yes`，避免卡在密码提示上，例如 `ssh -o BatchMode=yes <host> 'squeue -M cm4 --me'`。
-- 密码和动态码只由本人在终端里输入，不要让用户把它们发给 AI。
-- 连接不设时限。下面几种情况会断，需要本人重新登录：本机重启或断网、LRZ 维护时重启登录节点、手动运行 `ssh -O exit <host>`。LRZ 服务器那边会不会断开空闲连接，文档没写。
-- LRZ 文档没有提到连接复用，既没允许也没禁止。
+- 先在 Spark 执行 `ssh -O check lrz` 检查复用连接。连接失效请本人重登。复用发命令时加 `-o BatchMode=yes`，避免非交互命令卡在密码提示。
+- 密码与第二因子只由本人操作。`ControlPersist yes` 是客户端设置，LRZ 文档未提 CoolMUC 的服务端会话寿命。维护、断网或本人退出都可能断开连接。
 
 ## 红线（违反可能被封号）
 
-- 登录节点只做管理操作：准备和提交作业、查看状态、编译（最多 2 个线程）、搬运数据。不要在上面跑长时间、占大量内存或并行的程序。
-- **登录节点上禁止运行 AI 编程工具和远程 IDE（VS Code、Jupyter）**，基本的编辑除外。需要 Jupyter、RStudio 或 Code Server 时用 OOD 门户（http://ood.hpc.lrz.de/）。AI 只在本地或 Spark 上运行，通过 ssh 发送管理命令。不要在 LRZ 上安装或启动 Claude Code、Codex 一类工具。
-- 查询 Slurm 最快每 10 分钟一次，例如 `watch -n 600 squeue -M cm4`。AI 等作业时的轮询也要守这条。
-- 不要提交 100 个以上、每个不到 2 分钟的作业（作业数组也算在内），合并成一个作业。
-- 作业邮件通知只能填真实有效的邮箱，填错会被撤销提交权限。
-- 不能用 cron 或 at，账号不能与他人共用。
+- 登录节点做管理、搬运与必要编译（最多 2 个线程）。计算和工作流放进 Slurm。AI 编程工具只在 Spark 或本地运行，AI 的 LRZ 管理命令从 Spark 发出。人工 IDE 用下文的 OOD。
+- LRZ 禁止高频轮询，官方以每 10 分钟查询为例。本组 Slurm 查询至少间隔 10 分钟，提交前估算也算；提交后查状态统一用 `spark-extlog lrz check`。
+- 超过 100 个且每个不足 2 分钟的作业（含数组）要打包。若开作业邮件通知，用有效的邮箱。账号不得共用，LRZ 上禁用 `cron` 和 `at`。
 
 ## Slurm
 
-| 分区 | `-M` | 节点/作业 | 核/作业 | 最长 | 每人运行（排队）上限 | 内存 | 节点 |
+| 分区 | `-M` | 节点/作业 | 物理核/作业 | 最长 | 每人运行（已提交）上限 | 内存 | 节点 |
 |---|---|---|---|---|---|---|---|
-| serial_std | serial | 1 | 1–16 | 24 h | 96（200） | 默认 6.2 GiB/逻辑核，最多 1000 GiB | 共享 |
-| serial_long | serial | 1 | 1–16 | 168 h | 96（200） | 每人合计 100 GB | 共享 |
-| cm4_tiny | cm4 | 1 | 17–112 | 24 h | 4（25） | 默认 2.1 GiB/逻辑核，最多 488 GiB | 共享 |
+| serial_std | serial | 1 | 1–16 | 24 h | 96（200） | 默认 6.2 GiB/逻辑 CPU，节点上限 1000 GiB | 共享 |
+| serial_long | serial | 1 | 1–16 | 168 h | 96（200） | 默认同 serial_std，每人运行作业合计 100 GB | 共享 |
+| cm4_tiny | cm4 | 1 | 17–112 | 24 h | 4（25） | 默认 2.1 GiB/逻辑 CPU，节点上限 488 GiB | 共享 |
 | cm4_std | cm4 | 2–4 | 112–448 | 24 h | 2（25） | 每节点 488 GiB | 独占 |
 | cm4_inter | inter | 1–4 | 1–112 | 8 h | 1（2） | 同 cm4_tiny | 共享 |
-| teramem_inter | inter | 1 | 1–96 | 240 h | 1（1） | 约 60 GiB/物理核（共 6 TB） | 共享 |
+| teramem_inter | inter | 1 | 1–96 | 240 h | 1（1） | 约 60 GiB/物理核，节点约 6 TB | 共享 |
 
-- 当前有哪些分区以 `sinfo --clusters=cm4,serial,inter -s` 的输出为准。2026-11-26 实测与上表一致，另外 inter 集群里还有一个 cm4_inter_ood 分区，供 OOD 门户使用。
-- 每条 Slurm 命令都要带 `-M`（`--clusters`）和 `-p`。漏掉 `-M` 时，命令默认作用于 inter 集群。
-- cm4_std 还要加 `--qos=cm4_std`，serial_long 还要加 `--qos=cm4_serial_long`。cm4_tiny 要不要加 qos，文档之间说法矛盾，以实测为准。
-- 不写核数时只分到 1 个核。`--mem` 设得过大，会被多分配用不上的核，所以按实测填。
-- 1–16 核的作业用 serial_std。LRZ 要求核数少的作业走 serial，cm4 分区留给并行效率高的作业。serial 上一个人所有运行中的作业合计最多 96 核。
-- 每人所有作业合计用的内存不能超过单个节点内存的 50%（2026-07-01 起）。需要更多内存时用 teramem_inter。
-- 交互作业：`salloc -M inter -p cm4_inter -n 20 -t 00:30:00`。不写 `-t` 的话默认只有 15 分钟。
-- 计算节点不能提交作业，所以 Nextflow 或 Snakemake 不能在作业里再派作业。做法是提交一个大作业，在作业内用 local 执行器跑流程。
-- 写明 `--time`，调度器可以用 backfill 让作业提前开始。
-- 硬件：cm4 节点是 Sapphire Rapids，112 核，可用内存 488 GiB；serial 节点是 Ice Lake，80 核，1 TB 内存；teramem 节点 96 核，6 TB 内存。节点本地有 1.7 TB SSD。
-- 查看优先级：`squeue -M cm4 --Format=jobid,priority,state,reason`；查看已完成作业：`sacct -M cm4 ...`。
+- 提交显式写集群 `-M` 和分区 `-p`，两项都省略时默认 `inter`。查询按需筛分区，`sacct` 用 `--partition` 或 `-r`；按 JobID 查询或取消时写明集群。当前分区以 `sinfo -M cm4,serial,inter -s` 为准。
+- **核数口径**：表中核数为物理核。`--cpus-per-task` 算的是逻辑 CPU（超线程），默认开超线程时 `-c 32` 只占 16 个物理核；要每个线程独占一个物理核，加 `--threads-per-core=1`，这时 `-c 16` 就是 16 个物理核（LRZ 串行指南按每人 96 核上限给的示例：前者可同时跑 6 个，后者 3 个）。程序线程数设成 `$SLURM_CPUS_PER_TASK`。计算密集的工具先按物理核试跑，开超线程是否更快要实测。确认单里分别写请求的 CPU 数、程序线程数和实际物理核数。`serial` 全集群每人运行作业合计最多 96 个物理核。
+- 共享节点按分配 CPU 给默认内存。按实测填 `--mem`（每节点），过大的内存请求可能连带分到更多核。表中节点内存上限和用户限额分开看。LRZ 政策另列每用户跨作业合计内存上限为单节点的 50%，完整适用分区文档未提（置信度中），接近上限时核对目标分区。
+- `cm4_std` 需 `--qos=cm4_std`，`serial_long` 需 `--qos=cm4_serial_long`。`cm4_tiny` 是否必填 QoS，分区表、并行指南和速查表说法不一（置信度中），可先用 `sbatch --test-only` 看目标分区接不接受这个请求。
+- 串行批处理指南写省略 CPU 资源时默认单核，交互指南写省略任务数时默认 2 tasks、时限默认 15 分钟。显式写资源。示例 `salloc -M inter -p cm4_inter -n 20 -t 00:30:00`。多节点 `cm4_inter` 的 CPU 限额细分口径文档未提（置信度中）。`teramem_inter` 也可提交批处理。
+- 写明 `--time`，合适的时限有助于调度器 backfill。
 
-作业脚本的开头按 LRZ 文档的写法（以 serial_std 为例，尖括号里的值按测试推算的结果填）：
+批处理脚本开头，以 `serial_std` 为例。先准备工作目录和输出路径，按试跑结果替换尖括号。
 
 ```bash
 #!/bin/bash
@@ -82,51 +64,66 @@
 #SBATCH --clusters=serial
 #SBATCH --partition=serial_std
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=<核数>
-#SBATCH --mem=<内存，如 48G>
+#SBATCH --cpus-per-task=<物理核数>
+#SBATCH --threads-per-core=1        # 每个物理核只跑 1 个线程；去掉则两个线程共用一个物理核
+#SBATCH --mem=<每节点内存，如 48G>
 #SBATCH --time=<HH:MM:SS>
 module load slurm_setup
-# 之后再加载需要的模块；模块不会自动加载
+# 显式加载作业所需的模块；工具线程数用 $SLURM_CPUS_PER_TASK
 ```
 
-## 存储
+## 作业打包与工作流
 
-| 位置 | 容量 | 备份 | 保留 |
-|---|---|---|---|
-| `$HOME` | 100 GB，不能扩 | 磁带备份，加上每晚快照（保留 7 天，在 `/dss/dsshome1/.snapshots/`） | 项目存续期间 |
-| `$SCRATCH_DSS` | 很大，大家共用 | 无 | **14 天滑动删除**；用量到 80–90% 时会提前删 |
-| DSS 项目存储 | 最多 10 TB 免费 | 无 | 要 master user 申请；用 `dssusrinfo all` 查看 |
-| `$TMPDIR_LOCAL` | 1.7 TB，节点本地 | 无 | 作业结束就清空 |
+- 大量短任务放进同一个 Slurm 作业。可用 `srun --exact … &` 配合 `wait`，或用 GNU Parallel 管并发。按每个任务的核数和内存控制同时运行数，每个样本留日志和退出状态，续跑补失败项。每个作业最多 `cm4` 40,000 steps、`serial` 1,000 steps。
+- **计算节点不能调用 `sbatch`。** Nextflow 在外层 Slurm 作业内运行，单节点用 `local`。多节点确有收益时按 LRZ 试运行指南评估 `flux`（推荐 Nextflow 晚于 24.10.0）。Snakemake 先验证单节点本地执行，LRZ 文档未提专用配置。
+- Nextflow/nf-core 固定验证过的 pipeline、profile 和镜像版本，设置每任务资源、`workDir` 和 `NXF_APPTAINER_CACHEDIR`（LRZ 经验报告里写成了 `NFX_`，是笔误）。为重跑保留工作状态，提前检查存储容量和回收期限。
 
-- 查 HOME 用量和自己能访问的 DSS 容器：`dssusrinfo all`。2026-11-26 实测，课题组项目当时没有 DSS 容器，长期保存的数据、环境和数据库只能放进 HOME，要用 DSS 需要由 master user 申请。
-- 大量输出不要写进 HOME，配额满了作业会写入失败、出错。
-- 在 SCRATCH 解压用 `tar -mx`，因为保留旧时间戳的文件会被优先删除。不要产生海量小文件。
+## 看排队
 
-## 软件
+- 看分区忙闲用 `sinfo -M cm4,serial,inter -s`。看本人排队原因和粗略开跑时间可用 `squeue -M cm4,serial,inter --me --start`，LRZ 只允许查看自己的作业。
+- 提交前可用组内预检 `sbatch --test-only <脚本>`，只估算、不提交。预计时间可能缺失或变动，汇报给用户，由用户判断去向。
+- 以上查询同样至少间隔 10 分钟。提交后按下节查状态。
 
-- 登录后会默认加载 spack 软件栈。2026-11-26 实测默认是 24.4.0，登录提示里 LRZ 公告 2026-12-01 会上线新栈 26.0.0。以 `module list` 为准。
-- conda：`module load miniforge3`。环境默认装进 HOME，很快会占满。Slurm 作业不会读 `~/.bashrc`：LRZ 建议把 conda 的初始化段放进单独的 `~/.conda_init`，`~/.bashrc` 和作业脚本里都只写 `source ~/.conda_init`。
-- 自己编译的软件用 `module load user_spack`。容器可以用 Apptainer 或 Charliecloud，但不能挂载 sif 或 squashfs 文件。
+## 提交后：记录与查看
 
-## 数据搬运与联网
+第一次用 LRZ 或 Colab 时，按 [LRZ 开通与连接](lrz-first-login.md#使用记录每人一次) 的「使用记录」问一次本人是否同意记录。
 
-- 大批量数据推荐用 Globus，也可以在登录节点上用 scp 或 rsync，这是允许的。
-- **LRZ 的出站 SSH（22 端口）被封**，不能从 LRZ 主动往外推或拉。传输一律从自己的机器或 Spark 发起。
-- 能上网的地方：登录节点、cm4_inter、serial_std、serial_long。cm4_tiny、cm4_std 和 teramem_inter 默认不能上网，数据库和容器要先在 serial 作业里下好。
+- `sbatch` 成功后，马上写一条提交记录，数值和用户确认过的单子一致：
 
-## 账号与数据期限
+  ```
+  spark-extlog lrz submit --job <作业号> --cluster <serial|cm4|inter> --partition <分区> \
+      --cpus <请求的 CPU 数> --mem <内存> --time <时限> [--nodes <节点数>] \
+      [--est-core-h <预计核时>] [--est-start <预计开始>] --name <作业名>
+  ```
 
-- 账号默认有效到项目结束。设了到期日的账号到期就会锁定，3 个月后删除。
-- HOME 随 LRZ 项目到期一起删除；HPC 文件系统上的数据在项目结束一年后删除（2018 年的规定）。要留的数据在到期前搬走。
-- 出口管制声明每 12 个月要重签，过期后登录不上。
+- 之后查作业状态，一律用 `spark-extlog lrz check`。它一次查清自己所有作业的状态，并把已经结束的作业补进记录。不要另外用 `squeue`、`sacct` 反复查。
+- 本人没同意记录时，这两个命令照样能用，只是不写记录。记录里的核时按 Slurm 的 `AllocCPUS`（逻辑 CPU）× 运行时长计，用来比较资源占用。
+- 退出码：
+  - 0 正常；
+  - 2 参数错；
+  - 3 LRZ 连接不在，请本人重新登录；
+  - 4 记录文件缺失，请管理员补建；
+  - 5 距上次查询不到 10 分钟，按提示的秒数再等。
+- 这些命令都在 Spark 上运行：AI 在 Spark 上时直接运行；在自己电脑上时用 `ssh <spark> '<命令>'`。
+
+## 失败排查
+
+- 先看提交报错、作业终态、退出码和日志。作业刚启动就失败时，先核对工作目录和 stdout/stderr 路径是否存在、有写权限。
+- `COMPLETED` 表示退出码为 0，再核对产物。`FAILED` 看非零退出与应用日志；`OUT_OF_MEMORY` 复核单节点内存与并发；`TIMEOUT` 复核时限或分批续跑；`NODE_FAIL` 核对是否节点故障。提交被拒先核对集群、分区、QoS 和限额。
+- 仍需 LRZ 协助时，向 Linux Cluster Servicedesk 提供集群、分区、JobID、发生时间、提交脚本及文字报错。重交前单独确认。
+
+## 交互式用 OOD
+
+人工用 RStudio、Jupyter 或 Code Server，走 [CoolMUC OOD](https://ood.hpc.lrz.de)。选 CPU、内存、运行时长和环境，及时保存结果。Code Server 的终端在计算节点上，不能提交或管理 Slurm 作业。
 
 ## 来源
 
-- 使用规则：https://doku.lrz.de/policies-on-the-linux-cluster-1307289651.html
-- 分区与限额：https://doku.lrz.de/job-processing-on-the-linux-cluster-10745970.html
-- 串行作业脚本：https://doku.lrz.de/running-serial-jobs-on-the-linux-cluster-11484000.html
-- 登录与联网：https://doku.lrz.de/access-and-login-to-the-linux-cluster-10745974.html
-- 硬件：https://doku.lrz.de/coolmuc-4-1082337877.html
-- 存储：https://doku.lrz.de/file-systems-and-io-on-linux-cluster-10745972.html
-- conda：https://doku.lrz.de/faq-conda-mamba-and-python-virtual-environment-on-lrz-hpc-clusters-41616204.html
-- 速查表（2026-10-01 版）：https://doku.lrz.de/coolmuc-cheat-sheet-1646760668.html
+依据 2026-11-26 的 LRZ 文档快照。
+
+- [Linux Cluster 分区和限额](https://doku.lrz.de/pages/viewpage.action?pageId=10745970)、[选资源](https://doku.lrz.de/pages/viewpage.action?pageId=11484181)、[运行政策](https://doku.lrz.de/pages/viewpage.action?pageId=1307289651)
+- [串行脚本](https://doku.lrz.de/pages/viewpage.action?pageId=11484000)、[并行指南](https://doku.lrz.de/pages/viewpage.action?pageId=11484078)、[交互作业](https://doku.lrz.de/pages/viewpage.action?pageId=1303879201)、[速查表](https://doku.lrz.de/pages/viewpage.action?pageId=1646760668)
+- [登录与联网](https://doku.lrz.de/pages/viewpage.action?pageId=10745974)、[首次开通与数据限制](https://doku.lrz.de/pages/viewpage.action?pageId=11484378)、[存储规定](https://doku.lrz.de/pages/viewpage.action?pageId=1668714889)
+- [Linux Cluster 扩建](https://doku.lrz.de/pages/viewpage.action?pageId=10745971)、[AI Systems 权限](https://doku.lrz.de/pages/viewpage.action?pageId=10746642)
+- [Job farming](https://doku.lrz.de/pages/viewpage.action?pageId=771233178)、[GNU Parallel](https://doku.lrz.de/pages/viewpage.action?pageId=10746427)、[Nextflow（试运行）](https://doku.lrz.de/pages/viewpage.action?pageId=788693597)、[nf-core 经验](https://doku.lrz.de/pages/viewpage.action?pageId=2238563906)、[Flux](https://doku.lrz.de/pages/viewpage.action?pageId=646524052)
+- [Slurm 命令示例](https://doku.lrz.de/pages/viewpage.action?pageId=1894257007)、[故障工单写法](https://doku.lrz.de/pages/viewpage.action?pageId=10745908)、[Linux Cluster Servicedesk](https://doku.lrz.de/pages/viewpage.action?pageId=10746034)
+- [CoolMUC OOD](https://doku.lrz.de/pages/viewpage.action?pageId=1646756765)、[Code Server 限制](https://doku.lrz.de/pages/viewpage.action?pageId=1643512554)

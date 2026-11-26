@@ -11,7 +11,9 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 |---|---|---|---|
 | Spark | 默认执行地。课题工具、公共数据库和 GPU 都在这里 | 本文下面各节 | [环境说明](references/env-notes.md) 的「首次配置与探测」 |
 | Colab | Spark 排不上、任务不大，并且数据可以传到 Google | [Colab](references/colab.md) | [Colab 首次登录](references/colab-first-login.md) |
-| LRZ | Spark 跑不动的大批量 CPU 任务，或工具只有 x86 构建。**花课题组经费**，先在 Spark 跑通、定好资源 | [LRZ](references/lrz.md) | [LRZ 开通与连接](references/lrz-first-login.md) |
+| LRZ（CoolMUC-4，CPU） | Spark 跑不动的大批量 CPU 任务。**花课题组经费**，先在 Spark 跑通、定好资源，速度优先、避免浪费（工具只有 x86 构建时的例外见 LRZ 作业） | [LRZ 作业](references/lrz.md)、[环境与数据](references/lrz-data.md) | [LRZ 开通与连接](references/lrz-first-login.md) |
+
+CoolMUC-4 没有 GPU。LRZ 的 GPU 要项目另外开通，本组暂未开通，GPU 任务用 Spark。
 
 本机就能完成的小任务直接在本机做。拿不准放在哪里时，按 [执行地判定](references/execution-strategy.md) 比较。
 
@@ -38,6 +40,7 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 
 - 在已有访问权限内，可直接做与任务有关的轻量只读查询。提交或取消作业、开调试会话、构建环境、取数落盘、改用户脚本或服务器 Git 配置、数据外传（含 Colab）以及任何 `--yes` 操作，须有用户明确授权。可逐步确认，也可一次确认整份计划。用户要求逐步确认时，按用户的要求执行。
 - **LRZ 要花课题组经费**：每次往 LRZ 提交作业（小规模测试和全量各算一次）之前都要单独确认，明确告诉用户这个任务会提交到 LRZ、会花课题组经费，并列出分区、核数、内存、时长和预计核时。对整份计划的同意不能代替这一步。
+- **外部算力使用记录**：第一次用 LRZ 或 Colab 时，按 [LRZ 开通与连接](references/lrz-first-login.md#使用记录每人一次) 的「使用记录」问一次本人是否同意记录到组里的面板，答过就不再问。
 - 计划逐步列清要做什么、写到哪里、改哪些文件（附 diff 或拟改内容）、提交哪些作业（资源和预计时长）。删除、覆盖、移动逐项列出确切路径；只有这一份的（保留区、NAS 和公共库里都没有）标「只有这一份」，能重新生成的注明，不另外再问。外传列出数据和接收方。涉及他人资源时，先核实处置权限。
 - 依赖前一步的结果，如锁内容、环境指纹或作业号，写明「以前一步的实际结果为准」和允许的版本、路径或资源范围。结果在范围内时，可继续执行已获同意的后续步骤。
 - 获得授权后才加 `--yes` 等执行参数。按预演逐步执行并核对。失败、结果不符或需要计划外操作时，停下说明并重新确认。照常使用 `plan_sha256`、`--expect` 等预演凭据，并遵守 `.no-yes` 等测试闸。宿主客户端放行命令不等于用户同意此次资源与数据安排。
@@ -59,7 +62,7 @@ description: 为生信和数据分析选择执行资源。当分析依赖专用�
 | 整理存储、腾空间（含面板复制的 cleanup 提示词）、找回误删文件 | [存储和备份](references/storage.md) 的「整理一次」；环境和数据库副本读 [清理](references/cleanup.md) |
 | 存进、查看、取回、腾本地、删除保留区里的数据，挪旧归档 | [保留区](references/cold-storage.md) |
 | Colab 执行或授权 | [Colab](references/colab.md)；首次登录或授权过期读 [登录](references/colab-first-login.md) |
-| LRZ 开通、连接或提交 | 开通、第一次连接或登录报错读 [LRZ 开通与连接](references/lrz-first-login.md)；提交和日常使用读 [LRZ](references/lrz.md) |
+| LRZ 开通、连接或提交 | 开通、首次连接或登录报错读 [LRZ 开通与连接](references/lrz-first-login.md)；提交读 [LRZ 作业](references/lrz.md)；环境、存储和搬运读 [LRZ 环境与数据](references/lrz-data.md) |
 | 服务器上的项目 | [代码状态、Git 初始化与推送](references/code-check.md) |
 | 工具箱迁移（过渡期） | [扫描、迁移或冻结](references/toolbox-migration.md)，含验证用作业与验证后释放资源 |
 

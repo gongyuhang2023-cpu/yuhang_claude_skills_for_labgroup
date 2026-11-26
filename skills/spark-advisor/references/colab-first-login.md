@@ -52,6 +52,8 @@ spark-colab login --finish
 
 结束后可以关掉隧道。
 
+**6. 使用记录（只问一次）：** 按 [LRZ 开通与连接](lrz-first-login.md#使用记录每人一次) 的「使用记录」问本人是否同意。已经答过（`spark-extlog consent status` 不是 `unset`）就跳过。
+
 ## 余额不是 0
 
 `colab-free` 只放行余额为 0 的账号，保证只花免费额度。Colab 额度只发给 Google AI 付费套餐的主账号，家庭组里被拉进来的成员余额是 0。所以如果余额非零，这个账号多半是家庭组管理员，或者自己买过额度。
