@@ -8,7 +8,16 @@
 
 - 先用 `module list`、`module avail stack` 查软件栈。固定已验证的 stack、模块、工具及镜像版本，批处理脚本显式加载 `slurm_setup` 和所需模块。在目标分区验证。
 - 小环境和配置可放 `$HOME`。大环境、镜像和缓存先查配额，优先用本项目 DSS；没有 DSS 时在 `$SCRATCH` 放可重建的工作副本，配方和版本记录留在 Spark。
-- Conda 用 `module load miniforge3`，也可用 Mamba。把 Conda 初始化段放 `~/.conda_init`，在 `~/.bashrc`（或 `~/.profile`）和作业脚本里按需写 `source ~/.conda_init`，再激活所需环境。Slurm 作业不会自动读取 `~/.bashrc`。
+- **和 Spark 保持同一套版本，用 pixi（2026-11-26 实测通过）。** Spark 的项目环境由 pixi 管理，锁文件只锁了 `linux-aarch64`。**不要**在 Spark 项目的 `pixi.toml` 里直接加 `linux-64`：锁文件一变，Spark 上的环境指纹也会变，可能触发重建。做法：
+  1. 在项目里另放一份 LRZ 用的配置，例如 `lrz/pixi.toml`，写 `platforms = ["linux-64"]`。依赖照抄 Spark 那份，版本钉成 Spark `pixi.lock` 里实际解析出的版本（`==x.y.z`）。只用公共频道；Spark 的本地频道 `file:///opt/bio/channel` 在 LRZ 上不存在，依赖它的包要换来源。
+  2. 在 Spark 上运行 `pixi lock` 求解（x86 平台也能在 Spark 上解，不用安装），把 `lrz/pixi.toml` 和 `lrz/pixi.lock` 提交进项目仓库。
+  3. 用 Spark 上已登录的连接 `scp` 到 LRZ 的项目目录：有 DSS 权限就放 DSS，否则放 SCRATCH。
+  4. pixi 装在本人 LRZ 的 HOME 里（约 77 MB），版本和 Spark 一致（用 `pixi --version` 查）：`curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=v<版本> PIXI_NO_PATH_UPDATE=1 bash`。
+  5. 安装：`PIXI_CACHE_DIR=<DSS 或 SCRATCH 下的缓存目录> ~/.pixi/bin/pixi install --frozen`。`--frozen` 严格按锁文件安装、不重新求解。缓存不要放 HOME。
+  6. 作业里用 `~/.pixi/bin/pixi run --manifest-path <项目>/lrz/pixi.toml <命令>` 运行。
+
+  实测：seqkit 2.14.0 加 samtools 1.25 的锁文件在 Spark 上求解，在 LRZ 登录节点 5.5 秒装好，环境 22 MB、缓存 141 MB，两个工具都能运行（LRZ 的 glibc 为 2.38）。环境放在 SCRATCH 上，14 天后可能被删；删了就用同一份锁文件重装，有 DSS 权限后改放 DSS。只下载解压的安装属于登录节点上允许的准备工作，LRZ 的 conda 文档也是在登录节点上建环境；不要在登录节点上编译大软件（最多 2 个线程）。
+- 不需要和 Spark 对齐版本的环境，也可以用 LRZ 自带的 Conda：`module load miniforge3`，也可用 Mamba。把 Conda 初始化段放 `~/.conda_init`，在 `~/.bashrc`（或 `~/.profile`）和作业脚本里按需写 `source ~/.conda_init`，再激活所需环境。Slurm 作业不会自动读取 `~/.bashrc`。
 - 自建软件和模块可用 `module load user_spack`。Apptainer/Singularity 和 Charliecloud 不能直接挂载 SIF 或 squashfs；需要时提前解包成 sandbox，放在作业可访问的共享存储，避免每个任务重新解包。
 - 批量 R 用 `Rscript`。固定 `r` 模块及 R 包环境，系统依赖先查环境模块。人工 RStudio 走 [CoolMUC OOD](lrz.md#交互式用-ood)。
 
